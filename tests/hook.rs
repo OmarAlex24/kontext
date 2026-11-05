@@ -320,13 +320,13 @@ fn resume_only_gets_what_changed() {
 
     // What supersedes something else says that the old one no longer applies.
     let f = p.append(
-        "{\"kind\":\"fact\",\"title\":\"The rate is 1.5 %\",\"actor\":{\"type\":\"agent\",\"name\":\"distill\"},\"fields\":{\"origin\":\"usuario\",\"fingerprints\":[]}}\n",
+        "{\"kind\":\"fact\",\"title\":\"The rate is 1.5 %\",\"actor\":{\"type\":\"agent\",\"name\":\"distill\"},\"fields\":{\"origin\":\"user\",\"fingerprints\":[]}}\n",
     );
     let f = f[0].split_whitespace().next().unwrap().to_string();
     let delta = context(&hook(&p, &pm, &start("resume", "s-a")));
     assert!(delta.contains("The rate is 1.5 %"), "{delta}");
     p.append(&format!(
-        "{{\"kind\":\"fact\",\"title\":\"The rate is 1.8 %\",\"actor\":{{\"type\":\"agent\",\"name\":\"distill\"}},\"fields\":{{\"origin\":\"usuario\",\"fingerprints\":[],\"supersedes\":[\"{f}\"]}}}}\n"
+        "{{\"kind\":\"fact\",\"title\":\"The rate is 1.8 %\",\"actor\":{{\"type\":\"agent\",\"name\":\"distill\"}},\"fields\":{{\"origin\":\"user\",\"fingerprints\":[],\"supersedes\":[\"{f}\"]}}}}\n"
     ));
     let delta = context(&hook(&p, &pm, &start("resume", "s-a")));
     assert!(delta.contains("The rate is 1.8 %"), "{delta}");

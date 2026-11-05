@@ -851,10 +851,10 @@ fn text_restore(path: &Path, id: &str, sig: &str) -> String {
         .collect()
 }
 
-/// What was signed when the command was called `ctx` (namespace `ctx`) still
-/// verifies; a signature from another namespace does not.
+/// A signature made with another namespace does not verify, even with the
+/// right key.
 #[test]
-fn signatures_from_the_old_ctx_namespace_still_verify() {
+fn signatures_from_another_namespace_do_not_verify() {
     let net = Net::new();
     let keys = net.dir.path().join("keys");
     fs::create_dir_all(&keys).unwrap();
@@ -873,33 +873,26 @@ fn signatures_from_the_old_ctx_namespace_still_verify() {
     assert!(out.contains("Signatures: 1 valid, 0 invalid"), "{out}");
     let hash = ledger_line(&a, &d1)["hash"].as_str().unwrap().to_string();
     let path = a.home.join("ledger/omar@mac.jsonl");
-    for (namespace, valid) in [("ctx", true), ("otro", false)] {
-        let mut child = Command::new("ssh-keygen")
-            .args(["-q", "-Y", "sign", "-n", namespace, "-f"])
-            .arg(&omar_key)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(hash.as_bytes())
-            .unwrap();
-        let signed = child.wait_with_output().unwrap();
-        assert!(signed.status.success(), "{signed:?}");
-        let sig = String::from_utf8(signed.stdout).unwrap();
-        fs::write(&path, text_restore(&path, &d1, sig.trim())).unwrap();
-        let out = a.run(&[], &["verify"]);
-        let text = String::from_utf8_lossy(&out.stdout);
-        let want = if valid {
-            "Signatures: 1 valid, 0 invalid"
-        } else {
-            "Signatures: 0 valid, 1 invalid"
-        };
-        assert!(text.contains(want), "{namespace}: {text}");
-    }
+    let mut child = Command::new("ssh-keygen")
+        .args(["-q", "-Y", "sign", "-n", "other", "-f"])
+        .arg(&omar_key)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(hash.as_bytes())
+        .unwrap();
+    let signed = child.wait_with_output().unwrap();
+    assert!(signed.status.success(), "{signed:?}");
+    let sig = String::from_utf8(signed.stdout).unwrap();
+    fs::write(&path, text_restore(&path, &d1, sig.trim())).unwrap();
+    let out = a.run(&[], &["verify"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Signatures: 0 valid, 1 invalid"), "{text}");
 }

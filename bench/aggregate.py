@@ -15,9 +15,9 @@ cache breaks per run (`cache` in run.json, or from the sessions saved in
 `transcripts/claude/` if the run is older): requests, breaks and tokens that
 were written again.
 
-Results made before the rename are read too: `ctx-*` variants, the `ctx` key,
-the `memoria-larga` and `cobranza` scenarios, `cruce` classes, `sesión` cost
-basis and `dia-N.jsonl` and Spanish transcript kinds are normalized on read.
+Older results with Spanish names are read too: the `memoria-larga` and
+`cobranza` scenarios, `cruce` classes, `sesión` cost basis and `dia-N.jsonl`
+and Spanish transcript kinds are normalized on read.
 """
 
 import json
@@ -31,8 +31,7 @@ from benchlib import cache, runner  # noqa: E402
 
 CLASS_ORDER = {"A": 0, "B": 1, "C": 2, "cross": 3, "?": 4}
 
-# Names the results made before the rename use, mapped to the current ones.
-OLD_VARIANTS = {"ctx-pointer": "kontext-pointer", "ctx-inject": "kontext-inject"}
+# Spanish names that older results use, mapped to the current ones.
 OLD_SCENARIOS = {"cobranza": "billing", "memoria-larga": "long-memory"}
 OLD_CLASSES = {"cruce": "cross"}
 OLD_COST_BASIS = {"sesión": "session"}
@@ -69,11 +68,8 @@ def group_recall(r, group, key):
 
 
 def normalize_run(r):
-    """Gives a run.json made before the rename the names it has now (in place)."""
-    r["variant"] = OLD_VARIANTS.get(r.get("variant"), r.get("variant"))
+    """Gives an older run.json with Spanish names the names it has now (in place)."""
     r["scenario"] = OLD_SCENARIOS.get(r.get("scenario"), r.get("scenario"))
-    if "ctx" in r and "kontext" not in r:
-        r["kontext"] = r.pop("ctx")
     r["cost_basis"] = OLD_COST_BASIS.get(r.get("cost_basis"), r.get("cost_basis"))
     probes = r.get("probes") or {}
     for item in probes.get("items") or []:

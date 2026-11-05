@@ -563,15 +563,8 @@ pub fn answer(store: &mut Store, actor: &Actor, id: &str, text: &str) -> Result<
     })
 }
 
-/// The tag of the status paragraph in the report. Entries written before the
-/// rename carry `estado`; [`is_status_tag`] accepts both.
+/// The tag of the status paragraph in the report.
 pub const STATUS_TAG: &str = "status";
-
-/// Whether a tag marks the status paragraph (the English tag, or the Spanish
-/// one that old entries carry).
-pub fn is_status_tag(tag: &str) -> bool {
-    matches!(tag, "status" | "estado")
-}
 
 /// `kontext log`: a journal entry. With `status`, it is the "where we are"
 /// paragraph that `kontext report` takes (tag `status`): the last one counts.

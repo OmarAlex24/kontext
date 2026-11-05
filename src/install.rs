@@ -117,11 +117,10 @@ pub fn hook_binary<'a>(cmd: &'a str, event: &str) -> Option<&'a str> {
     Path::new(bin).file_name()?.to_str()
 }
 
-/// `true` if the command is `kontext hook <event>` from any `kontext`, or the
-/// one from `ctx` (the command's old name): `install` changes its path instead
-/// of adding another one.
+/// `true` if the command is `kontext hook <event>` from any `kontext`:
+/// `install` changes its path instead of adding another one.
 fn is_kontext_hook(cmd: &str, event: &str) -> bool {
-    hook_binary(cmd, event).is_some_and(|n| n == "kontext" || n == "ctx")
+    hook_binary(cmd, event).is_some_and(|n| n == "kontext")
 }
 
 /// `true` if the command is the start hook of some `kontext`.
@@ -568,10 +567,6 @@ mod tests {
         assert_eq!(shell_quote("/tmp/a b/kontext"), "'/tmp/a b/kontext'");
         assert!(is_kontext_session_start(
             "'/tmp/a b/kontext' hook session-start"
-        ));
-        // The hook from the old command is ours too: its path is changed.
-        assert!(is_kontext_session_start(
-            "/home/x/.cargo/bin/ctx hook session-start"
         ));
         assert!(!is_kontext_session_start("/bin/other hook session-start"));
     }

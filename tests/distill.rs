@@ -535,7 +535,7 @@ fn updates_replace_what_the_user_said_and_views_show_only_the_current() {
     let new = all.last().unwrap();
     assert_eq!(new["fields"]["supersedes"], json!([fact.clone()]));
 
-    // Las vistas (también la del pm) muestran solo lo vigente, como del usuario.
+    // The views (the pm one too) show only what is in force, as said by the user.
     let out = p.ctx_ok(&["resume", "--as", "pm", "--peek"]);
     let said = &out[out.find("## What the user said (2)").expect(&out)..];
     let said = &said[..said[3..].find("\n## ").map(|i| i + 3).unwrap_or(said.len())];

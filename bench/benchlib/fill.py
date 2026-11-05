@@ -213,7 +213,8 @@ def generate(docs, chars, seed, distractors=()):
     (whole sentences) planted in the blocks in the middle."""
     if docs not in DOCS:
         raise ValueError(f"unknown filler {docs!r} (there are {', '.join(DOCS)})")
-    # The seed prefix stays `ctx-bench:`: it is only a label for the seed, never shown.
+    # `ctx-bench:` is only a label for the seed, never shown: changing it would
+    # change every generated scenario.
     rng = random.Random(f"ctx-bench:{docs}:{seed}")
     blocks = []
     size = 0

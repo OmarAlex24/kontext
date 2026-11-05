@@ -508,15 +508,9 @@ const FACTS_N: usize = 15;
 const LIST_CAP: usize = 5;
 const NEW_N: usize = 30;
 
-/// Is this `origin` value one the distill uses for what the user said? Entries
-/// written before the rename carry the Spanish `usuario`; both are read.
-pub fn is_user_origin(origin: &str) -> bool {
-    matches!(origin, "user" | "usuario")
-}
-
 /// Did the user say it? (`fields.origin = "user"`, the distill marks it.)
 pub(crate) fn from_user(e: &Entry) -> bool {
-    field(e, "origin").is_some_and(is_user_origin)
+    field(e, "origin") == Some("user")
 }
 
 /// Is it a rule or instruction the user gave (not a decision that needs an
@@ -1490,16 +1484,6 @@ mod tests {
             writer: None,
             distill: false,
         }
-    }
-
-    #[test]
-    fn origin_accepts_the_old_spanish_value() {
-        assert!(is_user_origin("user"));
-        assert!(is_user_origin("usuario"));
-        assert!(!is_user_origin("agent"));
-        let mut old = e("F-000009", 9, "fact", "Old fact");
-        old.fields.insert("origin".into(), json!("usuario"));
-        assert!(from_user(&old));
     }
 
     #[test]

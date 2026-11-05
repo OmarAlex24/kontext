@@ -578,14 +578,6 @@ pub enum Cmd {
     },
     /// Entry point for the Claude Code hooks (reads the hook's JSON from stdin; always exits with 0)
     Hook { event: String },
-    /// Moves an installation of the old `ctx` command to kontext: ~/.config/ctx, the .ctx/ folder of each
-    /// kontext-home, the .ctx.toml, the hook, the permissions in .claude/settings.json and the skills of the
-    /// current repo. Prints first which paths it touches
-    Migrate {
-        /// Shows what it would do, without writing anything
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Prepares the current repo: .kontext.toml, start hook, skill, agent files and the project's [[repos]]
     Install {
         /// Shows what would change, without writing anything
@@ -631,15 +623,6 @@ pub enum DebugCmd {
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The hook never writes to stderr, and `migrate` already says what's left.
-    let quiet = matches!(cli.cmd, Cmd::Hook { .. } | Cmd::Migrate { .. });
-    let env = crate::migrate::legacy_env();
-    if !quiet && !env.is_empty() {
-        eprintln!(
-            "kontext: warning: {} in the environment does not count: they are now KONTEXT_* (`kontext migrate --dry-run` says what else changed)",
-            env.join(", ")
-        );
-    }
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
@@ -652,13 +635,6 @@ pub fn main() -> ExitCode {
                 return ExitCode::from(3);
             }
             eprintln!("kontext: {e:#}");
-            if !quiet && let Ok(dir) = std::env::current_dir() {
-                let mut left = crate::migrate::Leftovers::find(&dir);
-                left.env.clear();
-                if let Some(h) = left.hint() {
-                    eprintln!("kontext: {h}");
-                }
-            }
             ExitCode::FAILURE
         }
     }
@@ -1115,27 +1091,6 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             ..
         } => install_skills(dry_run, global),
         Cmd::Install { dry_run, force, .. } => cx.install(dry_run, force, cx.role.unwrap_or("pm")),
-        Cmd::Migrate { dry_run } => {
-            let dir = std::env::current_dir()?;
-            let plan = crate::migrate::plan(&crate::migrate::Options {
-                dir: &dir,
-                exe: exe_quoted()?,
-            })?;
-            print!("{}", plan.text());
-            if plan.is_noop() {
-                return Ok(ExitCode::SUCCESS);
-            }
-            if dry_run {
-                println!("\nDry run (--dry-run): nothing was written.");
-                return Ok(ExitCode::SUCCESS);
-            }
-            plan.apply()?;
-            println!(
-                "\nDone. Next, run `kontext verify`, and `kontext install` in each code repo \
-                 (it adds the Bash(kontext:*) permission and whatever else is missing)."
-            );
-            Ok(ExitCode::SUCCESS)
-        }
         Cmd::Init { name, home, remote } => init(&name, home, remote.as_deref()),
         Cmd::Clone { url, home, name } => {
             let c = crate::sync::clone(&url, home, name.as_deref())?;
