@@ -419,38 +419,9 @@ def session_delta(cum, prev):
     return {k: max(0, cum[k] - (prev or {}).get(k, 0)) for k in cum}
 
 
-def recost(run_dir):
-    """Recomputes a run's `usage_by` from its transcripts, the envelopes of the
-    distill and the judge of each question (for runs made before counting per
-    session, which added up running totals)."""
-    run_dir = Path(run_dir)
-    r = json.loads((run_dir / "run.json").read_text())
-    agent = zero_usage()
-    for t in sorted(day_transcripts(run_dir)):
-        cums = {}
-        for line in t.read_text().splitlines():
-            rec = json.loads(line)
-            sid = rec.get("session_id")
-            cum = usage_of(rec.get("envelope") or {})
-            add_usage(agent, session_delta(cum, cums.get(sid)))
-            cums[sid] = cum
-    judge = zero_usage()
-    for p in r["probes"]["items"]:
-        add_usage(judge, p.get("usage") or {})
-    dist, _, _ = distill_usage(run_dir)
-    usage = {"agent": agent, "judge": judge, "distill": dist}
-    total = zero_usage()
-    for u in usage.values():
-        add_usage(total, u)
-    r.update(usage=total, usage_by=usage, tokens=tokens_of(total), cost_basis="session")
-    return r
-
-
 def day_transcripts(run_dir):
-    """The per-day transcripts of a run: `day-N.jsonl`, or `dia-N.jsonl` from
-    older runs with Spanish names."""
-    run_dir = Path(run_dir) / "transcripts"
-    return sorted([*run_dir.glob("day-*.jsonl"), *run_dir.glob("dia-*.jsonl")])
+    """The per-day transcripts of a run: `transcripts/day-N.jsonl`."""
+    return sorted((Path(run_dir) / "transcripts").glob("day-*.jsonl"))
 
 
 def call_agent(cfg, prompt, session, repo, env):
@@ -814,7 +785,6 @@ def run_one(sc, variant, seed, run_dir, cfg):
             "claude_sessions": sessions,
             "usage": totals,
             "usage_by": usage,
-            "cost_basis": "session",
             "tokens": tokens_of(totals),
             "acceptance": acc,
             "agent_errors": errors,

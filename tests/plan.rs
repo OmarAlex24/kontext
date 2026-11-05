@@ -15,7 +15,7 @@ fn epic(p: &Project, g: &str, name: &str, after: &[&str]) -> String {
 }
 
 fn plan_json(p: &Project) -> (Option<i32>, serde_json::Value) {
-    let out = p.ctx(&["--json", "plan"]);
+    let out = p.kontext(&["--json", "plan"]);
     (
         out.status.code(),
         serde_json::from_slice(&out.stdout).unwrap(),
@@ -44,7 +44,7 @@ fn after_stores_ids_and_plan_orders_waves() {
     let (p, g, payments) = with_epic();
     let catalog = epic(&p, &g, "catalog", &["payments"]);
     // By id, by epic:<name>, and one that doesn't exist yet (notice).
-    let out = p.ctx_ok(&[
+    let out = p.kontext_ok(&[
         "epic",
         "add",
         "Notices",
@@ -58,7 +58,7 @@ fn after_stores_ids_and_plan_orders_waves() {
         "epic:payments",
     ]);
     assert!(!out.contains("Warning"), "{out}");
-    let out = p.ctx_ok(&[
+    let out = p.kontext_ok(&[
         "epic",
         "add",
         "Integration",
@@ -106,7 +106,7 @@ fn after_stores_ids_and_plan_orders_waves() {
     );
     assert_eq!(v["waves"][0]["parallel"], true);
     assert_eq!(v["waves"][2]["parallel"], false);
-    let text = p.ctx_ok(&["plan"]);
+    let text = p.kontext_ok(&["plan"]);
     assert!(
         text.starts_with("# Wave plan: 5 open epics, 0 closed"),
         "{text}"
@@ -134,7 +134,7 @@ fn after_stores_ids_and_plan_orders_waves() {
             "true",
         ],
     );
-    p.ctx_ok(&["done", &t, "--run", "true"]);
+    p.kontext_ok(&["done", &t, "--run", "true"]);
     let (_, v) = plan_json(&p);
     assert_eq!(
         waves(&v),
@@ -149,7 +149,7 @@ fn cycles_are_refused_on_write_and_reported_if_they_arrive() {
     // a waits for b (which doesn't exist yet); b after c, and c after a: a cycle.
     epic(&p, &g, "a", &["b"]);
     epic(&p, &g, "c", &["a"]);
-    let out = p.ctx(&[
+    let out = p.kontext(&[
         "epic", "add", "B", "--goal", &g, "--name", "b", "--after", "c",
     ]);
     assert_eq!(out.status.code(), Some(2));
@@ -165,7 +165,7 @@ fn cycles_are_refused_on_write_and_reported_if_they_arrive() {
     assert_eq!(code, Some(1));
     assert_eq!(v["cycles"], serde_json::json!([["a", "b", "c"]]));
     assert_eq!(waves(&v), vec![vec!["payments"]]);
-    let out = p.ctx(&["plan"]);
+    let out = p.kontext(&["plan"]);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("- Cycle: a → b → c → a"), "{text}");
     assert!(text.contains("waits for b, which has no wave"), "{text}");
@@ -175,12 +175,12 @@ fn cycles_are_refused_on_write_and_reported_if_they_arrive() {
 #[test]
 fn after_refuses_itself_and_unknown_ids() {
     let (p, g, _) = with_epic();
-    let out = p.ctx(&[
+    let out = p.kontext(&[
         "epic", "add", "Yo", "--goal", &g, "--name", "yo", "--after", "yo",
     ]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot come after itself"));
-    let out = p.ctx(&[
+    let out = p.kontext(&[
         "epic", "add", "X", "--goal", &g, "--name", "x", "--after", "E-abc123",
     ]);
     assert_eq!(out.status.code(), Some(2));
@@ -190,6 +190,6 @@ fn after_refuses_itself_and_unknown_ids() {
 #[test]
 fn plan_without_epics() {
     let p = Project::new();
-    let out = p.ctx_ok(&["plan"]);
+    let out = p.kontext_ok(&["plan"]);
     assert!(out.contains("There are no epics"), "{out}");
 }

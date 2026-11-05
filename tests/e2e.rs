@@ -13,7 +13,7 @@ fn charter_to_standup() {
         ("KONTEXT_ROLE", "implementer"),
     ];
 
-    let out = p.ctx_env_ok(
+    let out = p.kontext_env_ok(
         &owner,
         &[
             "charter",
@@ -29,8 +29,8 @@ fn charter_to_standup() {
     assert!(a.starts_with("A-"), "{out}");
     assert!(out.contains(&format!("kontext sign {a}")), "{out}");
     let g = p.id_of(&owner, &["goal", "add", "Recurring charge"]);
-    p.ctx_env_ok(&owner, &["sign", &a]);
-    p.ctx_env_ok(&owner, &["sign", &g]);
+    p.kontext_env_ok(&owner, &["sign", &a]);
+    p.kontext_env_ok(&owner, &["sign", &g]);
     let d = p.id_of(
         &owner,
         &[
@@ -43,7 +43,7 @@ fn charter_to_standup() {
         ],
     );
     // The agent cannot decide, but it can propose.
-    let out = p.ctx_env(&agent, &["decide", "Use Conekta"]);
+    let out = p.kontext_env(&agent, &["decide", "Use Conekta"]);
     assert_eq!(out.status.code(), Some(2));
     let pr = p.id_of(
         &agent,
@@ -56,12 +56,12 @@ fn charter_to_standup() {
             &d,
         ],
     );
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &agent,
         &["log", "Tried both SDKs", "--next", "wait for a decision"],
     );
 
-    let out = p.ctx_env_ok(&owner, &["standup"]);
+    let out = p.kontext_env_ok(&owner, &["standup"]);
     assert!(
         out.contains(&format!("- {d} Use Stripe (human:omar)")),
         "{out}"
@@ -79,7 +79,7 @@ fn charter_to_standup() {
 
     // Second time: nothing new in the ledger, but the proposal still waits
     // and is still "new": seeing it does not count, only acting does.
-    let out = p.ctx_env_ok(&owner, &["standup"]);
+    let out = p.kontext_env_ok(&owner, &["standup"]);
     assert!(out.contains("Nothing new since your last time"), "{out}");
     assert!(
         out.contains(&format!("- {pr} proposal (new) from agent:coder")),
@@ -96,7 +96,7 @@ fn charter_to_standup() {
     assert!(out.contains("Summary: 0 new decisions, 0 closed items, 1 item waiting for your answer, 1 alert (0 new entries)."), "{out}");
 
     // The pm sees everything in its resume; the chain is still fine.
-    let out = p.ctx_ok(&["resume", "--as", "pm"]);
+    let out = p.kontext_ok(&["resume", "--as", "pm"]);
     assert!(
         out.contains(&format!("{a} [signed] Charge by card")),
         "{out}"
@@ -111,5 +111,5 @@ fn charter_to_standup() {
         )),
         "{out}"
     );
-    assert!(p.ctx_ok(&["verify"]).starts_with("OK: 7 entries"));
+    assert!(p.kontext_ok(&["verify"]).starts_with("OK: 7 entries"));
 }

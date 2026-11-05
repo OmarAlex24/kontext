@@ -24,7 +24,7 @@ impl Project {
         fs::create_dir_all(&config).unwrap();
         fs::write(config.join("projects.toml"), "writer = \"omar@test\"\n").unwrap();
         let p = Project { dir, home, config };
-        let out = p.ctx_ok(&["init", "demo", "--home", p.home.to_str().unwrap()]);
+        let out = p.kontext_ok(&["init", "demo", "--home", p.home.to_str().unwrap()]);
         assert!(out.contains("Project demo created"), "{out}");
         // The owner comes from `git config user.name`; in the tests it is omar.
         let toml = p.home.join("project.toml");
@@ -46,7 +46,7 @@ impl Project {
     }
 
     /// Runs `kontext` with other environment variables.
-    pub fn ctx_env(&self, envs: &[(&str, &str)], args: &[&str]) -> Output {
+    pub fn kontext_env(&self, envs: &[(&str, &str)], args: &[&str]) -> Output {
         let mut c = self.cmd(args);
         for (k, v) in envs {
             c.env(k, v);
@@ -54,9 +54,9 @@ impl Project {
         c.output().unwrap()
     }
 
-    /// Like [`Project::ctx_env`], requiring success. Returns stdout.
-    pub fn ctx_env_ok(&self, envs: &[(&str, &str)], args: &[&str]) -> String {
-        let out = self.ctx_env(envs, args);
+    /// Like [`Project::kontext_env`], requiring success. Returns stdout.
+    pub fn kontext_env_ok(&self, envs: &[(&str, &str)], args: &[&str]) -> String {
+        let out = self.kontext_env(envs, args);
         assert!(
             out.status.success(),
             "kontext {args:?} failed: {}\n{}",
@@ -68,14 +68,14 @@ impl Project {
 
     /// Runs as an agent.
     pub fn agent_ok(&self, name: &str, args: &[&str]) -> String {
-        self.ctx_env_ok(&[("KONTEXT_ACTOR", &format!("agent:{name}"))], args)
+        self.kontext_env_ok(&[("KONTEXT_ACTOR", &format!("agent:{name}"))], args)
     }
 
     /// The `id` of what a command wrote (`--json`).
     pub fn id_of(&self, envs: &[(&str, &str)], args: &[&str]) -> String {
         let mut a = vec!["--json"];
         a.extend_from_slice(args);
-        let out = self.ctx_env_ok(envs, &a);
+        let out = self.kontext_env_ok(envs, &a);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         v["id"].as_str().unwrap().to_string()
     }
@@ -109,13 +109,13 @@ impl Project {
         self.cmd_with(&self.config, args)
     }
 
-    pub fn ctx(&self, args: &[&str]) -> Output {
+    pub fn kontext(&self, args: &[&str]) -> Output {
         self.cmd(args).output().unwrap()
     }
 
     /// Runs `kontext` and requires success. Returns stdout.
-    pub fn ctx_ok(&self, args: &[&str]) -> String {
-        let out = self.ctx(args);
+    pub fn kontext_ok(&self, args: &[&str]) -> String {
+        let out = self.kontext(args);
         assert!(
             out.status.success(),
             "kontext {args:?} failed: {}\n{}",
@@ -187,9 +187,9 @@ pub fn soon(ms: i64) -> i64 {
 pub fn with_epic() -> (Project, String, String) {
     let p = Project::new();
     let a = p.id_of(&[], &["charter", "--objective", "Charge by card"]);
-    p.ctx_ok(&["sign", &a]);
+    p.kontext_ok(&["sign", &a]);
     let g = p.id_of(&[], &["goal", "add", "Recurring charge"]);
-    p.ctx_ok(&["sign", &g]);
+    p.kontext_ok(&["sign", &g]);
     let e = p.id_of(
         &[],
         &[
@@ -214,20 +214,20 @@ pub fn implementer(name: &str) -> Vec<(&'static str, String)> {
 }
 
 impl Project {
-    /// Like [`Project::ctx_env`], with variables that are `String`.
+    /// Like [`Project::kontext_env`], with variables that are `String`.
     pub fn run_as(&self, envs: &[(&'static str, String)], args: &[&str]) -> Output {
         let e: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        self.ctx_env(&e, args)
+        self.kontext_env(&e, args)
     }
 
     pub fn run_as_ok(&self, envs: &[(&'static str, String)], args: &[&str]) -> String {
         let e: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        self.ctx_env_ok(&e, args)
+        self.kontext_env_ok(&e, args)
     }
 
     /// The JSON of `kontext debug state`.
     pub fn state(&self) -> serde_json::Value {
-        serde_json::from_str(&self.ctx_ok(&["debug", "state"])).unwrap()
+        serde_json::from_str(&self.kontext_ok(&["debug", "state"])).unwrap()
     }
 
     /// `kontext --json next --epic <e> --claim` as `name`: (task, mark).
@@ -301,7 +301,7 @@ impl Project {
     }
 
     /// Runs `kontext` in another folder.
-    pub fn ctx_in(&self, dir: &Path, envs: &[(&str, &str)], args: &[&str]) -> Output {
+    pub fn kontext_in(&self, dir: &Path, envs: &[(&str, &str)], args: &[&str]) -> Output {
         let mut c = self.cmd(args);
         c.current_dir(dir);
         for (k, v) in envs {
@@ -310,8 +310,8 @@ impl Project {
         c.output().unwrap()
     }
 
-    pub fn ctx_in_ok(&self, dir: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
-        let out = self.ctx_in(dir, envs, args);
+    pub fn kontext_in_ok(&self, dir: &Path, envs: &[(&str, &str)], args: &[&str]) -> String {
+        let out = self.kontext_in(dir, envs, args);
         assert!(
             out.status.success(),
             "kontext {args:?} in {} failed: {}\n{}",

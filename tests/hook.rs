@@ -59,7 +59,7 @@ const INPUT: &str = r#"{"session_id":"s-1","source":"startup","hook_event_name":
 fn inject_pointer_and_off() {
     let p = Project::new();
     let a = p.id_of(&[], &["charter", "--objective", "Charge"]);
-    p.ctx_ok(&["sign", &a]);
+    p.kontext_ok(&["sign", &a]);
     p.agent_ok("coder", &["ask", "Price?", "--to", "pm"]);
 
     // pm = "inject" in the project.toml from `kontext init`.
@@ -219,7 +219,7 @@ fn never_fails() {
     assert_eq!(out.status.code(), Some(0));
     // A ledger with a broken line: the hook warns in the context.
     let p = Project::new();
-    p.ctx_ok(&["log", "one"]);
+    p.kontext_ok(&["log", "one"]);
     let mut f = fs::OpenOptions::new()
         .append(true)
         .open(p.ledger("omar@test"))
@@ -232,7 +232,7 @@ fn never_fails() {
 #[test]
 fn coordinator_with_epic_gets_its_brief() {
     let (p, _g, e) = common::with_epic();
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[
             ("KONTEXT_ACTOR", "agent:epic:payments"),
             ("KONTEXT_ROLE", "coordinator"),
@@ -279,7 +279,7 @@ fn maybe_context(out: &Output) -> Option<String> {
 fn resume_only_gets_what_changed() {
     let p = Project::new();
     let a = p.id_of(&[], &["charter", "--objective", "Charge"]);
-    p.ctx_ok(&["sign", &a]);
+    p.kontext_ok(&["sign", &a]);
     let pm = [("KONTEXT_ROLE", "pm")];
 
     // startup: full.
@@ -424,7 +424,7 @@ fn coordinator_resume_only_sees_its_epic() {
         maybe_context(&hook(&p, &env, &start("resume", "s-c"))),
         None
     );
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[
             ("KONTEXT_ACTOR", "agent:epic:payments"),
             ("KONTEXT_ROLE", "coordinator"),
@@ -496,7 +496,7 @@ fn the_inbox_line_does_not_send_the_agent_to_the_inbox() {
         t.replace("owners = [\"omar\"]", "owners = [\"owner\"]"),
     )
     .unwrap();
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "human:owner")],
         &["charter", "--objective", "Charge"],
     );
@@ -512,7 +512,7 @@ fn the_inbox_line_does_not_send_the_agent_to_the_inbox() {
     );
     // And if the agent runs it, it sees the same pending items the hook names
     // (it used to look at the `git config` human's inbox and came out empty).
-    let out = p.ctx_env_ok(
+    let out = p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")],
         &["inbox", "count"],
     );

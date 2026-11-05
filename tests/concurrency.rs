@@ -56,7 +56,7 @@ fn thirty_two_processes_same_writer() {
     eprintln!("{PROCS} processes x {EACH} entries, same writer: {elapsed} ms");
 
     check_file(&p, "omar@test", PROCS * EACH);
-    let out = p.ctx_ok(&["verify"]);
+    let out = p.kontext_ok(&["verify"]);
     assert_eq!(out.trim(), "OK: 1600 entries in 1 writer");
     let idx = kontext::index::Index::open(&p.home).unwrap();
     assert_eq!(idx.count().unwrap(), 1600);
@@ -106,7 +106,7 @@ fn two_writers_at_once() {
     let ids_a = check_file(&p, "omar@mac", PROCS * EACH);
     let ids_b = check_file(&p, "ana@laptop", PROCS * EACH);
     assert!(ids_a.is_disjoint(&ids_b));
-    let out = p.ctx_ok(&["verify"]);
+    let out = p.kontext_ok(&["verify"]);
     assert_eq!(out.trim(), "OK: 1600 entries in 2 writers");
     let idx = kontext::index::Index::open(&p.home).unwrap();
     assert_eq!(idx.count().unwrap(), 1600);
@@ -151,9 +151,10 @@ fn only_one_claim_wins() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1]["kind"], "claim");
     assert_eq!(entries[1]["refs"][0], task.as_str());
-    let state: serde_json::Value = serde_json::from_str(&p.ctx_ok(&["debug", "state"])).unwrap();
+    let state: serde_json::Value =
+        serde_json::from_str(&p.kontext_ok(&["debug", "state"])).unwrap();
     assert_eq!(state["status"][&task], "claimed");
-    p.ctx_ok(&["verify"]);
+    p.kontext_ok(&["verify"]);
 }
 
 #[test]
@@ -223,5 +224,5 @@ fn sixteen_agents_next_claim_five_tasks() {
     for t in &tasks {
         assert_eq!(state["tasks"][t], "claimed");
     }
-    p.ctx_ok(&["verify"]);
+    p.kontext_ok(&["verify"]);
 }

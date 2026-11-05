@@ -22,7 +22,7 @@ fn fingerprint_staleness_and_views() {
     commit_file(&repo, "src/other.ts", "export const x = 1;\n");
 
     // The fingerprint: repo, relative path, HEAD and blob.
-    let out = p.ctx_in_ok(
+    let out = p.kontext_in_ok(
         &repo.join("src"),
         &SCOUT,
         &[
@@ -48,7 +48,7 @@ fn fingerprint_staleness_and_views() {
 
     // A file that is not in a commit: it is rejected.
     std::fs::write(repo.join("src/new.ts"), "x").unwrap();
-    let out = p.ctx_in(&repo, &SCOUT, &["fact", "Other", "--path", "src/new.ts"]);
+    let out = p.kontext_in(&repo, &SCOUT, &["fact", "Other", "--path", "src/new.ts"]);
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("Make a commit or drop --path"), "{err}");
@@ -56,15 +56,15 @@ fn fingerprint_staleness_and_views() {
 
     // A commit that does not touch the file: it is still fresh.
     commit_file(&repo, "src/other.ts", "export const x = 2;\n");
-    let show = p.ctx_in_ok(&repo, &[], &["show", &id]);
+    let show = p.kontext_in_ok(&repo, &[], &["show", &id]);
     assert!(show.contains("fresh: its paths have not changed"), "{show}");
-    let next = p.ctx_in_ok(&repo, &[], &["brief", "payments", "--peek"]);
+    let next = p.kontext_in_ok(&repo, &[], &["brief", "payments", "--peek"]);
     assert!(next.contains(&format!("- {id} The VAT rate")), "{next}");
 
     // A commit that changes the file: it is stale, with the short HEAD.
     let head = commit_file(&repo, "src/invoice.ts", "export const iva = 0.08;\n");
     let short = &head[..7];
-    let show = p.ctx_in_ok(&repo, &[], &["show", &id]);
+    let show = p.kontext_in_ok(&repo, &[], &["show", &id]);
     assert!(
         show.contains(&format!(
             "stale: src/invoice.ts (billing) changed at {short}"
@@ -74,24 +74,24 @@ fn fingerprint_staleness_and_views() {
     let alert = format!(
         "{id} went stale: src/invoice.ts changed at {short}; the next scout will read it again"
     );
-    let standup = p.ctx_in_ok(&repo, &[], &["standup", "--peek"]);
+    let standup = p.kontext_in_ok(&repo, &[], &["standup", "--peek"]);
     assert!(standup.contains(&alert), "{standup}");
-    let brief = p.ctx_in_ok(&repo, &[], &["brief", "payments", "--peek"]);
+    let brief = p.kontext_in_ok(&repo, &[], &["brief", "payments", "--peek"]);
     assert!(brief.contains(&alert), "{brief}");
     assert!(brief.contains("## Epic facts (0)"), "{brief}");
     // The pm sees no facts, not even the stale ones.
-    let pm = p.ctx_in_ok(&repo, &[], &["resume", "--as", "pm", "--peek"]);
+    let pm = p.kontext_in_ok(&repo, &[], &["resume", "--as", "pm", "--peek"]);
     assert!(!pm.contains(&id), "{pm}");
     // The brief json gives the freshness of each fact it lists: none.
-    let bj = json(&p.ctx_in_ok(&repo, &[], &["--json", "brief", "payments", "--peek"]));
+    let bj = json(&p.kontext_in_ok(&repo, &[], &["--json", "brief", "payments", "--peek"]));
     assert_eq!(bj["facts"].as_array().unwrap().len(), 0);
 
     // It was stored in the index: the second read does not need git for that HEAD.
-    let cached = p.ctx_in_ok(&repo, &[], &["show", &id]);
+    let cached = p.kontext_in_ok(&repo, &[], &["show", &id]);
     assert!(cached.contains("stale"), "{cached}");
 
     // The scout reads again and writes the same fact: it replaces the stale one.
-    let out = p.ctx_in_ok(
+    let out = p.kontext_in_ok(
         &repo,
         &SCOUT,
         &[
@@ -107,7 +107,7 @@ fn fingerprint_staleness_and_views() {
         out.contains(&format!("it replaces {id}, which had expired")),
         "{out}"
     );
-    let brief = p.ctx_in_ok(&repo, &[], &["brief", "payments", "--peek"]);
+    let brief = p.kontext_in_ok(&repo, &[], &["brief", "payments", "--peek"]);
     assert!(!brief.contains("stale"), "{brief}");
     assert!(brief.contains("## Epic facts (1)"), "{brief}");
 }
@@ -117,7 +117,7 @@ fn unchecked_when_repo_is_not_here() {
     let (p, _g, _e) = with_epic();
     let repo = p.code_repo("billing");
     commit_file(&repo, "src/invoice.ts", "a\n");
-    let id = json(&p.ctx_in_ok(
+    let id = json(&p.kontext_in_ok(
         &repo,
         &SCOUT,
         &[
@@ -137,13 +137,13 @@ fn unchecked_when_repo_is_not_here() {
 
     // From outside the repo and without saying where it is: unchecked, not stale.
     let outside = p.dir.path();
-    let brief = p.ctx_in_ok(outside, &[], &["brief", "payments", "--peek"]);
+    let brief = p.kontext_in_ok(outside, &[], &["brief", "payments", "--peek"]);
     assert!(
         brief.contains(&format!("- {id} [unchecked] Invoice")),
         "{brief}"
     );
     assert!(!brief.contains("stale"), "{brief}");
-    let show = p.ctx_in_ok(outside, &[], &["show", &id]);
+    let show = p.kontext_in_ok(outside, &[], &["show", &id]);
     assert!(
         show.contains("unchecked: billing is not on this machine"),
         "{show}"
@@ -151,7 +151,7 @@ fn unchecked_when_repo_is_not_here() {
 
     // With the path in projects.toml it is checked from any folder.
     p.map_repo("billing", &repo);
-    let brief = p.ctx_in_ok(outside, &[], &["brief", "payments", "--peek"]);
+    let brief = p.kontext_in_ok(outside, &[], &["brief", "payments", "--peek"]);
     assert!(
         brief.contains(&format!("{id} went stale: src/invoice.ts")),
         "{brief}"
@@ -163,7 +163,7 @@ fn duplicates_become_confirmations() {
     let p = common::Project::new();
     let repo = p.code_repo("billing");
     commit_file(&repo, "src/invoice.ts", "a\n");
-    let first = json(&p.ctx_in_ok(
+    let first = json(&p.kontext_in_ok(
         &repo,
         &SCOUT,
         &[
@@ -177,7 +177,7 @@ fn duplicates_become_confirmations() {
     let id = first["id"].as_str().unwrap();
 
     // Same normalized title (case, accents and punctuation aside).
-    let out = p.ctx_in_ok(
+    let out = p.kontext_in_ok(
         &repo,
         &[("KONTEXT_ACTOR", "agent:scout-2")],
         &["fact", "  stripe charges in mxn. "],
@@ -188,7 +188,7 @@ fn duplicates_become_confirmations() {
     );
 
     // Same fingerprints with another title.
-    let out = p.ctx_in_ok(
+    let out = p.kontext_in_ok(
         &repo,
         &SCOUT,
         &[
@@ -214,11 +214,11 @@ fn duplicates_become_confirmations() {
         .map(String::as_str)
         .collect();
     assert_eq!(facts, vec![id]);
-    let show = p.ctx_in_ok(&repo, &[], &["show", id]);
+    let show = p.kontext_in_ok(&repo, &[], &["show", id]);
     assert_eq!(show.matches("confirmation by agent:").count(), 2, "{show}");
 
     // No fingerprints and another title: a new fact.
-    let out = p.ctx_in_ok(&repo, &SCOUT, &["fact", "Another different fact"]);
+    let out = p.kontext_in_ok(&repo, &SCOUT, &["fact", "Another different fact"]);
     assert!(out.contains("saved the fact"), "{out}");
 }
 
@@ -236,7 +236,7 @@ fn repo_flag_and_remote_matching() {
     p.add_repo_toml("[[repos]]\nname = \"billing\"\nremote = \"github.com/acme/billing\"\n");
 
     // The remote decides the name even if the folder has a different name.
-    let f = json(&p.ctx_in_ok(
+    let f = json(&p.kontext_in_ok(
         &repo,
         &SCOUT,
         &["--json", "fact", "a exists", "--path", "lib/a.rs"],
@@ -245,7 +245,7 @@ fn repo_flag_and_remote_matching() {
 
     // --repo from another folder: the path is relative to the repo.
     p.map_repo("billing", &repo);
-    let f = json(&p.ctx_in_ok(
+    let f = json(&p.kontext_in_ok(
         p.dir.path(),
         &SCOUT,
         &[
@@ -253,7 +253,7 @@ fn repo_flag_and_remote_matching() {
         ],
     ));
     assert_eq!(f["kind"], "confirm");
-    let out = p.ctx_in(
+    let out = p.kontext_in(
         p.dir.path(),
         &SCOUT,
         &["fact", "c", "--repo", "nothing", "--path", "x"],

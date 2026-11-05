@@ -66,27 +66,6 @@ class Pieces(unittest.TestCase):
         self.assertLess(m, n)
         self.assertIn(d[0], small)
 
-    def test_cost_is_per_session_not_summed(self):
-        # With --resume, Claude Code gives the session's running total in each envelope.
-        def env(cost, cr):
-            return {"total_cost_usd": cost, "usage": {"cache_read_input_tokens": 1},
-                    "modelUsage": {"m": {"cacheReadInputTokens": cr, "outputTokens": 10}}}
-
-        tmp = Path(tempfile.mkdtemp())
-        try:
-            (tmp / "transcripts").mkdir()
-            recs = [("a", env(0.1, 100)), ("a", env(0.25, 300)), ("b", env(0.05, 50))]
-            (tmp / "transcripts" / "day-1.jsonl").write_text(
-                "".join(json.dumps({"session_id": sid, "envelope": e}) + "\n" for sid, e in recs)
-            )
-            (tmp / "run.json").write_text(json.dumps({"probes": {"items": [{"usage": {"cost_usd": 0.01}}]}}))
-            r = runner.recost(tmp)
-            self.assertAlmostEqual(r["usage_by"]["agent"]["cost_usd"], 0.30)
-            self.assertEqual(r["usage_by"]["agent"]["cache_read_input_tokens"], 350)
-            self.assertAlmostEqual(r["usage"]["cost_usd"], 0.31)
-        finally:
-            shutil.rmtree(tmp)
-
     def test_cost_by_kind_takes_each_call(self):
         def env(cost, cr, turns):
             return {"total_cost_usd": cost, "num_turns": turns,

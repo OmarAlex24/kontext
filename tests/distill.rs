@@ -129,7 +129,7 @@ fn distill_writes_proposals_incrementally_and_dedupes() {
     let ts = t.to_str().unwrap();
 
     // Prueba en seco: no llama al modelo ni mueve el offset.
-    let out = p.ctx_ok(&["distill", "--transcript", ts, "--dry-run"]);
+    let out = p.kontext_ok(&["distill", "--transcript", ts, "--dry-run"]);
     assert!(out.contains("dry run"), "{out}");
     assert!(
         out.contains("secrets removed: kv_secret=1, sk_key=1"),
@@ -137,7 +137,7 @@ fn distill_writes_proposals_incrementally_and_dedupes() {
     );
     assert!(calls(&fake).is_empty());
 
-    let out = p.ctx_ok(&["distill", "--transcript", ts]);
+    let out = p.kontext_ok(&["distill", "--transcript", ts]);
     assert!(out.contains("chunk 1/1: +4 entries"), "{out}");
     let prompts = calls(&fake);
     assert_eq!(prompts.len(), 1);
@@ -177,11 +177,11 @@ fn distill_writes_proposals_incrementally_and_dedupes() {
     assert_eq!(written[2]["fields"]["fingerprints"], json!([]));
     assert_eq!(written[3]["fields"]["next"], "webhooks");
     // Never decisions; the proposals come out as unreviewed.
-    let standup = p.ctx_ok(&["standup", "--peek"]);
+    let standup = p.kontext_ok(&["standup", "--peek"]);
     assert!(standup.contains("[not reviewed] proposal"), "{standup}");
 
     // Second run with nothing new: does not call the model or add anything.
-    let out = p.ctx_ok(&["distill", "--transcript", ts]);
+    let out = p.kontext_ok(&["distill", "--transcript", ts]);
     assert!(out.contains("chunks: 0"), "{out}");
     assert_eq!(calls(&fake).len(), 1);
     assert_eq!(entries_by(&p, "distill").len(), 4);
@@ -208,7 +208,7 @@ fn distill_writes_proposals_incrementally_and_dedupes() {
             "questions": [], "facts": [], "journal": []
         }),
     );
-    let out = p.ctx_ok(&["distill", "--transcript", ts]);
+    let out = p.kontext_ok(&["distill", "--transcript", ts]);
     assert!(out.contains("chunk 1/1: +1 entries"), "{out}");
     let prompts = calls(&fake);
     assert_eq!(prompts.len(), 2);
@@ -252,7 +252,7 @@ fn claude_envelope_and_disabled() {
     });
     reply(&fake, &envelope);
     let t = transcript(&p);
-    let out = p.ctx_ok(&["--json", "distill", "--transcript", t.to_str().unwrap()]);
+    let out = p.kontext_ok(&["--json", "distill", "--transcript", t.to_str().unwrap()]);
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["added"].as_array().unwrap().len(), 1, "{v}");
     let facts = entries_by(&p, "distill");
@@ -271,7 +271,7 @@ fn claude_envelope_and_disabled() {
         line("user", "Otra cosa distinta", "2026-11-03T12:00:00.000Z"),
     )
     .unwrap();
-    let out = p.ctx_ok(&["distill", "--transcript", t.to_str().unwrap()]);
+    let out = p.kontext_ok(&["distill", "--transcript", t.to_str().unwrap()]);
     assert!(out.contains("The distill is off"), "{out}");
     assert_eq!(calls(&fake).len(), 1);
 }
@@ -298,7 +298,7 @@ fn timeout_kills_the_process_group() {
     fs::write(fake.join("sleep"), "").unwrap();
     let t = transcript(&p);
     let start = Instant::now();
-    let out = p.ctx(&["distill", "--transcript", t.to_str().unwrap()]);
+    let out = p.kontext(&["distill", "--transcript", t.to_str().unwrap()]);
     let took = start.elapsed();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
@@ -412,7 +412,7 @@ fn wait_blocks_until_the_background_distill_ends() {
         .to_string();
 
     // Without pending distills, it returns right away.
-    let out = p.ctx_ok(&["--json", "distill", "--wait"]);
+    let out = p.kontext_ok(&["--json", "distill", "--wait"]);
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["stale"], 0);
 
@@ -421,7 +421,7 @@ fn wait_blocks_until_the_background_distill_ends() {
     let marks: Vec<_> = fs::read_dir(&pending).unwrap().collect();
     assert_eq!(marks.len(), 1, "one marker per distill started");
     let start = Instant::now();
-    let out = p.ctx_ok(&["distill", "--wait", "--timeout", "30s"]);
+    let out = p.kontext_ok(&["distill", "--wait", "--timeout", "30s"]);
     assert!(out.contains("No distill is pending anymore"), "{out}");
     assert!(start.elapsed() >= Duration::from_millis(1000), "no esperó");
     // When it returns, the distill has already written everything and deleted its marker.
@@ -434,7 +434,7 @@ fn wait_blocks_until_the_background_distill_ends() {
     s.push_str(&line("user", "otra cosa", "2026-11-03T10:02:00.000Z"));
     fs::write(&t, s).unwrap();
     hook(&p, "session-end", &[], &input);
-    p.ctx_ok(&["distill", "--wait", "--timeout", "30s"]);
+    p.kontext_ok(&["distill", "--wait", "--timeout", "30s"]);
     assert_eq!(fs::read_dir(&pending).unwrap().count(), 0);
     let dlog = fs::read_to_string(p.home.join(".kontext/distill.log")).unwrap();
     assert!(dlog.contains("the distill failed"), "{dlog}");
@@ -445,11 +445,11 @@ fn wait_blocks_until_the_background_distill_ends() {
         format!("pid={}\n", std::process::id()),
     )
     .unwrap();
-    let out = p.ctx(&["distill", "--wait", "--timeout", "1s"]);
+    let out = p.kontext(&["distill", "--wait", "--timeout", "1s"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("1 distills are still running"), "{err}");
-    let out = p.ctx(&[
+    let out = p.kontext(&[
         "distill",
         "--timeout",
         "1s",
@@ -492,7 +492,7 @@ fn updates_replace_what_the_user_said_and_views_show_only_the_current() {
             "journal": [{"summary": "Se leyó el reporte", "next": ""}]
         }),
     );
-    let out = p.ctx_ok(&["distill", "--transcript", t.to_str().unwrap()]);
+    let out = p.kontext_ok(&["distill", "--transcript", t.to_str().unwrap()]);
     assert!(out.contains("chunk 1/1: +2 entries"), "{out}");
     // The pasted document is not sent whole.
     let prompt = calls(&fake).pop().unwrap();
@@ -525,7 +525,7 @@ fn updates_replace_what_the_user_said_and_views_show_only_the_current() {
         &fake,
         &json!({"facts": [{"text": "El corte es el día 14", "source": "user", "when": "2026-11-04 09:00", "supersedes": fact}]}),
     );
-    p.ctx_ok(&["distill", "--transcript", t.to_str().unwrap()]);
+    p.kontext_ok(&["distill", "--transcript", t.to_str().unwrap()]);
     let prompt = calls(&fake).pop().unwrap();
     assert!(
         prompt.contains(&format!("- {fact} [fact] El corte es el día 12")),
@@ -536,7 +536,7 @@ fn updates_replace_what_the_user_said_and_views_show_only_the_current() {
     assert_eq!(new["fields"]["supersedes"], json!([fact.clone()]));
 
     // The views (the pm one too) show only what is in force, as said by the user.
-    let out = p.ctx_ok(&["resume", "--as", "pm", "--peek"]);
+    let out = p.kontext_ok(&["resume", "--as", "pm", "--peek"]);
     let said = &out[out.find("## What the user said (2)").expect(&out)..];
     let said = &said[..said[3..].find("\n## ").map(|i| i + 3).unwrap_or(said.len())];
     assert!(
@@ -555,7 +555,7 @@ fn updates_replace_what_the_user_said_and_views_show_only_the_current() {
     assert!(out.contains("## Pending proposals (0)"), "{out}");
     // The history stays: recall and show say what replaced it.
     let none = p.dir.path().join("sin-transcripciones/*.jsonl");
-    let rec = p.ctx_env_ok(
+    let rec = p.kontext_env_ok(
         &[("KONTEXT_TRANSCRIPTS_GLOB", none.to_str().unwrap())],
         &["recall", "corte"],
     );
@@ -563,10 +563,10 @@ fn updates_replace_what_the_user_said_and_views_show_only_the_current() {
         rec.contains(&format!("{fact} fact, superseded by")) && rec.contains("(no longer applies)"),
         "{rec}"
     );
-    let show = p.ctx_ok(&["show", &fact]);
+    let show = p.kontext_ok(&["show", &fact]);
     assert!(show.contains("superseded"), "{show}");
     // And the new one says that it replaces, not that it "would replace".
-    let show = p.ctx_ok(&["show", new["id"].as_str().unwrap()]);
+    let show = p.kontext_ok(&["show", new["id"].as_str().unwrap()]);
     assert!(show.contains("- **Supersedes:** "), "{show}");
 }
 
@@ -592,7 +592,7 @@ fn an_unsigned_user_rule_is_in_force_and_the_replaced_one_is_not() {
         &fake,
         &json!({"decisions": [{"title": "La tasa de recargo es 1.5 % mensual", "type": "rule", "source": "user", "when": "2026-11-03 10:00"}]}),
     );
-    p.ctx_ok(&["distill", "--transcript", t.to_str().unwrap()]);
+    p.kontext_ok(&["distill", "--transcript", t.to_str().unwrap()]);
     let old = entries_by(&p, "distill")[0]["id"]
         .as_str()
         .unwrap()
@@ -613,13 +613,13 @@ fn an_unsigned_user_rule_is_in_force_and_the_replaced_one_is_not() {
         &fake,
         &json!({"decisions": [{"title": "La tasa de recargo es 1.8 % mensual", "type": "rule", "source": "user", "when": "2026-11-04 09:00", "supersedes": old}]}),
     );
-    p.ctx_ok(&["distill", "--transcript", t.to_str().unwrap()]);
+    p.kontext_ok(&["distill", "--transcript", t.to_str().unwrap()]);
     let new = entries_by(&p, "distill").last().unwrap()["id"]
         .as_str()
         .unwrap()
         .to_string();
 
-    let out = p.ctx_ok(&["resume", "--as", "pm", "--peek"]);
+    let out = p.kontext_ok(&["resume", "--as", "pm", "--peek"]);
     assert!(
         out.contains(&format!(
             "- {new} (2026-11-04 09:00) [user rule, in force] La tasa de recargo es 1.8 % mensual \
@@ -631,7 +631,7 @@ fn an_unsigned_user_rule_is_in_force_and_the_replaced_one_is_not() {
     assert!(!out.contains("unsigned)]"), "{out}");
 
     let none = p.dir.path().join("sin-transcripciones/*.jsonl");
-    let rec = p.ctx_env_ok(
+    let rec = p.kontext_env_ok(
         &[("KONTEXT_TRANSCRIPTS_GLOB", none.to_str().unwrap())],
         &["recall", "tasa"],
     );
@@ -645,14 +645,14 @@ fn an_unsigned_user_rule_is_in_force_and_the_replaced_one_is_not() {
         )),
         "{rec}"
     );
-    let show = p.ctx_ok(&["show", &new]);
+    let show = p.kontext_ok(&["show", &new]);
     assert!(
         show.contains("it is a user rule and already applies"),
         "{show}"
     );
 
     // The human's inbox does not change: it still asks them to sign it.
-    let inbox = p.ctx_ok(&["inbox"]);
+    let inbox = p.kontext_ok(&["inbox"]);
     assert!(
         inbox.contains("Your unsigned rule: La tasa de recargo es 1.8 % mensual"),
         "{inbox}"

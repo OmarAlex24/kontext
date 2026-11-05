@@ -13,13 +13,13 @@ fn standup_json(p: &Project, peek: bool) -> Value {
     if peek {
         args.push("--peek");
     }
-    serde_json::from_str(&p.ctx_ok(&args)).unwrap()
+    serde_json::from_str(&p.kontext_ok(&args)).unwrap()
 }
 
 #[test]
 fn late_arrival_with_older_hlc_still_shows_as_new() {
     let p = Project::new();
-    p.ctx_ok(&["log", "one from omar"]);
+    p.kontext_ok(&["log", "one from omar"]);
     let ana = p.machine("ana@laptop");
     let out = p
         .spawn_append(
@@ -63,20 +63,20 @@ fn late_arrival_with_older_hlc_still_shows_as_new() {
 #[test]
 fn peek_does_not_advance() {
     let p = Project::new();
-    p.ctx_ok(&["log", "something"]);
+    p.kontext_ok(&["log", "something"]);
     assert_eq!(standup_json(&p, true)["new_entries"], 1);
     assert_eq!(standup_json(&p, true)["new_entries"], 1);
     assert!(!p.home.join("cursors/omar").exists());
-    p.ctx_ok(&["resume", "--as", "pm", "--peek"]);
+    p.kontext_ok(&["resume", "--as", "pm", "--peek"]);
     assert!(!p.home.join("cursors/pm").exists());
     // resume without --peek advances the role's cursor.
-    p.ctx_ok(&["resume", "--as", "pm"]);
+    p.kontext_ok(&["resume", "--as", "pm"]);
     let v: Value = serde_json::from_str(
         &fs::read_to_string(p.home.join("cursors/pm/omar@test.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(v["omar@test"], 1);
-    let out = p.ctx_ok(&["resume", "--as", "pm"]);
+    let out = p.kontext_ok(&["resume", "--as", "pm"]);
     assert!(
         out.contains("## What's new since your last time (0)"),
         "{out}"
@@ -86,8 +86,8 @@ fn peek_does_not_advance() {
 #[test]
 fn readers_are_independent_and_machines_merge() {
     let p = Project::new();
-    p.ctx_ok(&["log", "uno"]);
-    p.ctx_ok(&["standup"]);
+    p.kontext_ok(&["log", "uno"]);
+    p.kontext_ok(&["standup"]);
     // ana reads from her machine with another reader: her cursor is different.
     let ana = p.machine("ana@laptop");
     let out = p

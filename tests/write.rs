@@ -6,13 +6,13 @@ use common::Project;
 use serde_json::Value;
 
 fn state(p: &Project) -> Value {
-    serde_json::from_str(&p.ctx_ok(&["debug", "state"])).unwrap()
+    serde_json::from_str(&p.kontext_ok(&["debug", "state"])).unwrap()
 }
 
 #[test]
 fn agents_cannot_decide_but_can_propose() {
     let p = Project::new();
-    let out = p.ctx_env(
+    let out = p.kontext_env(
         &[("KONTEXT_ACTOR", "agent:coder")],
         &["decide", "Use Conekta"],
     );
@@ -21,7 +21,7 @@ fn agents_cannot_decide_but_can_propose() {
     assert!(err.contains("only an owner can record a decision"), "{err}");
     assert!(err.contains("kontext propose"), "{err}");
     // Without KONTEXT_ACTOR it writes as agent:unknown, which does not decide either.
-    let out = p.ctx_env(&[("KONTEXT_ACTOR", "")], &["decide", "x"]);
+    let out = p.kontext_env(&[("KONTEXT_ACTOR", "")], &["decide", "x"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
         !p.ledger("omar@test").exists(),
@@ -35,7 +35,7 @@ fn agents_cannot_decide_but_can_propose() {
         &["accept", "P-"],
         &["reject", "P-", "--why", "no"],
     ] {
-        let out = p.ctx_env(&[("KONTEXT_ACTOR", "agent:coder")], cmd);
+        let out = p.kontext_env(&[("KONTEXT_ACTOR", "agent:coder")], cmd);
         assert_eq!(out.status.code(), Some(2), "{cmd:?}");
     }
 }
@@ -50,9 +50,12 @@ fn pm_with_approved_by_counts_and_actor_fields_come_from_env() {
         ("KONTEXT_SESSION", "s-1"),
     ];
     // Without approved_by, no.
-    assert_eq!(p.ctx_env(&pm, &["decide", "Stripe"]).status.code(), Some(2));
+    assert_eq!(
+        p.kontext_env(&pm, &["decide", "Stripe"]).status.code(),
+        Some(2)
+    );
     // approved_by from someone who is not an owner, neither.
-    let out = p.ctx_env(&pm, &["decide", "Stripe", "--approved-by", "ana"]);
+    let out = p.kontext_env(&pm, &["decide", "Stripe", "--approved-by", "ana"]);
     assert_eq!(out.status.code(), Some(2));
     let id = p.id_of(&pm, &["decide", "Stripe", "--approved-by", "omar"]);
     let e = &p.entries("omar@test")[0];
@@ -63,7 +66,7 @@ fn pm_with_approved_by_counts_and_actor_fields_come_from_env() {
     assert_eq!(e["fields"]["approved_by"], "omar");
     assert_eq!(state(&p)["status"][&id], "accepted");
     // A human who is not an owner cannot decide from the command line either.
-    let out = p.ctx_env(&[("KONTEXT_ACTOR", "human:ana")], &["decide", "x"]);
+    let out = p.kontext_env(&[("KONTEXT_ACTOR", "human:ana")], &["decide", "x"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("is not in owners"));
 }
@@ -104,7 +107,7 @@ fn actor_role_and_model_also_come_from_flags() {
         ("KONTEXT_ACTOR", "agent:impl-1"),
         ("KONTEXT_ROLE", "implementer"),
     ];
-    let out = p.ctx_env(&impl_env, &["decide", "x", "--approved-by", "omar"]);
+    let out = p.kontext_env(&impl_env, &["decide", "x", "--approved-by", "omar"]);
     assert_eq!(out.status.code(), Some(2));
     p.id_of(&impl_env, &["log", "Tried the flag", "--role", "tester"]);
     let last = p.entries("omar@test").pop().unwrap();
@@ -128,7 +131,7 @@ fn non_owner_entry_from_another_machine_is_kept_but_does_not_count() {
     let alerts = st["alerts"].as_array().unwrap();
     assert_eq!(alerts.len(), 1, "{st}");
     assert_eq!(alerts[0]["type"], "not_counting");
-    let standup = p.ctx_ok(&["standup", "--peek"]);
+    let standup = p.kontext_ok(&["standup", "--peek"]);
     assert!(
         standup.contains("does not count: it was written by someone who is not an owner"),
         "{standup}"
@@ -139,7 +142,7 @@ fn non_owner_entry_from_another_machine_is_kept_but_does_not_count() {
 fn charter_goals_signing_and_refs() {
     let p = Project::new();
     // Without a charter there are no goals.
-    let out = p.ctx(&["goal", "add", "Charge"]);
+    let out = p.kontext(&["goal", "add", "Charge"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("there is no charter"));
 
@@ -173,18 +176,18 @@ fn charter_goals_signing_and_refs() {
         serde_json::json!(["Facturar", "Inventario"])
     );
     assert_eq!(e[1]["fields"]["charter"], a.as_str());
-    p.ctx_ok(&["sign", &a[..4]]);
-    p.ctx_ok(&["sign", &g]);
+    p.kontext_ok(&["sign", &a[..4]]);
+    p.kontext_ok(&["sign", &g]);
     // Signing twice is refused.
-    let out = p.ctx(&["sign", &g]);
+    let out = p.kontext(&["sign", &g]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("is already signed"));
     // A decision is not signed.
     let d = p.id_of(&[], &["decide", "Stripe"]);
-    assert_eq!(p.ctx(&["sign", &d]).status.code(), Some(2));
+    assert_eq!(p.kontext(&["sign", &d]).status.code(), Some(2));
     // A new charter supersedes the signed one when it is signed.
     let a2 = p.id_of(&[], &["charter", "--objective", "Charge and invoice"]);
-    p.ctx_ok(&["sign", &a2]);
+    p.kontext_ok(&["sign", &a2]);
     let st = state(&p);
     assert_eq!(st["status"][&a], "superseded", "{st}");
     assert_eq!(st["status"][&a2], "signed");
@@ -209,7 +212,7 @@ fn decisions_supersede_and_proposals_become_law() {
     assert_eq!(e["tags"], serde_json::json!(["payments", "core"]));
     assert_eq!(e["fields"]["guard"]["cmd"], "true");
     // --supersedes has to be a decision in force.
-    let out = p.ctx(&["decide", "x", "--supersedes", "D-zzzzzz"]);
+    let out = p.kontext(&["decide", "x", "--supersedes", "D-zzzzzz"]);
     assert!(!out.status.success());
     let pr = p.id_of(
         &[("KONTEXT_ACTOR", "agent:coder")],
@@ -226,15 +229,15 @@ fn decisions_supersede_and_proposals_become_law() {
     assert_eq!(st["status"][&d1], "superseded");
     assert_eq!(st["superseded_by"][&d1], d2.as_str());
     // It is no longer pending.
-    let out = p.ctx(&["accept", &pr]);
+    let out = p.kontext(&["accept", &pr]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("is already accepted"));
     // Explicit supersede and its validation.
     let d3 = p.id_of(&[], &["decide", "Stripe with 3DS"]);
-    p.ctx_ok(&["supersede", &d2, &d3, "--why", "clearer"]);
-    let out = p.ctx(&["supersede", &d2, &d3]);
+    p.kontext_ok(&["supersede", &d2, &d3, "--why", "clearer"]);
+    let out = p.kontext(&["supersede", &d2, &d3]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("is already superseded"));
-    let show = p.ctx_ok(&["show", &d3]);
+    let show = p.kontext_ok(&["show", &d3]);
     assert!(
         show.contains(&format!(
             "{d1} (superseded) → {d2} (superseded) → **{d3} (this one)**"
@@ -243,7 +246,7 @@ fn decisions_supersede_and_proposals_become_law() {
     );
     // A rejected proposal needs --why.
     let p2 = p.id_of(&[("KONTEXT_ACTOR", "agent:coder")], &["propose", "Other"]);
-    p.ctx_ok(&["reject", &p2, "--why", "no aplica"]);
+    p.kontext_ok(&["reject", &p2, "--why", "no aplica"]);
     assert_eq!(state(&p)["status"][&p2], "rejected");
 }
 
@@ -262,10 +265,10 @@ fn questions_answers_and_journal() {
         ],
     );
     assert_eq!(p.entries("omar@test")[0]["fields"]["to"], "owner");
-    assert!(p.ctx(&["ask", "x", "--to", "../etc"]).status.code() != Some(0));
-    p.ctx_ok(&["answer", &q, "199 a month"]);
+    assert!(p.kontext(&["ask", "x", "--to", "../etc"]).status.code() != Some(0));
+    p.kontext_ok(&["answer", &q, "199 a month"]);
     assert_eq!(state(&p)["status"][&q], "answered");
-    let show = p.ctx_ok(&["show", &q]);
+    let show = p.kontext_ok(&["show", &q]);
     assert!(show.contains("199 a month"), "{show}");
     let j = p.id_of(
         &[],
@@ -283,5 +286,5 @@ fn questions_answers_and_journal() {
     assert_eq!(journal["fields"]["next"], "pruebas");
     assert_eq!(journal["fields"]["task"], "T-1");
     // Answering something that is not a question.
-    assert_eq!(p.ctx(&["answer", &j, "x"]).status.code(), Some(2));
+    assert_eq!(p.kontext(&["answer", &j, "x"]).status.code(), Some(2));
 }

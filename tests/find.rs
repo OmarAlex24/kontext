@@ -65,7 +65,7 @@ fn search_status_show_and_check() {
     let find = |args: &[&str]| -> Value {
         let mut a = vec!["--json", "find"];
         a.extend_from_slice(args);
-        json(&p.ctx_in_ok(&repo, &[], &a))
+        json(&p.kontext_in_ok(&repo, &[], &a))
     };
 
     // The current section comes first; superseded docs, historical ones by
@@ -116,17 +116,17 @@ fn search_status_show_and_check() {
     );
 
     // --show prints the section that contains the line.
-    let out = p.ctx_in_ok(
+    let out = p.kontext_in_ok(
         &repo,
         &[],
         &["find", "--show", "docs/adr/ADR-0001-geocercas.md:6"],
     );
     assert_eq!(out, "## Detalle\nOtra cosa.\n\n");
-    let out = p.ctx_in(&repo, &[], &["find", "--show", "docs/none.md:1"]);
+    let out = p.kontext_in(&repo, &[], &["find", "--show", "docs/none.md:1"]);
     assert_eq!(out.status.code(), Some(1));
 
     // --check: paths cited by current docs that no longer exist.
-    let out = p.ctx_in(&repo, &[], &["find", "--check"]);
+    let out = p.kontext_in(&repo, &[], &["find", "--check"]);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("docs/adr/ADR-0003-colas.md:1  →  src/gone.rs"),
@@ -134,7 +134,7 @@ fn search_status_show_and_check() {
     );
     assert_eq!(out.status.code(), Some(1));
     let base = p.dir.path().join("base.txt");
-    p.ctx_in_ok(
+    p.kontext_in_ok(
         &repo,
         &[],
         &[
@@ -149,7 +149,7 @@ fn search_status_show_and_check() {
         std::fs::read_to_string(&base).unwrap(),
         "1 docs/adr/ADR-0003-colas.md\n"
     );
-    p.ctx_in_ok(
+    p.kontext_in_ok(
         &repo,
         &[],
         &["find", "--check", "--baseline", base.to_str().unwrap()],
@@ -160,7 +160,7 @@ fn search_status_show_and_check() {
 fn index_is_incremental() {
     let p = Project::new();
     let repo = docs_repo(&p);
-    p.ctx_in_ok(&repo, &[], &["find", "geocercas"]);
+    p.kontext_in_ok(&repo, &[], &["find", "geocercas"]);
     let db = rusqlite::Connection::open(p.home.join(".kontext/index.sqlite")).unwrap();
     let ids = |db: &rusqlite::Connection| -> Vec<(String, i64)> {
         let mut st = db
@@ -185,7 +185,7 @@ fn index_is_incremental() {
     )
     .unwrap();
     std::fs::remove_file(repo.join("docs/work/plan.md")).unwrap();
-    let r = json(&p.ctx_in_ok(&repo, &[], &["--json", "find", "centrifugo", "--all"]));
+    let r = json(&p.kontext_in_ok(&repo, &[], &["--json", "find", "centrifugo", "--all"]));
     assert_eq!(r.as_array().unwrap().len(), 2, "{r}");
     let after = ids(&db);
     let same = |path: &str| {
@@ -204,16 +204,16 @@ fn index_is_incremental() {
     assert!(after.iter().any(|x| x.0 == "docs/nuevo.md"));
     assert!(after.iter().all(|x| x.0 != "docs/work/plan.md"));
     // `kontext reindex` deletes the docs; the next search reads them again.
-    p.ctx_ok(&["reindex"]);
+    p.kontext_ok(&["reindex"]);
     assert!(ids(&db).is_empty());
-    let r = json(&p.ctx_in_ok(&repo, &[], &["--json", "find", "centrifugo", "--all"]));
+    let r = json(&p.kontext_in_ok(&repo, &[], &["--json", "find", "centrifugo", "--all"]));
     assert_eq!(r.as_array().unwrap().len(), 2);
 }
 
 #[test]
 fn needs_a_local_repo() {
     let p = Project::new();
-    let out = p.ctx(&["find", "x"]);
+    let out = p.kontext(&["find", "x"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -289,7 +289,7 @@ fn golden_queries() {
         if all {
             a.push("--all");
         }
-        hits(&json(&p.ctx_ok(&a)))
+        hits(&json(&p.kontext_ok(&a)))
     };
     let current = |loc: &str, label: &str| (loc.to_string(), "current".into(), label.into());
     let historical = |loc: &str, label: &str| (loc.to_string(), "historical".into(), label.into());
@@ -351,7 +351,7 @@ fn golden_queries() {
         ]
     );
     let (bare, _) = shop(false);
-    assert_eq!(bare.ctx_ok(&["--json", "find", "stock"]).trim(), "[]");
+    assert_eq!(bare.kontext_ok(&["--json", "find", "stock"]).trim(), "[]");
 
     // A draft is proposed, and it is shown without --all.
     assert_eq!(
@@ -385,14 +385,14 @@ fn golden_queries() {
 
     // The template mentions checkout too, but `exclude` leaves it out.
     let all =
-        locations(&json(&p.ctx_ok(&[
+        locations(&json(&p.kontext_ok(&[
             "--json", "find", "checkout", "--all", "--limit", "50",
         ])));
     assert!(all.iter().all(|l| !l.contains("templates/")), "{all:?}");
 
     // --check: the missing path cited by a current doc, not the one cited by
     // the archived doc.
-    let out = p.ctx(&["find", "--check"]);
+    let out = p.kontext(&["find", "--check"]);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.starts_with("docs/guides/checkout.md:1  →  src/checkout/coupons.ts\n"),
