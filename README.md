@@ -1,6 +1,6 @@
 # kontext
 
-The command is also called `kontext`: the binary, the subcommands, the `KONTEXT_*` variables, `.kontext.toml`, `~/.config/kontext` and `~/kontext-home`. It used to be called `ctx`. If you have an install from then, `kontext migrate` moves it (see "Coming from the `ctx` command").
+The command is also called `kontext`: the binary, the subcommands, the `KONTEXT_*` variables, `.kontext.toml`, `~/.config/kontext` and `~/kontext-home`.
 
 Project memory for coding agents. A single ledger where entries are only ever appended, and one view for each reader: you, the project manager, each epic coordinator, and the agents that do a single task.
 
@@ -18,7 +18,7 @@ That leaves the `kontext` binary in `~/.cargo/bin`.
 
 ### Have an agent install it and migrate the memory
 
-The skill `kontext-migrate` tells an agent how to install kontext in a project and move the memory that already exists into it: the old `ctx` command, a `ctx.py` ledger, and the rules and decisions in `CLAUDE.md`, `AGENTS.md`, notes and Claude Code's automatic memory (as proposals that you sign). It asks once about anything it can't work out, and says up front where it is going to write.
+The skill `kontext-migrate` tells an agent how to install kontext in a project and move the memory that already exists into it: a `ctx.py` ledger (the v0 prototype), and the rules and decisions in `CLAUDE.md`, `AGENTS.md`, notes and Claude Code's automatic memory (as proposals that you sign). It asks once about anything it can't work out, and says up front where it is going to write.
 
 To have it in all your sessions before installing anything (the repo is private: it needs `gh auth login`):
 
@@ -29,23 +29,6 @@ gh api repos/OmarAlex24/kontext/contents/templates/skill-kontext-migrate.md \
 ```
 
 and ask Claude Code "install kontext in this project". With the binary already installed, `kontext install --skills-only --global` adds (or updates) all the kontext skills in `~/.claude/skills/`, without needing a project. `kontext install` in a repo also installs them.
-
-### Coming from the `ctx` command
-
-Until November 2026 the command was called `ctx`. kontext doesn't read what was there then (`CTX_*`, `.ctx.toml`, `~/.config/ctx`), but if it doesn't find its own data and sees that, it says so in one line. To move it:
-
-```sh
-cd ~/code/my-repo                # the code repo, so it also migrates its .claude/
-kontext migrate --dry-run        # which paths it touches and what changes, without writing
-kontext migrate
-kontext verify
-```
-
-| Command | What it does |
-|---|---|
-| `kontext migrate [--dry-run]` | Moves `~/.config/ctx` to `~/.config/kontext` (if that already exists, it adds whatever is missing), renames `<home>/.ctx/` to `<home>/.kontext/` in each registered home (the homes don't move), and in the current repo renames `.ctx.toml`, changes the hook and the `ctx` permissions in `.claude/settings.json` (and `settings.local.json`) to the kontext ones without touching anything else, and changes the `ctx*` skills and agent files to the new ones (one you changed by hand is kept, and it warns you). It prints the paths it touches first. Running it again does nothing |
-
-It doesn't change your shell's `CTX_*` variables: move them to `KONTEXT_*` (until you do, every command warns you). The signature of what you signed with `ctx` still verifies. The skill `kontext-migrate` does all of this from an agent (and brings in loose project memory). The details are in [DESIGN.md §18.1](./DESIGN.md).
 
 ## See it work
 

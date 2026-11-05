@@ -22,9 +22,9 @@ fn seeded() -> (Project, Vec<String>) {
             "First real charge",
         ],
     );
-    p.ctx_ok(&["sign", &a]);
+    p.kontext_ok(&["sign", &a]);
     let g = p.id_of(&[], &["goal", "add", "Recurring charge monthly"]);
-    p.ctx_ok(&["sign", &g]);
+    p.kontext_ok(&["sign", &g]);
     let g2 = p.id_of(&[], &["goal", "add", "Refunds from the panel"]);
     let d = p.id_of(
         &[],
@@ -62,7 +62,7 @@ fn standup_shows_what_waits_for_you_then_is_empty() {
     let [_, _, g2, d, pr, q, q2] = &ids[..] else {
         unreachable!()
     };
-    let out = p.ctx_ok(&["standup"]);
+    let out = p.kontext_ok(&["standup"]);
     assert!(out.starts_with("# Standup of demo for omar\n"), "{out}");
     assert!(out.contains("## New decisions (1)"), "{out}");
     assert!(
@@ -97,7 +97,7 @@ fn standup_shows_what_waits_for_you_then_is_empty() {
     );
 
     // Second time: nothing new, but what is pending stays.
-    let out = p.ctx_ok(&["standup"]);
+    let out = p.kontext_ok(&["standup"]);
     assert!(out.contains("Nothing new since your last time ("), "{out}");
     assert!(
         out.contains("## Still waiting for your answer (3)"),
@@ -106,9 +106,9 @@ fn standup_shows_what_waits_for_you_then_is_empty() {
     assert!(!out.contains("New decisions"), "{out}");
 
     // Answering and accepting shows as «closed» in the next one.
-    p.ctx_ok(&["answer", q, "199"]);
-    p.ctx_ok(&["accept", pr]);
-    let out = p.ctx_ok(&["standup"]);
+    p.kontext_ok(&["answer", q, "199"]);
+    p.kontext_ok(&["accept", pr]);
+    let out = p.kontext_ok(&["standup"]);
     assert!(out.contains("## Closed (2)"), "{out}");
     assert!(
         out.contains(&format!("- {q} answered by human:omar")),
@@ -125,9 +125,9 @@ fn standup_shows_what_waits_for_you_then_is_empty() {
 fn standup_reports_conflicts() {
     let p = Project::new();
     let d = p.id_of(&[], &["decide", "Base"]);
-    p.ctx_ok(&["standup"]);
+    p.kontext_ok(&["standup"]);
     // Two machines supersede the same decision without seeing each other.
-    p.ctx_ok(&["decide", "Option A", "--supersedes", &d]);
+    p.kontext_ok(&["decide", "Option A", "--supersedes", &d]);
     let ana = p.machine("omar@laptop");
     let line = format!(
         "{{\"kind\":\"decision\",\"title\":\"Option B\",\"actor\":{{\"type\":\"human\",\"name\":\"omar\"}},\"fields\":{{\"supersedes\":[\"{d}\"]}}}}\n"
@@ -139,14 +139,14 @@ fn standup_reports_conflicts() {
             .status
             .success()
     );
-    let out = p.ctx_ok(&["standup"]);
+    let out = p.kontext_ok(&["standup"]);
     assert!(out.contains("## Alerts (1)"), "{out}");
     assert!(
         out.contains(&format!("conflict: {d} is superseded at the same time")),
         "{out}"
     );
     // Conflicts keep showing until they are resolved.
-    let out = p.ctx_ok(&["standup"]);
+    let out = p.kontext_ok(&["standup"]);
     assert!(out.contains("conflict:"), "{out}");
 }
 
@@ -165,7 +165,7 @@ fn resume_layout() {
     let [a, g, g2, d, pr, q, q2] = &ids[..] else {
         unreachable!()
     };
-    let out = p.ctx_ok(&["resume", "--as", "pm", "--peek"]);
+    let out = p.kontext_ok(&["resume", "--as", "pm", "--peek"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], "# Context of demo for pm (kontext resume)");
     assert!(
@@ -199,7 +199,7 @@ fn resume_layout() {
         "{out}"
     );
     // For the owner, the questions to the owner.
-    let out = p.ctx_ok(&["resume", "--as", "owner", "--peek"]);
+    let out = p.kontext_ok(&["resume", "--as", "owner", "--peek"]);
     let questions = section(&out, "## Questions for owner (1)");
     assert!(
         questions.contains(q.as_str()) && !questions.contains(q2.as_str()),
@@ -207,7 +207,7 @@ fn resume_layout() {
     );
     // JSON with the same sections.
     let v: serde_json::Value =
-        serde_json::from_str(&p.ctx_ok(&["--json", "resume", "--as", "pm", "--peek"])).unwrap();
+        serde_json::from_str(&p.kontext_ok(&["--json", "resume", "--as", "pm", "--peek"])).unwrap();
     assert_eq!(v["charter"]["id"], a.as_str());
     assert_eq!(v["decisions"][0]["id"], d.as_str());
     assert_eq!(v["chain_ok"], true);
@@ -217,8 +217,8 @@ fn resume_layout() {
 fn tiny_budget_never_drops_charter_goals_or_decision_titles() {
     let (p, ids) = seeded();
     for i in 0..30 {
-        p.ctx_ok(&["log", &format!("journal entry number {i} with some text")]);
-        p.ctx_ok(&[
+        p.kontext_ok(&["log", &format!("journal entry number {i} with some text")]);
+        p.kontext_ok(&[
             "decide",
             &format!("Decision {i}"),
             "--why",
@@ -227,7 +227,7 @@ fn tiny_budget_never_drops_charter_goals_or_decision_titles() {
             &format!("t{}", i % 3),
         ]);
     }
-    let out = p.ctx_ok(&["resume", "--as", "pm", "--max-chars", "300", "--peek"]);
+    let out = p.kontext_ok(&["resume", "--as", "pm", "--max-chars", "300", "--peek"]);
     assert!(
         out.contains(&format!("{} [signed] Charge by card in the app", ids[0])),
         "{out}"
@@ -251,9 +251,9 @@ fn tiny_budget_never_drops_charter_goals_or_decision_titles() {
     );
 
     // With a medium budget, the old journal goes first.
-    let full = p.ctx_ok(&["resume", "--as", "pm", "--max-chars", "100000", "--peek"]);
+    let full = p.kontext_ok(&["resume", "--as", "pm", "--max-chars", "100000", "--peek"]);
     assert!(full.contains("## Journal (last 10 of 31)"), "{full}");
-    let mid = p.ctx_ok(&[
+    let mid = p.kontext_ok(&[
         "resume",
         "--as",
         "pm",
@@ -270,8 +270,8 @@ fn tiny_budget_never_drops_charter_goals_or_decision_titles() {
 fn show_resolves_prefixes_and_history() {
     let (p, ids) = seeded();
     let pr = &ids[4];
-    p.ctx_ok(&["accept", pr, "--as-decision", "--why", "yes"]);
-    let out = p.ctx_ok(&["show", &pr.to_lowercase()[..5]]);
+    p.kontext_ok(&["accept", pr, "--as-decision", "--why", "yes"]);
+    let out = p.kontext_ok(&["show", &pr.to_lowercase()[..5]]);
     assert!(
         out.starts_with(&format!("## {pr} Save tokenized cards")),
         "{out}"
@@ -282,10 +282,11 @@ fn show_resolves_prefixes_and_history() {
     );
     assert!(out.contains("**History**"), "{out}");
     assert!(out.contains("acceptance by human:omar"), "{out}");
-    let v: serde_json::Value = serde_json::from_str(&p.ctx_ok(&["--json", "show", pr])).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&p.kontext_ok(&["--json", "show", pr])).unwrap();
     assert_eq!(v["entry"]["id"], pr.as_str());
     assert_eq!(v["history"].as_array().unwrap().len(), 2);
-    let out = p.ctx(&["show", "Z-1"]);
+    let out = p.kontext(&["show", "Z-1"]);
     assert!(!out.status.success());
 }
 
@@ -308,7 +309,7 @@ fn recall_searches_ledger_and_transcripts() {
     .unwrap();
     let glob = format!("{}/transcripts/*/*.jsonl", p.dir.path().display());
     let env = [("KONTEXT_TRANSCRIPTS_GLOB", glob.as_str())];
-    let out = p.ctx_env_ok(&env, &["recall", "conekta"]);
+    let out = p.kontext_env_ok(&env, &["recall", "conekta"]);
     assert!(
         out.starts_with("# kontext recall «conekta»: 3 of 3"),
         "{out}"
@@ -327,17 +328,18 @@ fn recall_searches_ledger_and_transcripts() {
     );
     assert!(!out.contains("hidden"), "{out}");
     // --since leaves out the old transcript; --limit cuts.
-    let v: serde_json::Value = serde_json::from_str(&p.ctx_env_ok(
+    let v: serde_json::Value = serde_json::from_str(&p.kontext_env_ok(
         &env,
         &["--json", "recall", "conekta", "--since", "2026-10-02"],
     ))
     .unwrap();
     assert_eq!(v["total"], 1);
-    let v: serde_json::Value =
-        serde_json::from_str(&p.ctx_env_ok(&env, &["--json", "recall", "conekta", "--limit", "1"]))
-            .unwrap();
+    let v: serde_json::Value = serde_json::from_str(
+        &p.kontext_env_ok(&env, &["--json", "recall", "conekta", "--limit", "1"]),
+    )
+    .unwrap();
     assert_eq!(v["hits"].as_array().unwrap().len(), 1);
     assert_eq!(v["total"], 3);
-    let out = p.ctx_env_ok(&env, &["recall", "nothingatall"]);
+    let out = p.kontext_env_ok(&env, &["recall", "nothingatall"]);
     assert!(out.starts_with("Nothing for «nothingatall»"), "{out}");
 }

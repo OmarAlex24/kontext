@@ -118,7 +118,7 @@ fn v0_entries(home: &Path) -> Vec<Value> {
 fn import_and_check(v0_home: &Path) {
     let p = Project::new();
     let v0 = v0_entries(v0_home);
-    let out = p.ctx_ok(&["import", "--from-v0", v0_home.to_str().unwrap()]);
+    let out = p.kontext_ok(&["import", "--from-v0", v0_home.to_str().unwrap()]);
     assert!(
         out.contains(&format!("Imported {n} of {n} entries", n = v0.len())),
         "{out}"
@@ -212,11 +212,11 @@ fn import_and_check(v0_home: &Path) {
     assert_eq!(journal["fields"]["task"], "T-diseño");
     assert_eq!(journal["fields"]["next"], "fase 1");
 
-    let out = p.ctx_ok(&["verify"]);
+    let out = p.kontext_ok(&["verify"]);
     assert_eq!(out.trim(), format!("OK: {} entries in 1 writer", v0.len()));
 
     // The state comes out the same as in v0.
-    let state: Value = serde_json::from_str(&p.ctx_ok(&["debug", "state"])).unwrap();
+    let state: Value = serde_json::from_str(&p.kontext_ok(&["debug", "state"])).unwrap();
     let status = |v0_id: &str| state["status"][&map[v0_id]].as_str().unwrap().to_string();
     assert_eq!(status("D-0001"), "superseded");
     assert_eq!(status("D-0002"), "superseded");
@@ -229,7 +229,7 @@ fn import_and_check(v0_home: &Path) {
     assert_eq!(state["alerts"], serde_json::json!([]), "{state}");
 
     // Importing again adds nothing.
-    let out = p.ctx_ok(&["import", "--from-v0", v0_home.to_str().unwrap()]);
+    let out = p.kontext_ok(&["import", "--from-v0", v0_home.to_str().unwrap()]);
     assert!(
         out.contains(&format!("Imported 0 of {} entries", v0.len())),
         "{out}"
@@ -239,7 +239,7 @@ fn import_and_check(v0_home: &Path) {
         "{out}"
     );
     assert_eq!(p.entries("omar@test").len(), v0.len());
-    p.ctx_ok(&["verify"]);
+    p.kontext_ok(&["verify"]);
 }
 
 #[test]
@@ -289,10 +289,10 @@ fn grows_incrementally() {
     let path = dir.path().join("ledger/entries.jsonl");
     fs::write(&path, format!("{}\n", lines[..5].join("\n"))).unwrap();
     let p = Project::new();
-    let out = p.ctx_ok(&["import", "--from-v0", dir.path().to_str().unwrap()]);
+    let out = p.kontext_ok(&["import", "--from-v0", dir.path().to_str().unwrap()]);
     assert!(out.contains("Imported 5 of 5"), "{out}");
     fs::write(&path, raw).unwrap();
-    let out = p.ctx_ok(&["import", "--from-v0", dir.path().to_str().unwrap()]);
+    let out = p.kontext_ok(&["import", "--from-v0", dir.path().to_str().unwrap()]);
     assert!(
         out.contains(&format!("Imported {} of {}", full.len() - 5, full.len())),
         "{out}"
@@ -302,7 +302,7 @@ fn grows_incrementally() {
     let answer = v1.iter().find(|e| e["kind"] == "answer").unwrap();
     let question = v1.iter().find(|e| e["kind"] == "question").unwrap();
     assert_eq!(answer["refs"][0], question["id"]);
-    p.ctx_ok(&["verify"]);
+    p.kontext_ok(&["verify"]);
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn refuses_broken_v0_chain_unless_forced() {
     fs::write(dir.path().join("ledger/entries.jsonl"), edited).unwrap();
 
     let p = Project::new();
-    let out = p.ctx(&["import", "--from-v0", dir.path().to_str().unwrap()]);
+    let out = p.kontext(&["import", "--from-v0", dir.path().to_str().unwrap()]);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -325,7 +325,7 @@ fn refuses_broken_v0_chain_unless_forced() {
     );
     assert!(!p.ledger("omar@test").exists());
 
-    let out = p.ctx(&[
+    let out = p.kontext(&[
         "import",
         "--from-v0",
         dir.path().to_str().unwrap(),
@@ -333,5 +333,5 @@ fn refuses_broken_v0_chain_unless_forced() {
     ]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("warning"));
-    p.ctx_ok(&["verify"]);
+    p.kontext_ok(&["verify"]);
 }

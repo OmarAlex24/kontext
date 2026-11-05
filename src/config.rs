@@ -27,8 +27,8 @@ pub fn internal_dir(home: &Path) -> PathBuf {
 }
 
 /// Creates `<home>/.kontext` with a `.gitignore` inside that ignores all of it,
-/// so it does not show up in `git status` even if the versioned `.gitignore`
-/// of the kontext-home still says `.ctx/` (one created by the old command).
+/// so it does not show up in `git status` whatever the versioned `.gitignore`
+/// of the kontext-home says.
 pub fn ensure_internal_dir(home: &Path) -> Result<PathBuf> {
     let dir = internal_dir(home);
     fs::create_dir_all(&dir)?;

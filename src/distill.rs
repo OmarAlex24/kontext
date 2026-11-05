@@ -579,13 +579,13 @@ pub fn parse_distill_json(text: &str) -> Result<Distilled> {
     Ok(out)
 }
 
-/// Where a datum comes from, as it is stored in `fields.origin`. The old
-/// Spanish source names are still accepted; the stored values are English.
+/// Where a datum comes from, as it is stored in `fields.origin`. Common
+/// synonyms the model may answer with are accepted too.
 pub fn origin_of(source: &str) -> Option<&'static str> {
     match source {
-        "user" | "usuario" | "human" | "humano" => Some("user"),
-        "agent" | "agente" | "assistant" | "asistente" => Some("agent"),
-        "document" | "documento" | "doc" => Some("document"),
+        "user" | "human" => Some("user"),
+        "agent" | "assistant" => Some("agent"),
+        "document" | "doc" => Some("document"),
         _ => None,
     }
 }
@@ -638,9 +638,9 @@ fn resolve_target<'a>(
 fn rank(r: &RawEntry) -> u8 {
     let origin = r.fields.get("origin").and_then(Value::as_str);
     let base = match origin {
-        Some("user" | "usuario") => 0,
-        Some("document" | "documento") => 10,
-        Some("agent" | "agente") => 20,
+        Some("user") => 0,
+        Some("document") => 10,
+        Some("agent") => 20,
         _ => 30,
     };
     base + match r.kind.as_str() {

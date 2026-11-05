@@ -324,28 +324,8 @@ pub fn impact_text(epics: &[String], tasks: usize, task_epics: &[String]) -> Str
 
 // ------------------------------------------------------------ assemble
 
-/// Keys as they were written before the rename. Dismiss and confirm entries
-/// persist their keys, so the old spellings must keep closing items.
-const LEGACY_KEYS: &[(&str, &str)] = &[
-    ("drift:", "desvio:"),
-    ("expired:", "vencida:"),
-    ("claim:", "toma:"),
-    ("signature:", "firma:"),
-    ("close:", "cierre:"),
-    ("not-counted:", "nocuenta:"),
-    ("reopened:", "reabierta:"),
-    ("dependency:", "dependencia:"),
-    ("conflict:", "conflicto:"),
-];
-
 fn closed(st: &State, key: &str) -> bool {
-    if st.inbox_closed.contains_key(key) {
-        return true;
-    }
-    LEGACY_KEYS
-        .iter()
-        .find_map(|(new, old)| key.strip_prefix(new).map(|rest| format!("{old}{rest}")))
-        .is_some_and(|old| st.inbox_closed.contains_key(&old))
+    st.inbox_closed.contains_key(key)
 }
 
 /// The last thing the human wrote (`actor` `human:<name>`).

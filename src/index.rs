@@ -18,8 +18,7 @@ use crate::model::Entry;
 use crate::store::ledger_files;
 
 /// Bump this when the tables or the text they cache change: an older index is
-/// then dropped and rebuilt from the ledger files. Version 4 dropped the cached
-/// Spanish texts (signature reasons and doc status labels).
+/// then dropped and rebuilt from the ledger files.
 const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = r#"

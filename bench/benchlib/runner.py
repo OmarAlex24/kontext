@@ -19,13 +19,12 @@ from .scenario import BENCH_DIR
 # `automem` is `none` with Claude Code's automatic memory turned on; the other
 # variants turn it off (CLAUDE_CODE_DISABLE_AUTO_MEMORY=1) so it doesn't leak in.
 # `kontext-pointer` and `kontext-inject` are the keys of the results aggregate.py
-# compares. Results made when the command was called ctx use `ctx-*`; aggregate.py
-# maps those names when it reads them.
+# compares.
 VARIANTS = ["none", "automem", "notes", "kontext-pointer", "kontext-inject"]
 # What the agent runs without anyone approving it: in `claude -p` nobody does, and
 # a command that is not allowed does not run. Besides plain `kontext`, the ways of
 # calling it that the command's permission did not cover in long-memory
-# (2026-11-04, when it was called ctx): variables in front (`KONTEXT_ACTOR=… kontext …`),
+# (2026-11-04): variables in front (`KONTEXT_ACTOR=… kontext …`),
 # `export KONTEXT_…` on another line, `timeout N kontext …`, and pipes into head,
 # tail, sed -n or echo. kontext already tells the agent not to do those (the hook,
 # `resume` and the skill); this is the safety net. It is given to every variant alike.
@@ -420,38 +419,9 @@ def session_delta(cum, prev):
     return {k: max(0, cum[k] - (prev or {}).get(k, 0)) for k in cum}
 
 
-def recost(run_dir):
-    """Recomputes a run's `usage_by` from its transcripts, the envelopes of the
-    distill and the judge of each question (for runs made before counting per
-    session, which added up running totals)."""
-    run_dir = Path(run_dir)
-    r = json.loads((run_dir / "run.json").read_text())
-    agent = zero_usage()
-    for t in sorted(day_transcripts(run_dir)):
-        cums = {}
-        for line in t.read_text().splitlines():
-            rec = json.loads(line)
-            sid = rec.get("session_id")
-            cum = usage_of(rec.get("envelope") or {})
-            add_usage(agent, session_delta(cum, cums.get(sid)))
-            cums[sid] = cum
-    judge = zero_usage()
-    for p in r["probes"]["items"]:
-        add_usage(judge, p.get("usage") or {})
-    dist, _, _ = distill_usage(run_dir)
-    usage = {"agent": agent, "judge": judge, "distill": dist}
-    total = zero_usage()
-    for u in usage.values():
-        add_usage(total, u)
-    r.update(usage=total, usage_by=usage, tokens=tokens_of(total), cost_basis="session")
-    return r
-
-
 def day_transcripts(run_dir):
-    """The per-day transcripts of a run: `day-N.jsonl`, or `dia-N.jsonl` from
-    runs made before the rename."""
-    run_dir = Path(run_dir) / "transcripts"
-    return sorted([*run_dir.glob("day-*.jsonl"), *run_dir.glob("dia-*.jsonl")])
+    """The per-day transcripts of a run: `transcripts/day-N.jsonl`."""
+    return sorted((Path(run_dir) / "transcripts").glob("day-*.jsonl"))
 
 
 def call_agent(cfg, prompt, session, repo, env):
@@ -782,8 +752,6 @@ def run_one(sc, variant, seed, run_dir, cfg):
             "agent_cmd": cfg.agent_cmd,
             "model": cfg.model,
             "fill_scale": cfg.fill_scale,
-            # Results made when the command was called ctx have this key as `ctx`;
-            # aggregate.py reads both names.
             "kontext": info,
             "lines": {
                 "out_of_charter": out_lines,
@@ -817,7 +785,6 @@ def run_one(sc, variant, seed, run_dir, cfg):
             "claude_sessions": sessions,
             "usage": totals,
             "usage_by": usage,
-            "cost_basis": "session",
             "tokens": tokens_of(totals),
             "acceptance": acc,
             "agent_errors": errors,

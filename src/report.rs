@@ -42,7 +42,7 @@ use crate::plan;
 use crate::state::{State, Status, string_list};
 use crate::tasks::{self, TaskStatus};
 use crate::views::{field, one_line};
-use crate::write::is_status_tag;
+use crate::write::STATUS_TAG;
 
 const STYLE_CSS: &str = include_str!("../templates/report/style.css");
 const SCRIPT_JS: &str = include_str!("../templates/report/report.js");
@@ -173,7 +173,7 @@ pub fn status_note(st: &State) -> Option<StatusNote> {
     st.journal()
         .into_iter()
         .rev()
-        .find(|j| j.tags.iter().any(|t| is_status_tag(t)))
+        .find(|j| j.tags.iter().any(|t| t == STATUS_TAG))
         .map(|j| StatusNote {
             text: j.title.trim().to_string(),
             hlc: j.hlc.clone(),

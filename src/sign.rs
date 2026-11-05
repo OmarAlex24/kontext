@@ -5,9 +5,7 @@
 //! text `-----BEGIN SSH SIGNATURE-----`) goes in `sig`. To verify, an
 //! `allowed_signers` file is built from the keys in `[people]` of
 //! `project.toml`, and `ssh-keygen -Y verify -n kontext -f <file> -I <person>
-//! -s <signature>` runs with the `hash` on stdin. Signatures made before the
-//! command was called kontext use the namespace `ctx`: if it does not verify
-//! with `kontext`, it is tried with `ctx` ([`LEGACY_NAMESPACE`]).
+//! -s <signature>` runs with the `hash` on stdin.
 //!
 //! What gets signed: `sign`, `decision`, `accept`, `reject` and `supersede`
 //! written by a human (their name is the identity) or by the pm with
@@ -32,10 +30,6 @@ use crate::model::{Entry, sha256_hex};
 /// The signature namespace (`-n`): a kontext signature is not valid for
 /// anything else, and the reverse.
 pub const NAMESPACE: &str = "kontext";
-
-/// The namespace the command signed with when it was called `ctx`. It is only
-/// used to verify what was already signed; never to sign.
-pub const LEGACY_NAMESPACE: &str = "ctx";
 
 /// The kinds that get signed.
 pub const SIGNED_KINDS: &[&str] = &["sign", "decision", "accept", "reject", "supersede"];
@@ -95,9 +89,7 @@ pub fn allowed_signers(people: &BTreeMap<String, Person>) -> String {
             if k.is_empty() || k.contains('\n') {
                 continue;
             }
-            out.push_str(&format!(
-                "{name} namespaces=\"{NAMESPACE},{LEGACY_NAMESPACE}\" {k}\n"
-            ));
+            out.push_str(&format!("{name} namespaces=\"{NAMESPACE}\" {k}\n"));
         }
     }
     out
@@ -234,24 +226,14 @@ impl<'a> Verifier<'a> {
         }
         let sig_file = tmp_path(&self.tmp_dir, "sig");
         fs::write(&sig_file, format!("{}\n", sig.trim()))?;
-        let verify = |namespace: &str| {
-            run_with_stdin(
-                Command::new("ssh-keygen")
-                    .args(["-Y", "verify", "-n", namespace, "-f"])
-                    .arg(self.allowed_file.as_ref().unwrap())
-                    .args(["-I", who, "-s"])
-                    .arg(&sig_file),
-                e.hash.as_bytes(),
-            )
-        };
-        // Signatures made before the rename use the `ctx` namespace.
-        let out = verify(NAMESPACE).and_then(|o| {
-            if o.status.success() {
-                Ok(o)
-            } else {
-                verify(LEGACY_NAMESPACE)
-            }
-        });
+        let out = run_with_stdin(
+            Command::new("ssh-keygen")
+                .args(["-Y", "verify", "-n", NAMESPACE, "-f"])
+                .arg(self.allowed_file.as_ref().unwrap())
+                .args(["-I", who, "-s"])
+                .arg(&sig_file),
+            e.hash.as_bytes(),
+        );
         let _ = fs::remove_file(&sig_file);
         let out = out.context("could not run ssh-keygen to verify")?;
         Ok(if out.status.success() {
@@ -295,7 +277,7 @@ mod tests {
         );
         assert_eq!(
             allowed_signers(&people),
-            "omar namespaces=\"kontext,ctx\" ssh-ed25519 AAAA omar@mac\n"
+            "omar namespaces=\"kontext\" ssh-ed25519 AAAA omar@mac\n"
         );
     }
 

@@ -390,31 +390,6 @@ fn distill_hook(home: &Path, project_name: &str, dir: &Path, data: &Value) -> Re
     ))
 }
 
-/// No kontext project, but leftovers from the old `ctx` command: one line in
-/// the session context that points to the migration.
-fn legacy_note(data: &Value, stdout: &mut dyn Write) {
-    let Some(dir) = data
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .filter(|d| d.is_dir())
-        .or_else(|| std::env::current_dir().ok())
-    else {
-        return;
-    };
-    let Some(hint) = crate::migrate::Leftovers::find(&dir).hint() else {
-        return;
-    };
-    let out = json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": format!("kontext cannot find its configuration, but {hint}."),
-        }
-    });
-    let _ = writeln!(stdout, "{out}");
-    let _ = stdout.flush();
-}
-
 /// Runs the hook. Always returns without error.
 pub fn run(event: &str, stdin: &mut dyn Read, stdout: &mut dyn Write) {
     let data = read_input(stdin);
@@ -426,14 +401,7 @@ pub fn run(event: &str, stdin: &mut dyn Read, stdout: &mut dyn Write) {
     match result {
         Ok(Some((home, Ok(note)))) => log_line(&home, &note),
         Ok(Some((home, Err(e)))) => log_line(&home, &format!("{event}: error: {e:#}")),
-        // Without a project there is nowhere to note it: stay quiet. If what is
-        // there is an install of the old `ctx` command, tell the session in one
-        // line (never on stderr).
-        Ok(None) if event == "session-start" => {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                legacy_note(&data, stdout)
-            }));
-        }
+        // Without a project there is nowhere to note it: stay quiet.
         Ok(None) => {}
         Err(_) => {
             if let Ok(r) = config::resolve_project(None) {

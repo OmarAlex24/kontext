@@ -94,7 +94,7 @@ fn brief_next_and_pm_views() {
     assert!(!out.contains(&d_other), "{out}");
 
     // brief: board, epic decisions, questions for epic:payments, facts and the mark.
-    let brief = p.ctx_ok(&["brief", "epic:payments"]);
+    let brief = p.kontext_ok(&["brief", "epic:payments"]);
     for want in [
         "# Brief for epic Card payments (epic:payments) in demo".to_string(),
         format!("## Epic goals (1)\n- {g} [signed] Recurring charge"),
@@ -115,24 +115,24 @@ fn brief_next_and_pm_views() {
         "{brief}"
     );
     // brief advances the cursor of epic:payments (as resume does); --peek does not.
-    let again = p.ctx_ok(&["brief", "payments", "--peek"]);
+    let again = p.kontext_ok(&["brief", "payments", "--peek"]);
     assert!(
         again.contains("## What's new since your last visit (0)"),
         "{again}"
     );
     // With a small budget, the open tasks and the mark are never dropped.
-    let tiny = p.ctx_ok(&["brief", "payments", "--peek", "--max-chars", "200"]);
+    let tiny = p.kontext_ok(&["brief", "payments", "--peek", "--max-chars", "200"]);
     assert!(
         tiny.contains(&format!("- {t3} Payment screen")) && tiny.contains("## Assignment mark")
     );
     assert!(!tiny.contains("(why: 3DS)"), "{tiny}");
     let v: serde_json::Value =
-        serde_json::from_str(&p.ctx_ok(&["--json", "brief", &e, "--peek"])).unwrap();
+        serde_json::from_str(&p.kontext_ok(&["--json", "brief", &e, "--peek"])).unwrap();
     assert_eq!(v["reader"], "epic:payments");
     assert_eq!(v["tasks"].as_array().unwrap().len(), 3);
 
     // resume --as pm: one line per epic, what was escalated to the pm, no tasks or facts.
-    let pm = p.ctx_ok(&["resume", "--as", "pm"]);
+    let pm = p.kontext_ok(&["resume", "--as", "pm"]);
     assert!(
         pm.contains(&format!(
             "## Epics (1)\n- {e} Card payments: 0/3 closed, 1 claimed, 1 ready, 1 blocked; last activity "
@@ -157,9 +157,9 @@ fn brief_next_and_pm_views() {
     }
     assert!(pm.contains("from the epics' work"), "{pm}");
     // The owner does see the facts, and their question reaches them in standup.
-    let owner = p.ctx_ok(&["resume", "--as", "owner", "--peek"]);
+    let owner = p.kontext_ok(&["resume", "--as", "owner", "--peek"]);
     assert!(owner.contains("Node 20"), "{owner}");
-    let standup = p.ctx_ok(&["standup", "--peek"]);
+    let standup = p.kontext_ok(&["standup", "--peek"]);
     assert!(
         standup.contains(&format!(
             "- {q_owner} question (new) from agent:pm (pm): Price?"
@@ -171,11 +171,11 @@ fn brief_next_and_pm_views() {
 #[test]
 fn drift_shows_in_pm_resume_without_task_titles() {
     let (p, g, _) = with_epic();
-    p.ctx_ok(&["task", "add", "Secret thing", "--epic", "payments"]);
+    p.kontext_ok(&["task", "add", "Secret thing", "--epic", "payments"]);
     let g2 = p.id_of(&[], &["goal", "add", "Another goal"]);
-    p.ctx_ok(&["sign", &g2]);
-    p.ctx_ok(&["supersede", &g, &g2]);
-    let pm = p.ctx_ok(&["resume", "--as", "pm", "--peek"]);
+    p.kontext_ok(&["sign", &g2]);
+    p.kontext_ok(&["supersede", &g, &g2]);
+    let pm = p.kontext_ok(&["resume", "--as", "pm", "--peek"]);
     assert!(
         pm.contains(&format!("cites {g}, which was superseded by {g2}")),
         "{pm}"
@@ -198,9 +198,9 @@ fn team_flow_end_to_end() {
             "First real charge",
         ],
     );
-    p.ctx_ok(&["sign", &a]);
+    p.kontext_ok(&["sign", &a]);
     let g = p.id_of(&[], &["goal", "add", "Recurring billing"]);
-    p.ctx_ok(&["sign", &g]);
+    p.kontext_ok(&["sign", &g]);
     let pm = [("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")];
     let e = p.id_of(&pm, &["epic", "add", "Payments", "--goal", &g]);
     let coord = [
@@ -227,7 +227,7 @@ fn team_flow_end_to_end() {
         &coord,
         &["task", "add", "Screen", "--epic", "epic:payments"],
     );
-    p.ctx_ok(&["standup"]);
+    p.kontext_ok(&["standup"]);
 
     let (got, mark) = p.claim("impl-1", "payments");
     assert_eq!(got, t1);
@@ -244,17 +244,17 @@ fn team_flow_end_to_end() {
     assert_eq!(state["tasks"][&t2], "ready");
     assert_eq!(state["tasks"][&t3], "ready");
 
-    let standup = p.ctx_ok(&["standup"]);
+    let standup = p.kontext_ok(&["standup"]);
     assert!(
         standup.contains(&format!(
             "- {t1} task closed by agent:impl-1 (implementer): SDK · evidence: `true` (0)"
         )),
         "{standup}"
     );
-    let pm_view = p.ctx_ok(&["resume", "--as", "pm"]);
+    let pm_view = p.kontext_ok(&["resume", "--as", "pm"]);
     assert!(
         pm_view.contains("- ") && pm_view.contains("Payments: 1/3 closed, 2 ready; last activity "),
         "{pm_view}"
     );
-    assert!(p.ctx_ok(&["verify"]).starts_with("OK: "));
+    assert!(p.kontext_ok(&["verify"]).starts_with("OK: "));
 }

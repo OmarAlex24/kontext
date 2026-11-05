@@ -8,7 +8,7 @@ use std::process::Command;
 use common::{BIN, Project};
 
 #[test]
-fn init_creates_ctx_home() {
+fn init_creates_kontext_home() {
     let p = Project::new();
     for f in [
         "project.toml",
@@ -30,9 +30,12 @@ fn init_creates_ctx_home() {
     assert!(reg.contains("writer = \"omar@test\""), "{reg}");
     assert!(reg.contains("[projects.demo]"), "{reg}");
     // An empty kontext-home verifies.
-    assert_eq!(p.ctx_ok(&["verify"]).trim(), "OK: 0 entries in 0 writers");
+    assert_eq!(
+        p.kontext_ok(&["verify"]).trim(),
+        "OK: 0 entries in 0 writers"
+    );
     // It cannot be registered twice.
-    let out = p.ctx(&[
+    let out = p.kontext(&[
         "init",
         "demo",
         "--home",
@@ -99,7 +102,7 @@ fn verify_reports_file_and_line() {
     let path = p.ledger("omar@test");
     let text = fs::read_to_string(&path).unwrap();
     fs::write(&path, text.replace("\"dos\"", "\"tres\"")).unwrap();
-    let out = p.ctx(&["verify"]);
+    let out = p.kontext(&["verify"]);
     assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -113,8 +116,14 @@ fn reindex_rebuilds_from_files() {
     let p = Project::new();
     p.append("{\"kind\":\"fact\",\"title\":\"uno\"}\n{\"kind\":\"decision\",\"title\":\"dos\",\"refs\":[]}\n");
     fs::remove_file(p.home.join(".kontext/index.sqlite")).unwrap();
-    assert_eq!(p.ctx_ok(&["reindex"]).trim(), "Index rebuilt: 2 entries");
-    assert_eq!(p.ctx_ok(&["reindex"]).trim(), "Index rebuilt: 2 entries");
+    assert_eq!(
+        p.kontext_ok(&["reindex"]).trim(),
+        "Index rebuilt: 2 entries"
+    );
+    assert_eq!(
+        p.kontext_ok(&["reindex"]).trim(),
+        "Index rebuilt: 2 entries"
+    );
 }
 
 #[test]

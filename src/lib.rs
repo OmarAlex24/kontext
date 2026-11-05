@@ -20,7 +20,6 @@ pub mod inbox;
 pub mod index;
 pub mod install;
 pub mod media;
-pub mod migrate;
 pub mod model;
 pub mod plan;
 pub mod recall;

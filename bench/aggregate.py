@@ -11,13 +11,8 @@ With `--cost`, one more table: per cell and turn type (work, filler, question,
 compact), the calls and the USD per run, and per call the cache read and
 created, the output and the model's internal turns (`num_turns`), from the
 envelopes in `runs/*/transcripts/*.jsonl`. And another one with the prompt
-cache breaks per run (`cache` in run.json, or from the sessions saved in
-`transcripts/claude/` if the run is older): requests, breaks and tokens that
+cache breaks per run (`cache` in run.json): requests, breaks and tokens that
 were written again.
-
-Results made before the rename are read too: `ctx-*` variants, the `ctx` key,
-the `memoria-larga` and `cobranza` scenarios, `cruce` classes, `sesión` cost
-basis and `dia-N.jsonl` and Spanish transcript kinds are normalized on read.
 """
 
 import json
@@ -30,12 +25,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchlib import cache, runner  # noqa: E402
 
 CLASS_ORDER = {"A": 0, "B": 1, "C": 2, "cross": 3, "?": 4}
-
-# Names the results made before the rename use, mapped to the current ones.
-OLD_VARIANTS = {"ctx-pointer": "kontext-pointer", "ctx-inject": "kontext-inject"}
-OLD_SCENARIOS = {"cobranza": "billing", "memoria-larga": "long-memory"}
-OLD_CLASSES = {"cruce": "cross"}
-OLD_COST_BASIS = {"sesión": "session"}
 
 
 def stats(xs):
@@ -68,27 +57,8 @@ def group_recall(r, group, key):
     return b.get("recall") if b else None
 
 
-def normalize_run(r):
-    """Gives a run.json made before the rename the names it has now (in place)."""
-    r["variant"] = OLD_VARIANTS.get(r.get("variant"), r.get("variant"))
-    r["scenario"] = OLD_SCENARIOS.get(r.get("scenario"), r.get("scenario"))
-    if "ctx" in r and "kontext" not in r:
-        r["kontext"] = r.pop("ctx")
-    r["cost_basis"] = OLD_COST_BASIS.get(r.get("cost_basis"), r.get("cost_basis"))
-    probes = r.get("probes") or {}
-    for item in probes.get("items") or []:
-        item["class"] = OLD_CLASSES.get(item.get("class"), item.get("class"))
-    for group in ("by_class",):
-        if group in probes:
-            probes[group] = {OLD_CLASSES.get(k, k): v for k, v in probes[group].items()}
-    return r
-
-
-# Turn types of the transcripts, grouped to compare costs (the old kinds too).
-KIND_GROUPS = {
-    "turn": "work", "correction": "work", "fill": "fill", "probe": "probe", "compact": "compact",
-    "turno": "work", "corrección": "work", "relleno": "fill", "pregunta": "probe", "compactar": "compact",
-}
+# Turn types of the transcripts, grouped to compare costs.
+KIND_GROUPS = {"turn": "work", "correction": "work", "fill": "fill", "probe": "probe", "compact": "compact"}
 GROUP_ORDER = {g: i for i, g in enumerate(["work", "fill", "probe", "compact"])}
 COST_KEYS = ("calls", "cache_read", "cache_creation", "output", "turns", "cost_usd")
 
@@ -98,7 +68,7 @@ def cost_by_kind(run_dir):
     cache_creation, output, turns, cost_usd}}`. With `--resume` the envelope
     carries the session's running total in `modelUsage` and `total_cost_usd` (and
     `usage` does not count `/compact`), so each call counts its difference from
-    the previous call of the same session, as `runner.recost` does. `num_turns`
+    the previous call of the same session, as the runner does. `num_turns`
     is the call's own."""
     out = {}
     for t in runner.day_transcripts(run_dir):
@@ -194,16 +164,9 @@ def main(argv):
     runs = []
     for p in sorted(Path(root).rglob("run.json")):
         r = json.loads(p.read_text())
-        if r.get("cost_basis") not in ("session", "sesión") and (p.parent / "transcripts").is_dir():
-            # Older runs added up the session's running total of each envelope.
-            r = runner.recost(p.parent)
-        r = normalize_run(r)
         if costo:
             has = (p.parent / "transcripts").is_dir()
             r["_cost_by_kind"] = cost_by_kind(p.parent) if has else None
-            sessions = sorted((p.parent / "transcripts" / "claude").glob("*.jsonl.gz"))
-            if r.get("cache") is None and sessions:
-                r["cache"] = cache.breaks(sessions)
         runs.append(r)
     runs = [r for r in runs if dry or not r.get("dry_run")]
     if not runs:

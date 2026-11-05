@@ -12,7 +12,7 @@ use common::{Project, with_epic};
 use serde_json::Value;
 
 fn inbox(p: &Project) -> Value {
-    serde_json::from_str(&p.ctx_ok(&["--json", "inbox", "--all"])).unwrap()
+    serde_json::from_str(&p.kontext_ok(&["--json", "inbox", "--all"])).unwrap()
 }
 
 fn items(p: &Project) -> Vec<Value> {
@@ -71,7 +71,7 @@ fn each_class_is_derived_from_the_ledger() {
     );
     let t: Value = serde_json::from_str(&t).unwrap();
     let t = t["id"].as_str().unwrap().to_string();
-    p.ctx_ok(&["done", &t, "--evidence", "cmd:\"cargo test\"=0"]);
+    p.kontext_ok(&["done", &t, "--evidence", "cmd:\"cargo test\"=0"]);
     p.agent_ok("tester", &["reopen", &t, "--why", "charges twice"]);
 
     let it = items(&p);
@@ -122,11 +122,11 @@ fn seeing_does_not_close_only_acting_does() {
     assert_eq!(items(&p).len(), 4);
 
     // See it every way: the inbox, the count, the standup, the report and the hook.
-    p.ctx_ok(&["inbox"]);
-    p.ctx_ok(&["inbox", "count"]);
-    p.ctx_ok(&["standup"]);
-    p.ctx_ok(&["report", "--html"]);
-    p.ctx_ok(&["report"]);
+    p.kontext_ok(&["inbox"]);
+    p.kontext_ok(&["inbox", "count"]);
+    p.kontext_ok(&["standup"]);
+    p.kontext_ok(&["report", "--html"]);
+    p.kontext_ok(&["report"]);
     let mut hook = p
         .cmd(&["hook", "session-start"])
         .env("KONTEXT_ROLE", "pm")
@@ -139,28 +139,31 @@ fn seeing_does_not_close_only_acting_does() {
     assert_eq!(items(&p).len(), 4, "seeing it closes nothing");
 
     // An agent can't close the human's pending items.
-    let out = p.ctx_env(&[("KONTEXT_ACTOR", "agent:pm")], &["inbox", "dismiss", &q]);
+    let out = p.kontext_env(&[("KONTEXT_ACTOR", "agent:pm")], &["inbox", "dismiss", &q]);
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(items(&p).len(), 4);
 
     // Acting does: sign, answer, dismiss and confirm.
-    let out = p.ctx_ok(&["inbox", "sign", &g2]);
+    let out = p.kontext_ok(&["inbox", "sign", &g2]);
     assert!(out.contains("saved the signature"), "{out}");
     assert!(out.contains("3 pending items"), "{out}");
-    p.ctx_ok(&["inbox", "answer", &q, "199 dollars"]);
-    p.ctx_ok(&["inbox", "dismiss", &pr, "--why", "does not apply"]);
+    p.kontext_ok(&["inbox", "answer", &q, "199 dollars"]);
+    p.kontext_ok(&["inbox", "dismiss", &pr, "--why", "does not apply"]);
     assert_eq!(classes(&p), ["review"]);
-    p.ctx_ok(&["inbox", "confirm", "review"]);
+    p.kontext_ok(&["inbox", "confirm", "review"]);
     assert!(items(&p).is_empty());
-    assert_eq!(p.ctx_ok(&["inbox", "count"]).trim(), "No pending items.");
+    assert_eq!(
+        p.kontext_ok(&["inbox", "count"]).trim(),
+        "No pending items."
+    );
     // The dismissal stays in the ledger, with its reason, and the proposal is still pending.
-    let show = p.ctx_ok(&["show", &pr]);
+    let show = p.kontext_ok(&["show", &pr]);
     assert!(show.contains("pending"), "{show}");
     let st = p.state();
     assert_eq!(st["status"][&g2], "signed");
     assert_eq!(st["status"][&f], "active");
     // What was dismissed doesn't keep waiting in the standup either.
-    let standup = p.ctx_ok(&["standup", "--peek"]);
+    let standup = p.kontext_ok(&["standup", "--peek"]);
     assert!(!standup.contains(&pr), "{standup}");
 }
 
@@ -186,17 +189,17 @@ fn sign_by_number_and_answer_inside_a_group() {
     assert_eq!(it[0]["title"], "2 questions in Card payments");
     assert_eq!(it[0]["subs"].as_array().unwrap().len(), 2);
     // Without saying which, it doesn't answer.
-    let out = p.ctx(&["inbox", "answer", "1", "yes"]);
+    let out = p.kontext(&["inbox", "answer", "1", "yes"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("1.1"));
     // With 1.2 it answers the second; the first stays.
-    p.ctx_ok(&["inbox", "answer", "1.2", "The customer"]);
+    p.kontext_ok(&["inbox", "answer", "1.2", "The customer"]);
     let st = p.state();
     assert_eq!(st["status"][&q2], "answered");
     assert_eq!(st["status"][&q1], "open");
     assert_eq!(items(&p).len(), 1);
     // Signing something that is not to be signed is refused.
-    let out = p.ctx(&["inbox", "sign", "1"]);
+    let out = p.kontext(&["inbox", "sign", "1"]);
     assert_eq!(out.status.code(), Some(2));
 }
 
@@ -204,7 +207,7 @@ fn sign_by_number_and_answer_inside_a_group() {
 fn ordered_by_impact_then_age() {
     let (p, g, _) = with_epic();
     // Warnings goes after payments.
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "epic", "add", "Notices", "--goal", &g, "--name", "notices", "--after", "payments",
     ]);
     let c = coord("payments");
@@ -267,14 +270,14 @@ fn ordered_by_impact_then_age() {
             ],
         );
     }
-    let text = p.ctx_ok(&["inbox"]);
+    let text = p.kontext_ok(&["inbox"]);
     assert!(text.contains("\n5. "), "{text}");
     assert!(!text.contains("\n6. "), "{text}");
     assert!(
         text.contains("And 3 more: 3 to answer. `kontext inbox --all` shows them."),
         "{text}"
     );
-    assert!(p.ctx_ok(&["inbox", "--all"]).contains("\n8. "));
+    assert!(p.kontext_ok(&["inbox", "--all"]).contains("\n8. "));
 }
 
 #[test]
@@ -301,7 +304,7 @@ fn ask_joins_a_question_that_is_already_open() {
         .as_str()
         .unwrap()
         .to_string();
-    let out = p.ctx_env_ok(
+    let out = p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "agent:impl-1")],
         &["ask", "do we charge in usd?", "--task", &t, "--to", "owner"],
     );
@@ -328,7 +331,7 @@ fn ask_joins_a_question_that_is_already_open() {
     // The answer counts as new context for that task.
     let (task, mark) = p.claim("impl-1", "payments");
     assert_eq!(task, t);
-    p.ctx_ok(&["answer", &q, "MXN"]);
+    p.kontext_ok(&["answer", &q, "MXN"]);
     let out = p.run_as(
         &common::implementer("impl-1"),
         &["done", &t, "--since", &mark, "--evidence", "cmd:\"x\"=0"],
@@ -348,7 +351,7 @@ fn ask_joins_a_question_that_is_already_open() {
         .find(|k| k.starts_with("G-"))
         .unwrap()
         .clone();
-    p.ctx_ok(&["epic", "add", "Notices", "--goal", &g, "--name", "notices"]);
+    p.kontext_ok(&["epic", "add", "Notices", "--goal", &g, "--name", "notices"]);
     let out = p.run_as_ok(
         &coord("notices"),
         &["ask", "Do we charge in MXN or USD?", "--to", "owner"],
@@ -379,13 +382,13 @@ fn the_brake_marks_agent_questions_as_not_urgent() {
     text.push_str("\n[inbox]\nmax_pending = 2\n");
     fs::write(&toml, text).unwrap();
     p.id_of(&PM, &["ask", "One?", "--to", "owner"]);
-    let out = p.ctx_env_ok(&PM, &["ask", "Two, different?", "--to", "owner"]);
+    let out = p.kontext_env_ok(&PM, &["ask", "Two, different?", "--to", "owner"]);
     assert!(
         !out.contains("Warning"),
         "with 1 pending item it does not brake: {out}"
     );
     // With 2 pending items, the third is marked not urgent and warns.
-    let out = p.ctx_env_ok(&PM, &["ask", "Three separate topics?", "--to", "owner"]);
+    let out = p.kontext_env_ok(&PM, &["ask", "Three separate topics?", "--to", "owner"]);
     assert!(
         out.contains("the human has 2 unread pending items; does this block you?"),
         "{out}"
@@ -398,7 +401,7 @@ fn the_brake_marks_agent_questions_as_not_urgent() {
     assert_eq!(third["not_urgent"], true);
     assert!(third["line"].as_str().unwrap().starts_with("not urgent"));
     // With --blocking it doesn't brake.
-    let out = p.ctx_env_ok(
+    let out = p.kontext_env_ok(
         &PM,
         &["ask", "Four more things?", "--to", "owner", "--blocking"],
     );
@@ -410,9 +413,9 @@ fn the_brake_marks_agent_questions_as_not_urgent() {
         .unwrap();
     assert_eq!(fourth["not_urgent"], false);
     // To another agent (not the human), it doesn't brake, nor to a human.
-    let out = p.ctx_env_ok(&PM, &["ask", "Five?", "--to", "coder"]);
+    let out = p.kontext_env_ok(&PM, &["ask", "Five?", "--to", "coder"]);
     assert!(!out.contains("Warning"), "{out}");
-    let out = p.ctx_ok(&["ask", "Six new ones?", "--to", "owner"]);
+    let out = p.kontext_ok(&["ask", "Six new ones?", "--to", "owner"]);
     assert!(!out.contains("Warning"), "{out}");
 }
 
@@ -420,26 +423,26 @@ fn the_brake_marks_agent_questions_as_not_urgent() {
 fn new_counts_from_the_last_human_action() {
     let p = Project::new();
     // omar writes something: that is their last action.
-    p.ctx_ok(&["log", "Starting"]);
+    p.kontext_ok(&["log", "Starting"]);
     p.id_of(&PM, &["ask", "One?", "--to", "owner"]);
     let ib = inbox(&p);
     assert_eq!(ib["new"], 1);
     // Seeing it (standup moves its cursor) doesn't make it old.
-    p.ctx_ok(&["standup"]);
-    p.ctx_ok(&["inbox"]);
+    p.kontext_ok(&["standup"]);
+    p.kontext_ok(&["inbox"]);
     assert_eq!(inbox(&p)["new"], 1);
-    assert!(p.ctx_ok(&["standup", "--peek"]).contains("(new)"));
+    assert!(p.kontext_ok(&["standup", "--peek"]).contains("(new)"));
     // Any action by omar in the ledger does: what was already there stops being new.
-    p.ctx_ok(&["log", "Reviewed today's items"]);
+    p.kontext_ok(&["log", "Reviewed today's items"]);
     let ib = inbox(&p);
     assert_eq!(ib["count"], 1);
     assert_eq!(ib["new"], 0);
-    assert!(!p.ctx_ok(&["standup", "--peek"]).contains("(new)"));
+    assert!(!p.kontext_ok(&["standup", "--peek"]).contains("(new)"));
     // What arrives later is new.
     p.id_of(&PM, &["ask", "Another different thing?", "--to", "owner"]);
     assert_eq!(inbox(&p)["new"], 1);
     assert!(
-        p.ctx_ok(&["inbox", "count"])
+        p.kontext_ok(&["inbox", "count"])
             .starts_with("2 pending items (1 new)")
     );
 }
@@ -505,7 +508,7 @@ fn everyone(p: &Project, all: bool) -> Value {
     if all {
         args.push("--all");
     }
-    serde_json::from_str(&p.ctx_ok(&args)).unwrap()
+    serde_json::from_str(&p.kontext_ok(&args)).unwrap()
 }
 
 fn keys_of(section: &Value) -> Vec<String> {
@@ -548,7 +551,7 @@ fn everyone_has_a_section_per_human_and_one_common() {
     ))
     .unwrap();
     let t = t["id"].as_str().unwrap().to_string();
-    p.ctx_ok(&["done", &t, "--evidence", "cmd:\"cargo test\"=0"]);
+    p.kontext_ok(&["done", &t, "--evidence", "cmd:\"cargo test\"=0"]);
     p.agent_ok("tester", &["reopen", &t, "--why", "charges twice"]);
     // A question for an agent doesn't make anyone a human.
     p.agent_ok("coder", &["ask", "Which SDK?", "--to", "coder"]);
@@ -582,7 +585,7 @@ fn everyone_has_a_section_per_human_and_one_common() {
     assert_eq!(text.matches("Reopened: Webhooks").count(), 1, "{ev:#}");
 
     // In text: one section per human, in order, and the common one at the end.
-    let out = p.ctx_ok(&["inbox", "--everyone"]);
+    let out = p.kontext_ok(&["inbox", "--everyone"]);
     let at = |s: &str| {
         out.find(s)
             .unwrap_or_else(|| panic!("missing {s:?} in:\n{out}"))
@@ -606,7 +609,7 @@ fn everyone_has_a_section_per_human_and_one_common() {
     assert!(!out.contains("Which SDK?"), "{out}");
 
     // One line per human with `count`.
-    let count = p.ctx_ok(&["inbox", "count", "--everyone"]);
+    let count = p.kontext_ok(&["inbox", "count", "--everyone"]);
     let lines: Vec<&str> = count.lines().collect();
     assert_eq!(lines.len(), 4, "{count}");
     assert!(lines[0].starts_with("omar: 2 pending items"), "{count}");
@@ -627,11 +630,11 @@ fn everyone_has_a_section_per_human_and_one_common() {
     assert!(!mine.contains(&qa) && !mine.contains(&ql), "{mine:?}");
     // And luis sees theirs (`--to human:luis` is luis).
     let luis: Value =
-        serde_json::from_str(&p.ctx_ok(&["--json", "inbox", "--as", "luis"])).unwrap();
+        serde_json::from_str(&p.kontext_ok(&["--json", "inbox", "--as", "luis"])).unwrap();
     assert!(keys_of(&luis).contains(&ql), "{luis:#}");
 
     // When ana answers, their section goes away and they are listed as quiet.
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "human:ana")],
         &["answer", &qa, "Blue and white"],
     );
@@ -644,9 +647,9 @@ fn everyone_has_a_section_per_human_and_one_common() {
         .collect();
     assert_eq!(names, ["omar", "luis"], "{ev:#}");
     assert_eq!(ev["quiet"], serde_json::json!(["ana"]));
-    let out = p.ctx_ok(&["inbox", "--everyone"]);
+    let out = p.kontext_ok(&["inbox", "--everyone"]);
     assert!(out.contains("No pending items of their own: ana."), "{out}");
-    let count = p.ctx_ok(&["inbox", "count", "--everyone"]);
+    let count = p.kontext_ok(&["inbox", "count", "--everyone"]);
     assert!(
         count.contains("ana: no pending items of their own."),
         "{count}"
@@ -664,13 +667,13 @@ fn everyone_shows_five_per_section_unless_all() {
         "How many charge retries?",
         "Invoice with CFDI?",
     ] {
-        p.ctx_env_ok(&PM, &["ask", q, "--to", "omar", "--no-merge"]);
+        p.kontext_env_ok(&PM, &["ask", q, "--to", "omar", "--no-merge"]);
     }
     let ev = everyone(&p, false);
     assert_eq!(ev["humans"][0]["count"], 6, "{ev:#}");
     assert_eq!(ev["humans"][0]["items"].as_array().unwrap().len(), 5);
     assert_eq!(ev["humans"][0]["more"], 1);
-    let out = p.ctx_ok(&["inbox", "--everyone"]);
+    let out = p.kontext_ok(&["inbox", "--everyone"]);
     assert!(
         out.contains("And 1 more: 1 to answer. `kontext inbox --everyone --all` shows them."),
         "{out}"
@@ -681,13 +684,13 @@ fn everyone_shows_five_per_section_unless_all() {
     let ev = everyone(&p, true);
     assert_eq!(ev["humans"][0]["items"].as_array().unwrap().len(), 6);
     assert_eq!(ev["humans"][0]["more"], 0);
-    let out = p.ctx_ok(&["inbox", "--everyone", "--all"]);
+    let out = p.kontext_ok(&["inbox", "--everyone", "--all"]);
     assert!(!out.contains("And 1 more"), "{out}");
     assert!(out.contains("Invoice with CFDI?"), "{out}");
 
     // Nothing from anyone.
     let q = Project::new();
-    let out = q.ctx_ok(&["inbox", "--everyone"]);
+    let out = q.kontext_ok(&["inbox", "--everyone"]);
     assert!(
         out.contains("Nothing is waiting for anyone's action."),
         "{out}"
@@ -697,7 +700,7 @@ fn everyone_shows_five_per_section_unless_all() {
 #[test]
 fn everyone_refuses_as_and_acting() {
     let p = Project::new();
-    let out = p.ctx(&["inbox", "--everyone", "--as", "omar"]);
+    let out = p.kontext(&["inbox", "--everyone", "--as", "omar"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -708,7 +711,7 @@ fn everyone_refuses_as_and_acting() {
         &["inbox", "--everyone", "sign", "1"][..],
         &["inbox", "dismiss", "1", "--everyone", "--why", "x"][..],
     ] {
-        let out = p.ctx(args);
+        let out = p.kontext(args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("--everyone is only for viewing"), "{err}");

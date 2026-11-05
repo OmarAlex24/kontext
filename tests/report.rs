@@ -16,7 +16,7 @@ fn capture(name: &str) -> PathBuf {
 }
 
 fn add_task(p: &Project, title: &str) -> String {
-    let out = p.ctx_ok(&["--json", "task", "add", title, "--epic", "payments"]);
+    let out = p.kontext_ok(&["--json", "task", "add", title, "--epic", "payments"]);
     serde_json::from_str::<Value>(&out).unwrap()["id"]
         .as_str()
         .unwrap()
@@ -68,18 +68,18 @@ fn images_are_stored_by_content_with_their_screen() {
         fs::read(p.home.join(img["value"].as_str().unwrap())).unwrap(),
         bytes
     );
-    let show = p.ctx_ok(&["show", &t]);
+    let show = p.kontext_ok(&["show", &t]);
     assert!(
         show.contains("screenshot payment (payment-v1.png)"),
         "{show}"
     );
 
     // verify checks that it is there and that its hash matches.
-    let out = p.ctx_ok(&["verify"]);
+    let out = p.kontext_ok(&["verify"]);
     assert!(out.contains("1 image"), "{out}");
     let path = p.home.join(img["value"].as_str().unwrap());
     fs::write(&path, b"another thing").unwrap();
-    let out = p.ctx(&["verify"]);
+    let out = p.kontext(&["verify"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("no longer matches its hash"),
@@ -87,15 +87,15 @@ fn images_are_stored_by_content_with_their_screen() {
         String::from_utf8_lossy(&out.stdout)
     );
     fs::remove_file(&path).unwrap();
-    let out = p.ctx(&["verify"]);
+    let out = p.kontext(&["verify"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stdout).contains("is not in the kontext-home"));
     fs::write(&path, &bytes).unwrap();
-    p.ctx_ok(&["verify"]);
+    p.kontext_ok(&["verify"]);
 
     // Without --screen, the screen is the file name; --screen without a screenshot is not valid.
     let t2 = add_task(&p, "Receipt");
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "done",
         &t2,
         "--evidence",
@@ -103,7 +103,7 @@ fn images_are_stored_by_content_with_their_screen() {
     ]);
     assert_eq!(evidence(&p, &t2)[0]["screen"], "email");
     let t3 = add_task(&p, "Other");
-    let out = p.ctx(&["done", &t3, "--evidence", "cmd:\"x\"=0", "--screen", "x"]);
+    let out = p.kontext(&["done", &t3, "--evidence", "cmd:\"x\"=0", "--screen", "x"]);
     assert!(!out.status.success());
 }
 
@@ -115,7 +115,7 @@ fn images_over_the_cap_are_refused_and_not_stored() {
     text.push_str("\n[media]\nmax_size = \"4KB\"\n");
     fs::write(&toml, text).unwrap();
     let t = add_task(&p, "Payment screen");
-    let out = p.ctx(&[
+    let out = p.kontext(&[
         "done",
         &t,
         "--evidence",
@@ -129,7 +129,7 @@ fn images_over_the_cap_are_refused_and_not_stored() {
     // Neither is anything that is not an image.
     let fake = p.dir.path().join("no.png");
     fs::write(&fake, b"hello").unwrap();
-    let out = p.ctx(&["done", &t, "--evidence", fake.to_str().unwrap()]);
+    let out = p.kontext(&["done", &t, "--evidence", fake.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("is not a PNG, JPG or WebP image"));
 }
@@ -138,22 +138,22 @@ fn images_over_the_cap_are_refused_and_not_stored() {
 fn sync_commits_the_images() {
     let (p, _, _) = with_epic();
     let t = add_task(&p, "Payment screen");
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "done",
         &t,
         "--evidence",
         capture("payment-v1.png").to_str().unwrap(),
     ]);
     // The first sync uploads everything; the second, what is new in media/.
-    p.ctx_ok(&["sync"]);
+    p.kontext_ok(&["sync"]);
     let t2 = add_task(&p, "Receipt");
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "done",
         &t2,
         "--evidence",
         capture("email.png").to_str().unwrap(),
     ]);
-    let out = p.ctx_ok(&["sync"]);
+    let out = p.kontext_ok(&["sync"]);
     assert!(!out.contains("no sube"), "{out}");
     let files = git(&p.home, &["ls-files", "media"]);
     assert_eq!(files.lines().count(), 2, "{files}");
@@ -162,11 +162,11 @@ fn sync_commits_the_images() {
 #[test]
 fn report_has_the_sections_in_order_and_no_history() {
     let (p, g, _) = with_epic();
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "epic", "add", "Notices", "--goal", &g, "--name", "notices", "--after", "payments",
     ]);
     let t1 = add_task(&p, "Payment screen");
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "done",
         &t1,
         "--evidence",
@@ -175,7 +175,7 @@ fn report_has_the_sections_in_order_and_no_history() {
         "payment",
     ]);
     let t2 = add_task(&p, "Payment screen with 3DS");
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "done",
         &t2,
         "--evidence",
@@ -183,13 +183,13 @@ fn report_has_the_sections_in_order_and_no_history() {
         "--screen",
         "payment",
     ]);
-    p.ctx_ok(&["log", "Tried the Stripe SDK by hand"]);
+    p.kontext_ok(&["log", "Tried the Stripe SDK by hand"]);
     add_task(&p, "Email receipt");
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")],
         &["goal", "add", "Refunds"],
     );
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")],
         &[
             "log",
@@ -198,7 +198,7 @@ fn report_has_the_sections_in_order_and_no_history() {
         ],
     );
     let out_file = p.dir.path().join("report.html");
-    let out = p.ctx_ok(&["report", "--html", "-o", out_file.to_str().unwrap()]);
+    let out = p.kontext_ok(&["report", "--html", "-o", out_file.to_str().unwrap()]);
     assert!(out.contains("2 screenshots"), "{out}");
     let html = fs::read_to_string(&out_file).unwrap();
 
@@ -251,21 +251,21 @@ fn report_has_the_sections_in_order_and_no_history() {
     }
     // Generating it writes nothing.
     let before = p.entries("omar@test").len();
-    p.ctx_ok(&["report", "--html"]);
-    p.ctx_ok(&["report"]);
+    p.kontext_ok(&["report", "--html"]);
+    p.kontext_ok(&["report"]);
     assert_eq!(p.entries("omar@test").len(), before);
 
     // With a pending item that stops work, the light turns red.
     let t3 = add_task(&p, "Webhooks");
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "agent:impl-1")],
         &["ask", "Which key do I use?", "--task", &t3, "--to", "owner"],
     );
-    let html = p.ctx_ok(&["report", "--html"]);
+    let html = p.kontext_ok(&["report", "--html"]);
     assert!(html.contains("class=\"state s-red\""));
     assert!(html.contains("Work is stopped, waiting for you"));
     // In text, the same.
-    let md = p.ctx_ok(&["report"]);
+    let md = p.kontext_ok(&["report"]);
     assert!(md.starts_with("# Where we are in demo"), "{md}");
     assert!(
         md.contains("## Your turn") && md.contains("## Progress"),
@@ -303,8 +303,8 @@ fn a_decision_can_carry_the_approved_mockup() {
     assert_eq!(att[0]["screen"], "payment");
     assert_eq!(att[1]["type"], "page");
     assert!(att[1]["value"].as_str().unwrap().ends_with(".html"));
-    p.ctx_ok(&["verify"]);
-    let html = p.ctx_ok(&["report", "--html"]);
+    p.kontext_ok(&["verify"]);
+    let html = p.kontext_ok(&["report", "--html"]);
     assert!(
         html.contains(&format!("approved reference ({d})")),
         "mockup in the gallery"
@@ -313,7 +313,7 @@ fn a_decision_can_carry_the_approved_mockup() {
     let other = p.dir.path().join("other.png");
     fs::copy(capture("email.png"), &other).unwrap();
     let n = fs::read_dir(p.home.join("media")).unwrap().count();
-    let out = p.ctx_env(
+    let out = p.kontext_env(
         &[("KONTEXT_ACTOR", "agent:x")],
         &["decide", "Other", "--attach", other.to_str().unwrap()],
     );
@@ -334,12 +334,12 @@ fn report_carries_every_pending_with_the_rest_folded_and_its_script() {
         "Exportar a contabilidad",
     ];
     for g in goals {
-        p.ctx_env_ok(
+        p.kontext_env_ok(
             &[("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")],
             &["goal", "add", g],
         );
     }
-    let html = p.ctx_ok(&["report", "--html"]);
+    let html = p.kontext_ok(&["report", "--html"]);
 
     // Every pending item comes: the first 5 in view and the rest folded under
     // "And N more", which opens without script (<details>).
@@ -392,7 +392,7 @@ fn report_carries_every_pending_with_the_rest_folded_and_its_script() {
         assert!(!lower.contains(gone), "the report does not carry {gone:?}");
     }
     // In text, the rest is counted.
-    let md = p.ctx_ok(&["report"]);
+    let md = p.kontext_ok(&["report"]);
     assert!(md.contains("and 2 more: `kontext inbox --all`"), "{md}");
 }
 
@@ -414,7 +414,7 @@ fn report_has_a_sidebar_and_marks_each_card_with_its_epics() {
         ],
     );
     let t = add_task(&p, "Payment screen");
-    p.ctx_ok(&[
+    p.kontext_ok(&[
         "done",
         &t,
         "--evidence",
@@ -423,7 +423,7 @@ fn report_has_a_sidebar_and_marks_each_card_with_its_epics() {
         "payment",
     ]);
     add_task(&p, "Webhooks");
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "agent:avisos-impl")],
         &[
             "ask",
@@ -434,11 +434,11 @@ fn report_has_a_sidebar_and_marks_each_card_with_its_epics() {
             "owner",
         ],
     );
-    p.ctx_env_ok(
+    p.kontext_env_ok(
         &[("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")],
         &["propose", "Save cards in Stripe", "--epic", "payments"],
     );
-    let html = p.ctx_ok(&["report", "--html"]);
+    let html = p.kontext_ok(&["report", "--html"]);
 
     // The sidebar: project and status, sections with how many, epics and how
     // to regenerate it; on a phone, a bar with "Sections".
