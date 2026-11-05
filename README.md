@@ -524,3 +524,7 @@ The golden-query test for `find` copies the docs of a fictitious web shop (`test
 The `sync` tests use a "bare" repo in a temporary folder as the remote, a separate git config for each "machine" (`GIT_CONFIG_GLOBAL`), and disposable SSH keys (`ssh-keygen -N ""` in the temporary folder); they never touch a real remote or `~/.ssh`.
 
 The import test runs a real v0 `ctx.py` only if `KONTEXT_V0_SCRIPT` points to one; if the variable is unset, the test is skipped, and the one that uses `tests/fixtures/v0`, generated with that same script, remains.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
