@@ -1,0 +1,543 @@
+# kontext
+
+The command is also called `kontext`: the binary, the subcommands, the `KONTEXT_*` variables, `.kontext.toml`, `~/.config/kontext` and `~/kontext-home`. It used to be called `ctx`. If you have an install from then, `kontext migrate` moves it (see "Coming from the `ctx` command").
+
+Project memory for coding agents. A single ledger where entries are only ever appended, and one view for each reader: you, the project manager, each epic coordinator, and the agents that do a single task.
+
+Status: phases 1 (base), 2 (charter, decisions, views, hooks), 3 (epics, tasks and agent teams), 4 (facts with fingerprints, `find`, distill and `changelog`), 5 (several people: `sync`, `clone`, identity and signatures) and 6 (`kontext ui` and the benchmark harness, not run) are implemented, plus the human's inbox, screenshots as evidence and the report ("The human as a reader"). The full design is in [DESIGN.md](./DESIGN.md).
+
+## Install
+
+You need Rust 1.89 or newer (`rustup`) and `git`.
+
+```sh
+cargo install --path .
+```
+
+That leaves the `kontext` binary in `~/.cargo/bin`.
+
+### Have an agent install it and migrate the memory
+
+The skill `kontext-migrate` tells an agent how to install kontext in a project and move the memory that already exists into it: the old `ctx` command, a `ctx.py` ledger, and the rules and decisions in `CLAUDE.md`, `AGENTS.md`, notes and Claude Code's automatic memory (as proposals that you sign). It asks once about anything it can't work out, and says up front where it is going to write.
+
+To have it in all your sessions before installing anything (the repo is private: it needs `gh auth login`):
+
+```sh
+mkdir -p ~/.claude/skills/kontext-migrate
+gh api repos/OmarAlex24/kontext/contents/templates/skill-kontext-migrate.md \
+  -H "Accept: application/vnd.github.raw" > ~/.claude/skills/kontext-migrate/SKILL.md
+```
+
+and ask Claude Code "install kontext in this project". With the binary already installed, `kontext install --skills-only --global` adds (or updates) all the kontext skills in `~/.claude/skills/`, without needing a project. `kontext install` in a repo also installs them.
+
+### Coming from the `ctx` command
+
+Until November 2026 the command was called `ctx`. kontext doesn't read what was there then (`CTX_*`, `.ctx.toml`, `~/.config/ctx`), but if it doesn't find its own data and sees that, it says so in one line. To move it:
+
+```sh
+cd ~/code/my-repo                # the code repo, so it also migrates its .claude/
+kontext migrate --dry-run        # which paths it touches and what changes, without writing
+kontext migrate
+kontext verify
+```
+
+| Command | What it does |
+|---|---|
+| `kontext migrate [--dry-run]` | Moves `~/.config/ctx` to `~/.config/kontext` (if that already exists, it adds whatever is missing), renames `<home>/.ctx/` to `<home>/.kontext/` in each registered home (the homes don't move), and in the current repo renames `.ctx.toml`, changes the hook and the `ctx` permissions in `.claude/settings.json` (and `settings.local.json`) to the kontext ones without touching anything else, and changes the `ctx*` skills and agent files to the new ones (one you changed by hand is kept, and it warns you). It prints the paths it touches first. Running it again does nothing |
+
+It doesn't change your shell's `CTX_*` variables: move them to `KONTEXT_*` (until you do, every command warns you). The signature of what you signed with `ctx` still verifies. The skill `kontext-migrate` does all of this from an agent (and brings in loose project memory). The details are in [DESIGN.md §18.1](./DESIGN.md).
+
+## See it work
+
+The fastest way to see kontext with real data is the sample project:
+
+```sh
+cargo build
+examples/demo.sh /tmp/kontext-demo
+KONTEXT_CONFIG_DIR=/tmp/kontext-demo/config KONTEXT_ACTOR=human:omar target/debug/kontext --project billing ui --open
+```
+
+`examples/demo.sh [folder]` builds, without touching your `~/.config/kontext` (everything goes through `KONTEXT_CONFIG_DIR` inside the folder), a `kontext-home` called `billing` and a code repo with three days of work: charter and goals signed, decisions with guards (one replaced), an epic with tasks in every state, a fact that expired because its file changed, a distill proposal not yet reviewed, a task that serves no goal, questions, a second writer (`ana@laptop`) and three readers with their cursor at different points. At the end it prints the commands to see it (`ui`, `standup --peek`, and any other with the same `KONTEXT_CONFIG_DIR`). It uses `$KONTEXT_BIN`, or `target/debug/kontext`, or the `kontext` on the `PATH`. The `kontext ui` tests run against this same project.
+
+## Phase 1 commands
+
+| Command | What it does |
+|---|---|
+| `kontext init <name> [--home <path>] [--remote <git-url>]` | Creates a `kontext-home` (default `~/kontext-home/<name>`) with `git init`, `project.toml`, `ledger/`, `cursors/` and `.gitignore`, and registers it in `~/.config/kontext/projects.toml` |
+| `kontext verify` | Checks the chain of each ledger file: `n` in sequence, `prev`, `hash` and `id`. Prints `OK: …` or the first problem in each file as `ledger/<writer>.jsonl:<line>: …`, and exits with 1 if there are problems |
+| `kontext reindex` | Rebuilds `.kontext/index.sqlite` from the ledger files |
+| `kontext import --from-v0 <path> [--force]` | Imports the ledger of the v0 `ctx.py` prototype (`<path>/ledger/entries.jsonl`) into this writer's file. It can be run more than once: it doesn't duplicate anything |
+
+All of them accept `--project <name>`.
+
+### Which project is used
+
+In this order: `--project`, the `KONTEXT_PROJECT` variable, the nearest `.kontext.toml` going up from the current folder (`project = "<name>"`), and if only one project is registered, that one.
+
+### Machine configuration
+
+`~/.config/kontext/projects.toml` (another folder with `KONTEXT_CONFIG_DIR`):
+
+```toml
+writer = "omar@t3-machine"     # if missing, <user>@<machine>; kontext init sets it
+
+[projects.billing]
+home = "/home/you/kontext-home/billing"
+```
+
+`kontext init` rewrites this file, so it loses any comments it has.
+
+### Example
+
+```sh
+kontext init shop
+kontext import --from-v0 ~/old-ctx
+kontext verify
+```
+
+## Phase 2 commands
+
+| Command | What it does |
+|---|---|
+| `kontext charter --objective <text> [--non-goal <text>]… [--done-when <text>] [--title <text>]` | Writes a new, unsigned charter. If there is already a signed charter, the new one replaces it when it is signed |
+| `kontext goal add <title> [--done-when <text>]` | Adds a goal to the charter in force (or to the last unsigned one) |
+| `kontext sign <id>` | Signs a charter or a goal. Only an owner |
+| `kontext decide <title> [--why] [--body] [--tags a,b] [--supersedes <id>]… [--epic <x>] [--guard-cmd <cmd>] [--approved-by <owner>]` | Records a decision. Only an owner, or the pm with `--approved-by` |
+| `kontext propose <title> [--why] [--body] [--tags] [--supersedes <id>]…` | Proposes a decision. Anyone can, and that is what agents do |
+| `kontext accept <P-id> [--as-decision] [--approved-by <owner>] [--why]` | Accepts a proposal: it becomes law. With `--as-decision` it also writes the decision |
+| `kontext reject <P-id> --why <text>` | Rejects a proposal |
+| `kontext supersede <old> <new> [--why]` | Marks that one entry replaces another (charters, goals and decisions: only an owner; facts: anyone) |
+| `kontext ask <title> --to <reader> [--body]` | Asks `owner`, `pm`, `epic:<x>` or a person |
+| `kontext answer <Q-id> <text>` | Answers a question |
+| `kontext log <text> [--next <text>] [--task <id>] [--tags a,b]` | Journal entry |
+| `kontext standup [--peek] [--as <reader>]` | What happened since your last visit and what is waiting for your answer. Advances your cursor (with `--peek`, it doesn't) |
+| `kontext resume --as <role> [--max-chars N] [--peek]` | The context for a role (`pm`, `owner`…): charter, goals, decisions in force, what the user said (the distill notes it, with a date), questions, proposals, facts, journal and what's new, trimmed to the budget by priority. Advances the role's cursor |
+| `kontext show <id>` | A full entry with its history. Accepts prefixes (`D-7f3`) |
+| `kontext recall <words> [--limit N] [--since YYYY-MM-DD]` | Searches the ledger and Claude Code's transcripts |
+| `kontext hook session-start` | Called by Claude Code when a session starts. Never fails and doesn't advance cursors |
+| `kontext install [--dry-run] [--force] [--role <role>]` | In a code repo: `.kontext.toml`, the start hook and the `Bash(kontext:*)` permission in `.claude/settings.json`, the skills `kontext`, `kontext-orchestrate`, `kontext-show` and `kontext-migrate` in `.claude/skills/`, the agent files (phase 3), and the repo in `[[repos]]` of `project.toml`. Shows the diff before writing |
+| `kontext install --skills-only [--global] [--dry-run]` | Only the skills, in the repo's `.claude/skills/` or, with `--global`, in `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`). Doesn't need a project |
+
+All of them accept `--json` (the ones that write print the new entry; the views print their data), `--actor`, `--role` and `--model` (in `install`, `--role` is the `default_role` of `.kontext.toml`).
+
+IDs are `<type>-<6 hex>`: `A` charter, `G` goal, `E` epic, `T` task, `D` decision, `P` proposal, `Q` question, `F` fact, `J` journal, and `R` for records (signature, acceptance, answer, claim, close…). Where an id is asked for, a unique prefix is enough.
+
+### Who writes
+
+Each entry says who wrote it. In this order: `--actor`, the `KONTEXT_ACTOR` variable, and if there is neither, `agent:unknown`. An agent that forgets to say who it is never ends up recorded as a human. An agent's role and model come from `--role` and `--model`, or from `KONTEXT_ROLE` and `KONTEXT_MODEL`.
+
+Put your name in your shell (`~/.bashrc` or `~/.zshrc`), the same one that is in `owners` in `project.toml`:
+
+```sh
+export KONTEXT_ACTOR=human:omar
+```
+
+Agents use `KONTEXT_ACTOR=agent:<name>` in the environment they are launched with and, if they know it, `KONTEXT_ROLE`, `KONTEXT_MODEL` and `KONTEXT_SESSION`. Inside a session, an agent passes its identity as arguments (`kontext --actor agent:<name> --role <role> log …`), not as variables in front of the command: Claude Code's `Bash(kontext:*)` permission only covers commands that start with `kontext`, and in `claude -p` nobody approves the others. The hook and `resume` tell it how to write and how to invoke `kontext`.
+
+Only an owner signs, decides, accepts, rejects and replaces charters, goals or decisions. An agent that tries gets a rejection (exit code 2) that tells it to propose. The exception is the pm (`--role pm` or `KONTEXT_ROLE=pm`) with `--approved-by <owner>`, for when an owner has already approved it in the conversation. If an entry of those types arrives from another machine, written by someone who is not an owner, it is kept but doesn't count, and it shows up as an alert in `standup`.
+
+### Cursors
+
+Each reader (`omar`, `pm`, `epic:payments`) has a cursor in `cursors/<reader>/<writer>.json`: how far it has read in each ledger file. `standup` and `resume` show what's new from there and advance it; `--peek` and the start hook don't. Since the cursor is per file, what arrives late when syncing shows up as new even if it was written earlier.
+
+### Typical flow
+
+```sh
+export KONTEXT_ACTOR=human:omar
+kontext init billing
+kontext charter --objective "Charge by card in the app" --non-goal "Invoicing" --done-when "First real charge"
+kontext sign A-1a1                       # the id that charter printed
+kontext goal add "Monthly recurring charge" --done-when "3 charges in a row with no errors"
+kontext sign G-13a
+kontext decide "Charge with Stripe, not Conekta" --why "Conekta doesn't support recurring charges with 3DS" --tags payments
+
+cd ~/code/billing-app
+kontext install --dry-run                # shows the diff
+kontext install
+
+# ...the agents work: they propose, ask, leave journal entries...
+
+kontext standup                          # what happened and what it expects from you
+kontext accept P-516 --as-decision
+kontext answer Q-733 "199 pesos a month"
+kontext show D-f99
+```
+
+### Hooks and modes
+
+`kontext install` adds to `.claude/settings.json` a `SessionStart` hook (`startup|resume|clear|compact`) that runs `<kontext path> hook session-start`, and the `Bash(kontext:*)` permission in `permissions.allow`. The role comes from `KONTEXT_ROLE`, then from `default_role` in `.kontext.toml`, and if neither is set, `pm`. What it puts in depends on `[context]` in `project.toml` (the role, then `default`, then `inject`; `kontext init` sets `inject` for everyone):
+
+- `inject`: the full `resume` for the role, up to 9,000 characters (never more than 9,900).
+- `pointer`: two lines with how many new items and questions there are and what to run.
+- `off`: nothing; the skill remains.
+
+Hook errors are logged to `<kontext-home>/.kontext/hooks.log`; the hook always exits with 0.
+
+### Environment variables
+
+| Variable | What for |
+|---|---|
+| `KONTEXT_ACTOR` | Who writes (`human:<name>` or `agent:<name>`) |
+| `KONTEXT_ROLE`, `KONTEXT_MODEL`, `KONTEXT_SESSION` | An agent's role, model and session; `KONTEXT_ROLE` also picks the hook's role |
+| `KONTEXT_PROJECT` | Which project to use |
+| `KONTEXT_CONFIG_DIR` | Another folder instead of `~/.config/kontext` |
+| `KONTEXT_TRANSCRIPTS_GLOB` | Where `recall` looks for transcripts (patterns separated by `:`; default `~/.claude/projects/*/*.jsonl`) |
+| `KONTEXT_NOW` | For tests: the time (ISO-8601) that `kontext` uses for the `hlc` of what it writes and to tell whether a claim has expired |
+| `KONTEXT_EPIC` | With `KONTEXT_ROLE=coordinator`, the start hook adds the `brief` of that epic (phase 4) |
+| `KONTEXT_DISTILL_DISABLE` | If set to anything, the `pre-compact` and `session-end` hooks don't run the distill |
+| `KONTEXT_GH_BIN` | Another binary instead of `gh` for `changelog` (tests) |
+
+## Phase 3 commands
+
+| Command | What it does |
+|---|---|
+| `kontext epic add <title> --goal <G>… [--coordinator <name>] [--name <short>] [--after <epic>]…` | Creates an epic linked to goals in the charter. Its reader is `epic:<name>` (the name comes from the title if not given) and its default coordinator, `epic:<name>`. `--after`: epics that have to close first (see "Orchestrating several agents") |
+| `kontext task add <title> --epic <epic> [--goal <G>]… [--depends-on <T>]… [--acceptance <text>]` | Adds a task. Without `--goal`, it serves the epic's goals; if none are left, it is still written, with a drift warning |
+| `kontext assign <T> --to <name>` | Assigns a task. Only the epic's coordinator, the pm or an owner |
+| `kontext next --epic <epic> [--claim] [--max-chars N]` | The assignment for the next task: the one you already have, or the first ready one. Brings acceptance, goals, decisions and facts that touch it, and the **assignment mark**. With `--claim` it claims it (atomic on the machine); if none is ready, it exits with 2 and says what blocks it |
+| `kontext brief <epic> [--max-chars N] [--peek]` | The coordinator's view: charter, goals and decisions of the epic, the board (ready, claimed, assigned, blocked, closed with their evidence), questions for `epic:<name>`, facts, journal, alerts and the assignment mark. Advances the cursor of `epic:<name>` (with `--peek`, it doesn't) |
+| `kontext done <T> --since <mark> [--run <cmd>] [--evidence <spec>]… [--evidence-json <json>]` | Closes with evidence. `--run` runs the command and only closes if it exits with 0 (it keeps the code and the last 20 lines). If something that touches the task came in after the mark, it exits with 3 and lists it |
+| `kontext release <T> [--why]` | The task goes back to ready. Whoever has it, the coordinator, the pm or an owner |
+| `kontext reopen <T> --why <text>` | Reopens a closed task |
+| `kontext ask <title> [--to <reader>] [--task <T>]` | With `--task`, the question belongs to that task and, if you don't say who it's for, it goes to its epic. Its answer counts as new context in `done` |
+| `kontext fact <text> [--path <path>]… [--repo <name>] [--epic <epic>] [--tags a,b]` | A fact, with the fingerprint of the files it came from (phase 4). With `--epic` it shows up in that epic's `brief` and `next` |
+
+`<epic>` can be the id (`E-61e`), `epic:<name>` or `<name>`. Evidence is `cmd:"<command>"=<code>`, `file:<path>`, `pr:<url>` or `url:<url>`; a command without exit code 0 doesn't count, and `file:` has to exist (relative to the folder where you run `done`; it accepts `path:line`).
+
+### Task states
+
+`ready` (its dependencies are closed and nobody has it), `blocked` (some dependency is still open), `assigned`, `claimed` and `closed`. Reopening it puts it back to ready (or blocked).
+
+- **Who closes:** `done` and `release` only count if written by whoever has the task, the coordinator of its epic, the pm or an owner. The command line refuses (exit code 2); if it arrives from another machine, it is kept, doesn't count, and shows up as an alert.
+- **Expired claims:** a claim with no `kontext log --task` or `done` from its owner during `[claims] lease` (2 h by default) expires and the task goes back to ready. If two machines claim the same task, the one with the lower `hlc` wins.
+- **Stale context:** `done --since <mark>` checks whether a decision for the epic (or one that cites the task) came in after the mark, the replacement of a goal the task cites, or the answer to a question about the task. If something came in, it exits with 3, lists it, and gives the mark for now. Agents always pass `--since`; an owner can leave it out.
+- **Drift:** a task with no goals, or one that cites a goal that was replaced or doesn't exist, and an epic that cites a replaced goal, show up as alerts in `standup` and `resume` until they are fixed. Citing an unsigned goal shows as "unsigned goal".
+
+### What each reader sees
+
+- `resume --as pm`: one line per epic ("Payments: 3/5 closed, 1 claimed, 1 blocked; last activity 2 h ago"), what was escalated to the pm, what the user said, and the drift. It doesn't see tasks, facts from epics or the journal of tasks; it does see facts that aren't from an epic.
+- `brief <epic>`: the coordinator, with the full board.
+- `next --epic <epic>`: the implementer or tester, with a single task.
+- `standup`: you, with the closed tasks and their evidence, the drift and the expired claims.
+- `show <T>`: the task's state history (who claimed, released, closed or reopened it) and its journal.
+
+### Agent files
+
+`kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. If one already exists with different content (you changed it by hand), it is kept and you are warned; `kontext install --force` replaces it.
+
+### Team flow
+
+```sh
+# The pm (you, or your agent with --role pm), with the charter and goal G-13a signed:
+kontext epic add "Card payments" --goal G-13a --name payments
+kontext task add "Integrate the Stripe SDK" --epic payments --acceptance "pnpm test passes"
+kontext task add "Charge webhooks" --epic payments --depends-on T-4c1 --acceptance "pnpm test:webhooks passes"
+kontext task add "Payment screen" --epic payments --acceptance "pnpm e2e passes"
+# Launch the kontext-coordinator subagent with the output of:
+kontext brief payments
+
+# The coordinator hands out the work: it claims each task on behalf of its implementer and pastes
+# the output (with the assignment mark) into the brief of a kontext-implementer.
+kontext --actor agent:impl-1 --role implementer next --epic payments --claim
+kontext --actor agent:impl-2 --role implementer next --epic payments --claim
+
+# Each implementer, with its identity as arguments (or in the environment it was launched with):
+kontext --actor agent:impl-1 --role implementer log "SDK integrated, tests still missing" --task T-4c1
+kontext --actor agent:impl-1 --role implementer ask "Do we charge in MXN or USD?" --task T-4c1   # goes to epic:payments
+kontext --actor agent:impl-1 --role implementer done T-4c1 --run "pnpm test" --since omar@mac:41
+# Exits with 3 if something new came in for the task: read it and retry with the mark it gives.
+
+# The coordinator answers, and escalates only what it can't answer:
+KONTEXT_ACTOR=agent:epic:payments KONTEXT_ROLE=coordinator kontext answer Q-9b2 "MXN (D-c3d)"
+KONTEXT_ACTOR=agent:epic:payments KONTEXT_ROLE=coordinator kontext ask "Do refunds belong in this epic?" --to pm
+
+kontext resume --as pm      # one line per epic
+kontext standup             # what's closed, with its evidence
+```
+
+## Orchestrating several agents
+
+kontext doesn't launch agents: the skill `kontext-orchestrate` (installed by `kontext install`, next to the `kontext` one) tells the agent how much structure to set up and how to do it with what its harness has. It is triggered by big tasks, projects from scratch, or "this is a lot of work". It measures the size (S–M, L, XL, XXL) with fixed criteria, sets up PM → one coordinator per epic → scouts, implementers and testers, shows you the structure and the cost (model per level and how many agents), and waits for your yes before launching anything XL or XXL. On a greenfield project it goes in waves, with a `standup` with you at each boundary. The details are in [DESIGN.md §12.1](./DESIGN.md).
+
+| Command | What it does |
+|---|---|
+| `kontext epic add <title> --goal <G> --after <epic>…` | The epic goes after others: by id, `epic:<name>` or `<name>`, even if they don't exist yet (with a warning). Refuses (exit code 2) to go after itself, an id that doesn't exist, and anything that would close a cycle. Like a task's dependencies, it can't be changed later |
+| `kontext plan [--json]` | Calculates the waves of the open epics: which run in series and which in parallel. An epic is closed when all its tasks (at least one) are closed, and a closed dependency is already satisfied. Exits with 1 if there is a cycle or a dependency on an epic that doesn't exist or is no longer in force; those epics, and the ones waiting on them, show up as "no wave" with their reason |
+
+```sh
+# The map can be written in any order: integration warns that its dependencies are still missing.
+kontext epic add "Integration and e2e tests" --goal G-81c --name integration --after payments --after catalog --after notices
+kontext epic add "Foundations" --goal G-81c --name foundations
+kontext epic add "Payments" --goal G-81c --name payments --after foundations
+kontext epic add "Catalog" --goal G-81c --name catalog --after foundations
+kontext epic add "Notices" --goal G-81c --name notices --after foundations
+kontext plan
+#   # Wave plan: 5 open epics, 0 closed
+#
+#   ## Wave 1 (in series)
+#   - E-98518c foundations: Foundations (no tasks)
+#
+#   ## Wave 2 (in parallel: 3 epics, one coordinator each)
+#   - E-163a45 payments: Payments (no tasks; after foundations)
+#   - E-858797 catalog: Catalog (no tasks; after foundations)
+#   - E-d83a67 notices: Notices (no tasks; after foundations)
+#
+#   ## Wave 3 (in series)
+#   - E-0738bf integration: Integration and e2e tests (no tasks; after payments, catalog, notices)
+kontext epic add "Base" --goal G-81c --name base --after integration --after ghost
+kontext plan        # exits with 1: base is left with no wave, and Problems says it goes after 'ghost', which doesn't exist
+```
+
+The agent files follow the wave protocol: the coordinator doesn't talk to the user (it escalates with `kontext ask --to pm`), it closes the epic once all its tasks are closed with evidence, and it tells the pm with a `kontext log` and its report; implementers and testers only ask their coordinator.
+
+## Phase 4 commands
+
+| Command | What it does |
+|---|---|
+| `kontext fact <text> --path <path>… [--repo <name>]` | Saves the fact with a fingerprint per path: `{repo, path, commit, blob}` of the last commit. The paths are resolved against the git repo of the current folder (or against `--repo`, relative to its root) and have to be in a commit. If there is already a fact in force with the same title (ignoring case, accents and punctuation) or the same fingerprints, it saves a confirmation (`confirm`) instead of another fact |
+| `kontext find <topic…> [--all] [--limit N] [--json]` | Searches the docs of the project's repos that are on this machine and says which section to read, with its status (in force, proposed, historical), the code paths it cites and who cites it (`git grep`). Historical material (replaced ADRs, paths under `historical`) only shows with `--all` |
+| `kontext find --show <path:line>` | Prints a section (up to 200 lines). With several repos: `<repo>:<path>:<line>` |
+| `kontext find --check [--baseline <file> [--update-baseline]]` | Docs in force that cite repo paths that no longer exist. With a baseline (`<n> <doc>` per line) it only fails if a doc has more broken paths than before |
+| `kontext distill --transcript <path> [--dry-run] [--max-chunks N] [--chunk-chars N]` | Distills a Claude Code transcript: only what's new since last time, without secrets, in chunks, with the model from `[distill] command`. It notes what the human said, decided or asked (not pasted documents or tool output), with its origin and date, as proposals, questions for the owner, facts without a fingerprint, and journal entries from `agent:distill`; if something updates a fact or a proposal in force, it replaces it. At most `[distill] max_entries` (8) per run |
+| `kontext changelog [--since <date\|ref>] [--until <date\|ref>] [--format md\|json]` | Technical changelog: the tasks closed in the range by epic, with their evidence (PRs first), and the merged PRs of each GitHub repo in `[[repos]]` (with `gh`), grouped by type (`feat`, `fix`, `perf`, `refactor`, `docs`…; the rest under "other"). The same input gives the same bytes |
+| `kontext distill --wait [--timeout 600s]` | Doesn't distill: waits for the distills started by the hooks to finish (each leaves a mark in `.kontext/distill-pending/` while it runs). Exits with 1 if it times out. Useful for scripts that need to know the ledger already has the previous session's content, like the benchmark |
+| `kontext hook pre-compact` / `kontext hook session-end` | Called by Claude Code: they start `kontext distill` in the background with the transcript and return right away |
+
+### Facts that expire
+
+"Expired" isn't written anywhere: it is calculated when you read. For each fingerprint, the local checkout of the repo is found and `git rev-parse HEAD:<path>` is compared with the stored blob:
+
+- same: the fact is still in force;
+- different, or the path no longer exists: **expired** ("F-x expired: src/invoice.ts changed in 9b2a1c3; the next scout reads it again"). It shows up as an alert in `standup` and in the `brief` of its epic (or of all of them, if it has no epic), and it no longer appears in the fact lists of `brief`, `next` or `resume`;
+- the repo isn't on this machine: **unreviewed** (unknown; not expired). It shows up in the lists as `[unreviewed]`.
+
+When a scout writes a fact again with the same title as one that expired, the new one replaces it. The blob of each path at each `HEAD` is stored in the index, so the views don't run more git than they need to. The pm still doesn't see facts.
+
+Where each repo is: first `projects.toml`, then the repo in the current folder, if its remote (or its folder name) matches one of the `[[repos]]`:
+
+```toml
+# ~/.config/kontext/projects.toml
+[projects.billing]
+home = "/home/you/kontext-home/billing"
+
+[projects.billing.repos]
+shop = "/home/you/code/shop"
+```
+
+### Docs that `find` reads
+
+Each repo in `[[repos]]` of `project.toml` says which docs are read; everything is optional:
+
+```toml
+[[repos]]
+name = "shop"
+remote = "github.com/acme/shop"
+docs = ["docs/**/*.md", "**/README.md"]       # default ["**/*.md"]
+exclude = ["docs/templates/**"]                # in addition to node_modules, target and .git
+historical = ["docs/archive/**", "**/*-retro.md"]   # historical by path
+roots = ["docs", "scripts", "src"]             # which folders a cited path starts with; by default, the top-level ones git tracks
+```
+
+`.gitignore` is respected. A doc's status comes from its `**Status:**` line (`Accepted`, `Superseded by …`, `Proposed`, `draft`…; the first word decides), and an ADR (a file `ADR-NNNN-…`) that another ADR in force says it replaces ("Supersedes: ADR-0003", "Reemplaza a ADR-0031") is historical even if it says `Accepted`. Sections are stored in the index, and a file is only read again if its date or size changed. The ranking is BM25 per field (headings, "Read when", path and body; accents ignored and light plurals; at most two sections per file). [examples/find-repo.toml](./examples/find-repo.toml) is a complete configuration for a fictitious web shop; the tests run it against the docs in `tests/fixtures/find-docs`.
+
+#### Synonyms
+
+`<kontext-home>/synonyms.toml`: groups of terms that are searched as one. A query with any of them also finds the others, with less weight (0.7). They are normalized the same way as the docs (no accents, singular, and `real-time` counts as `real` and `time`).
+
+```toml
+groups = [
+  ["inventory", "stock", "warehouse"],
+  ["payment", "billing", "charge", "stripe"],
+  ["deploy", "release", "rollout"],
+]
+```
+
+[examples/find-synonyms.toml](./examples/find-synonyms.toml) is a short set for that web shop.
+
+### Distill
+
+In `project.toml`:
+
+```toml
+[distill]
+command = "claude -p --model haiku --output-format json"   # receives the prompt on stdin
+enabled = true
+timeout = "240s"        # per call; if exceeded, the command's process group is killed
+# model = "haiku"       # for the actor; if missing, taken from --model in command
+# max_entries = 8       # entries per run, at most
+# max_message_chars = 4000   # a longer message (a pasted document) is cut; 0: no cut
+```
+
+- The command runs with `sh -c` in an empty temporary folder, with the prompt on stdin and `KONTEXT_DISTILL_DISABLE=1` (so that session isn't distilled again). If its output is the JSON envelope of `claude --output-format json`, `.result` is taken; otherwise the output as is. The JSON object is pulled out of the response even if it comes wrapped in ``` or with text around it. If a chunk fails, it is retried once.
+- Before the text is sent, secrets are removed: PEM keys, GitHub tokens, `sk-…`, AWS keys, `Bearer …`, `password=`/`token:`/`api_key=`… and long strings with upper and lower case, digits and high entropy (not UUIDs, hashes or slugs). `--dry-run` shows how many it removed and the first chunk, without calling the model.
+- What is read from each transcript is stored in `.kontext/distill-offsets.json` (under `.kontext/distill.lock`): running it again with nothing new does nothing, and if a chunk fails, the next attempt starts there.
+- The prompt carries the project name, its owners and what is in force with its id (decisions, pending proposals, facts and open questions). It asks only for what the human said, decided or asked in their messages, or what the assistant concluded and the human accepted; not pasted documents, logs or tool output, unless the human says it applies. Each entry carries `fields.origin` (`user`, `agent`, `document`) and `fields.said_at`. Decisions come out as proposals (`[unreviewed]` in `standup`), never as decisions; questions go to the owner; facts have no fingerprint. Titles that already exist are not repeated.
+- If something updates an entry in force, the model gives its id and the new entry carries `fields.supersedes`: a fact or a pending proposal from the distill is replaced on the spot (views only show what is in force; `show` and `recall` keep the history). A decision in force is not replaced: what contradicts it stays as a proposal for an owner.
+- `kontext install` adds the `PreCompact` and `SessionEnd` hooks if the distill is on. They start `kontext distill` in the background (its output goes to `.kontext/distill.log`) and return right away. With `enabled = false` or the `KONTEXT_DISTILL_DISABLE` variable, they do nothing.
+
+### Changelog and `gh`
+
+PRs come from `gh pr list --repo <owner/repo> --state merged --search "merged:>=<date>" --json number,title,url,mergedAt,author` for each repo in `[[repos]]` with a GitHub remote. `--since` and `--until` accept a date (`2026-11-01`; for `--until` it covers the whole day), an ISO-8601 date or a git ref (`v1.2`, `main~20`: its commit date in the repo of the current folder). If `gh` is missing or fails, the changelog comes out with the tasks and a note.
+
+### More on hooks
+
+- A coordinator with `KONTEXT_ROLE=coordinator` and `KONTEXT_EPIC=<epic>` gets its epic's `brief` at startup (without advancing its cursor). Without `KONTEXT_EPIC`, it gets the usual output.
+- `next` has a budget like `brief` (`--max-chars`, 9,000 by default): it first drops the reasons behind decisions, then the facts, and then shortens the lists. The task, its acceptance, the mark and how to close it are never cut.
+
+## Phase 5 commands
+
+| Command | What it does |
+|---|---|
+| `kontext clone <git-url> [--home <path>] [--name <name>]` | Brings in an existing `kontext-home` (default `~/kontext-home/<repo name>`), registers it in `projects.toml`, sets this machine's writer if none was set, builds the index and prints the charter and the owners |
+| `kontext sync [--include-config]` | Commits your own changes (`ledger/` and `cursors/`, with the message `kontext: <writer> <N> entries`), fetches the others' changes (`fetch` and `rebase`) and pushes (`push -u`). Then it says how many entries arrived from each writer, which new alerts they caused, and whether the chain of what arrived verifies. Without a remote, it only commits |
+| `kontext status` | Project, writer, remote, last sync, own entries not committed and not pushed, index, chains, alerts and signatures. `--json` for the UI |
+| `kontext verify` | Besides the chains, checks any signatures there are (and, with `require_signatures`, that the required ones are present). Exits with 1 if any doesn't verify |
+| `--sign` | Global option: signs even if `projects.toml` has no `[signing] key` (uses `~/.ssh/id_ed25519.pub`) |
+
+## Phase 6 commands
+
+| Command | What it does |
+|---|---|
+| `kontext ui [--port 4700] [--host 127.0.0.1] [--open] [--as <reader>]` | Serves a local read-only page with the ledger, the cursors, the alerts and the epic boards. It refreshes itself every 5 s. `--port 0` takes a free port; `--open` opens it in the browser; `--as` says who is looking (for "Signed by you" and "For you"; by default, as in `standup`) |
+
+### The page
+
+- **The ledger**, like an accounting book: newest to oldest, with `#` (the position in its writer's file), the fingerprint and the previous one (`← prev`), the type (a colored box: charter, decision, question, fact, task, journal; empty if it's an unreviewed proposal), the entry with a note ("Serves G-x · epic y", "Fingerprint: path at commit", "Closed with evidence: …") and who wrote it. Anything that needs attention is in red ("Serves no goal: possible drift", "Expired: …"); what was replaced, rejected or expired is struck through. A signed charter carries a "Signed by you" stamp (or its owner's). Clicking an entry opens its detail (the same as `kontext show`).
+- **The cursors**: for each reader with a cursor, a dotted line "Read up to here by <reader>" under the oldest entry it hasn't read yet, and a bar in its color on the right-hand channel from that line to the newest: what it still has to read. With several writers, the line goes at the first entry (in ledger order) that its cursor doesn't cover.
+- **Readers**: for you, what is waiting for your answer (as in `standup`); for the pm, one line per epic and what it is being asked; for each coordinator, its epic's board in numbers.
+- **Alerts**: drift, expired facts, conflicts, lost or expired claims, invalid signatures and what doesn't count.
+- **Direction**: the charter, the goals, what is not being done, and the decisions in force. **Epics**: each one in columns: ready, blocked, assigned, claimed and closed.
+
+Nothing on the page writes: there are no forms or buttons that change anything. It doesn't call the internet (the CSS and JS are inside the binary) and works in light and dark mode depending on the system.
+
+### API
+
+| Route | What it returns |
+|---|---|
+| `GET /` | The page |
+| `GET /api/state[?before=<hlc>&limit=<n>]` | Everything the page draws: project, `status` (what `kontext status --json` gives), writers, charter, goals, decisions, epics with their counts and tasks, tasks, questions, proposals, facts with their status, alerts, readers with their cursor, and the ledger from newest to oldest in pages of `limit` (100) entries with an `hlc` lower than `before`. `ledger.next_before` is the `before` of the next page |
+| `GET /api/entry/<id>` | What `kontext show --json` gives, plus its row; accepts a unique prefix. 404 if it doesn't exist |
+
+### Security
+
+It listens on `127.0.0.1` by default and has no password. With a loopback address it only answers requests whose `Host` is `127.0.0.1`, `localhost` or `[::1]` with its port: this way a page from the internet can't read your ledger through your browser (DNS rebinding). With `--host` set to another address (`0.0.0.0`, your network's IP) it warns on stderr: anyone who can reach that address can read the ledger. It only accepts `GET` and `HEAD`.
+
+## The human as a reader
+
+The human also loses the thread. The rule: **if you haven't answered, you haven't read anything.** Seeing something doesn't count; only acting on it does. The details are in [DESIGN.md §20](./DESIGN.md).
+
+```sh
+examples/report.sh /tmp/kontext-report     # a sample project with pending items, problems and screenshots
+```
+
+| Command | What it does |
+|---|---|
+| `kontext inbox [--all] [--as <human>]` | Your pending items, by what they block and then by age: **sign** (charters, goals, proposals and rules of yours that are unsigned), **answer** (questions for you, grouped by epic), **review** (what the distill noted) and **problems** (closes that didn't count, reopened tasks, expired or lost claims, drift, invalid signatures, conflicts, epics with no wave). The first 5 in full, and "and N more". Each one says what it blocks, who is waiting, since when, and the command that resolves it |
+| `kontext inbox --everyone [--all]` | Everyone's inbox, for viewing only: one section per human (the owners in their order and then, by name, anyone with questions via `--to human:<x>` or with someone's name from `[people]`) with what is theirs alone (the questions for them), and a **Common** section at the end with what any owner resolves (sign, review, questions to `owner`) and the problems, shown once. Each section, the first 5 and "and N more" (or all with `--all`). With `--json`, `humans` and `common`. Not used with `--as`, `sign`, `answer`, `dismiss` or `confirm` |
+| `kontext inbox count` | One line: "4 pending items (1 new) · oldest, from 3 days ago · the first blocks Payments". With `--everyone`, one per human and one for the common items |
+| `kontext inbox sign\|answer\|dismiss\|confirm <n or id>` | Act from the inbox: sign (or accept a proposal), answer (in a group, `2.1`, `2.2`…), take it out unresolved (`--why`) or confirm what the distill noted. Only a human |
+| `kontext report [--html] [-o file] [--as <human>]` | The report: the status paragraph with a traffic light, what is yours to do, the problems, the most recent screenshots per epic (with the before and after) and a bar per goal. No history. With `--html`, a single-file page with the screenshots inside (with a sidebar of sections and epics that filters by epic; copies the commands with one click, compares before and after and enlarges screenshots; works offline); also in `kontext ui` as `/report` |
+| `kontext log --status "<2 or 3 sentences>"` | The "where we are" paragraph that the report takes (the latest one counts) |
+| `kontext done … --evidence screenshot.png [--screen <screen>]` | A screenshot as evidence (PNG, JPG or WebP, 2 MB at most: `[media] max_size`). It is saved in `media/<sha256>.<ext>` of the kontext-home, travels with `kontext sync`, and `kontext verify` checks its hash. The same screen in two closes gives the before and after |
+| `kontext decide\|propose … --attach <file> [--screen <screen>]` | An attachment (image or `.html`): the approved mockup from phase 0, as a reference |
+| `kontext ask … [--blocking] [--epic <x>] [--no-merge]` | If an identical open question already exists (same recipient, same epic, similar text), it is added to that one instead of repeated. If the human has `[inbox] max_pending` pending items (5), an agent's question is marked not urgent unless `--blocking` |
+
+- **Nothing is closed by viewing it.** A pending item leaves the inbox when its cause is resolved in the ledger or when you dismiss or confirm it. Neither `kontext inbox` (nor `--everyone`), nor `standup`, the report or the hook moves anything.
+- **What's new** is counted from the last thing you wrote to the ledger, not from your last view: the "(new)" in `standup` too. The `standup` cursor still advances, but only so the history isn't repeated.
+- **The hook** for the pm's session adds a line at the top with your pending items, or nothing if there are none.
+- **The skill `kontext-show`** tells the agent when to show you the report (wave boundaries, "how are we doing?", when coming back after days) and when not to (after every task), how to do it in T3 Code, Claude Code or the terminal, and not to pile questions on you if you don't answer.
+
+```toml
+# project.toml
+[inbox]
+max_pending = 5        # with this many pending items, an agent's `ask` is marked not urgent
+[media]
+max_size = "2MB"       # cap for each screenshot
+```
+
+## Benchmark
+
+`bench/` has the harness that measures how much a project drifts with and without kontext (DESIGN §15): scripted scenarios of several days, four variants (nothing, with `CLAUDE.md`, with `kontext` in `pointer` and in `inject` mode), several seeds, and a table with drift, failing guards, memory, corrections, tokens and whether it finished. It is Python 3.11+ with no dependencies:
+
+```sh
+python3 bench/run.py --dry-run --seeds 2      # dry run: a fake agent, no model and no cost
+python3 -m unittest discover bench/tests      # the harness tests
+```
+
+**A real run spends tokens** (`run.py` asks for `--yes`). How to run it, what each column measures, and the drift formula, fixed before running: [bench/README.md](./bench/README.md).
+
+## Working with other people
+
+The `kontext-home` is a git repo. Each writer (`<user>@<machine>`) has its own file in `ledger/` and its own cursors in `cursors/<reader>/<writer>.json`, so combining what several machines wrote never conflicts: `kontext sync` only adds files and lines.
+
+```sh
+# Whoever starts the project
+kontext init billing --remote git@github.com:omar/billing-kontext.git
+kontext sync                      # the first sync uploads everything and sets the upstream
+
+# Each other person, on their machine
+kontext clone git@github.com:omar/billing-kontext.git
+#   Project billing cloned into /home/ana/kontext-home/billing-kontext
+#   Writer of this machine: ana@laptop
+#   Charter: Charge by card
+#   Owners: omar
+
+# When starting and ending the day (or whenever you want to see what the others did)
+kontext sync
+kontext standup
+```
+
+- **What `sync` uploads:** only `ledger/` and `cursors/`. If you changed `project.toml` or `synonyms.toml`, it warns and doesn't upload them; `kontext sync --include-config` uploads them. During the commit and the rebase it holds the machine's writer locks, so an agent writing at the same time waits a few milliseconds and never pushes a half-written line.
+- **If git conflicts:** with the ledger this shouldn't happen. If it does (for example, two people changed `project.toml` with `--include-config`), `sync` aborts the rebase, leaves the `kontext-home` as it was (with your local commit, not pushed), exits with 2 and explains what conflicted. It never resolves this on its own: fix it by hand with `git -C <kontext-home> pull --rebase`.
+- **After pulling:** the state looks the same on every machine. If two `claim`s from different machines took the same task, the one with the lower `hlc` wins, and whoever lost gets an alert ("T-x was claimed first by agent:impl-1 (on omar@mac); agent:impl-2: stop working on it and get another with `kontext next`") in `standup`, in the epic's `brief`, and when it asks for work with `kontext next`. Two owners who replace the same goal or decision, or two signed charters, show up as a conflict in `standup` until someone resolves it.
+- **Cursors:** if you read `standup` on one machine and then sync, the other machine no longer shows what you read as new: the maximum per file across all your machines' cursors is used.
+
+### Who is who: `[people]`
+
+In `project.toml`:
+
+```toml
+owners = ["omar"]
+require_signatures = false
+
+[people]
+omar = { emails = ["omar@example.com"], keys = ["ssh-ed25519 AAAAC3Nz… omar@mac"] }
+ana = { emails = ["ana@example.com"], keys = ["ssh-ed25519 AAAAC3Nz… ana@laptop"] }
+```
+
+- A machine's human name comes from `git config user.email` (as seen from the `kontext-home`) mapped through `[people]`; if it isn't there, from the first name in `git config user.name`. It is the default reader for `standup`.
+- If you write as `human:<name>` (`--actor` or `KONTEXT_ACTOR`) and that machine's git email isn't that person's, `kontext` warns on stderr (it doesn't reject). Without `[people]`, or with `require_signatures`, it doesn't warn: in the second case, what counts is the signature.
+
+### Signatures
+
+Each machine says which key it signs with, in `~/.config/kontext/projects.toml`:
+
+```toml
+[signing]
+key = "~/.ssh/id_ed25519.pub"     # ssh-keygen finds the private key next to it, or in the agent
+```
+
+With a key, `sign`, `decide`, `accept`, `reject` and `supersede` from a human (or from the pm with `--approved-by`, on behalf of that owner) are signed: `ssh-keygen -Y sign -n kontext` over the entry's `hash`, and the signature goes in `sig` (which is not part of the `hash` or the `id`). It is verified with `ssh-keygen -Y verify` against the keys in `[people]`; the result is stored in the index, because each verification is a process.
+
+With `require_signatures = true`, those entries only count if the signature verifies with a key of the person who signed (and that person is an owner). Those that don't are kept, don't count, and show up as an alert ("invalid or missing signature"). So as not to write something that wouldn't count, `kontext` refuses (exit code 2) if the machine has no key or if its key doesn't belong to that person in `[people]`. Imported v0 data doesn't need a signature.
+
+## Exit codes
+
+`0` success; `1` error; `2` rejected (a rule isn't met and nothing was written; in `sync`, git conflicted or the local state clashes with what arrived, and nothing was pushed); `3` stale context in `done`.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+python3 -m unittest discover bench/tests   # the dry-run harness; needs target/debug/kontext (cargo build)
+```
+
+The `kontext ui` tests start the server on a free port against the project from `examples/demo.sh` (they need `bash` and `git`). The harness tests don't run from `cargo test`: they are skipped if they can't find the `kontext` binary.
+
+The golden-query test for `find` copies the docs of a fictitious web shop (`tests/fixtures/find-docs`) into a temporary git repo, configures it with `examples/find-repo.toml` and `examples/find-synonyms.toml`, and checks the top results and their status (in force, proposed or historical) for a handful of queries, plus `--check`. The distill tests use a fake model (a shell script); they never call a real model.
+
+The `sync` tests use a "bare" repo in a temporary folder as the remote, a separate git config for each "machine" (`GIT_CONFIG_GLOBAL`), and disposable SSH keys (`ssh-keygen -N ""` in the temporary folder); they never touch a real remote or `~/.ssh`.
+
+The import test runs a real v0 `ctx.py` only if `KONTEXT_V0_SCRIPT` points to one; if the variable is unset, the test is skipped, and the one that uses `tests/fixtures/v0`, generated with that same script, remains.

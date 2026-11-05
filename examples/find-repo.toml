@@ -1,0 +1,16 @@
+# How `kontext find` reads the docs of one repo, for a fictitious web shop.
+# Paste this block into the project.toml of the kontext-home (and
+# examples/find-synonyms.toml into <kontext-home>/synonyms.toml).
+# tests/find.rs runs it against the docs in tests/fixtures/find-docs.
+
+[[repos]]
+name = "shop"
+remote = "github.com/acme/shop"
+# Which files are docs (globs from the repo root; by default "**/*.md").
+docs = ["**/*.md"]
+# Templates and vendored code: not docs about the system.
+exclude = ["docs/templates/**", "vendor/**"]
+# Paths that are historical by where they are: hidden unless --all is passed.
+historical = ["docs/archive/**", "**/*-retro.md"]
+# Top-level folders that a repo path cited in a doc starts with.
+roots = ["docs", "scripts", "src"]

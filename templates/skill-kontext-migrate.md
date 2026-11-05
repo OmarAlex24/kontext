@@ -1,0 +1,137 @@
+---
+name: kontext-migrate
+description: Installs or configures kontext in a project and migrates the memory that already exists into it. Use it when the user asks to install, configure, or start using kontext; to migrate the project's memory to kontext; to move from ctx.py, from the old `ctx` command (`~/.config/ctx`, `.ctx.toml`, the `ctx hook` hook), or from the rules and decisions in CLAUDE.md, AGENTS.md, or Claude Code's automatic memory to kontext; or when kontext warns that an install of the old command exists. It works even if kontext is not installed yet.
+---
+
+# Installing kontext and migrating the project's memory
+
+You are going to leave the project with kontext working and with the memory that already exists inside it, without losing anything and without deciding for the human. Do the steps in order. Until step 3 you write nothing.
+
+Rules for all the work:
+
+- **Never write to a destination without first saying which path it goes to.** Wherever there is a `--dry-run`, run it first and show what comes out.
+- **Agents do not decide.** Whatever you find as a decision or a rule comes in as a proposal; the human signs it from `kontext inbox`.
+- **Do not delete or edit the source files** (CLAUDE.md, AGENTS.md, notes, the automatic memory, the `ctx.py` ledger). kontext reads them; it does not replace them.
+- Invoke `kontext` as a bare command, with the identity in the arguments (`kontext --actor agent:kontext-migrate …`), as the `kontext` skill says.
+
+## 1. Diagnosis (read-only)
+
+Find this out and report it to the human before writing anything:
+
+1. **The binary.** `kontext --version`. If it is not there, is there an old `ctx` (`command -v ctx`, `ctx --version`)? If `ctx --version` says `kontext`, it is this same project under its old name.
+2. **An install of the old `ctx` command:** `~/.config/ctx/projects.toml` (or `$CTX_CONFIG_DIR`), a `.ctx.toml` in the repo, a `… ctx hook session-start` hook or `Bash(ctx…)` permissions in `.claude/settings.json` or `settings.local.json`, skills `.claude/skills/ctx*`, `CTX_*` variables in the environment (`env | grep '^CTX_'`). With the new binary, `kontext migrate --dry-run` lists all of it.
+3. **A v0 `ctx.py` ledger:** a folder with `ledger/entries.jsonl`, with or without a `ctx.py` next to it. Look in the repo (`git ls-files | grep -E 'ctx\.py|ledger/entries\.jsonl'`), in `$CTX_HOME` if it is set, and in neighboring repos: `find ~ -maxdepth 4 -path '*/ledger/entries.jsonl' -not -path '*/node_modules/*'` (a kontext-home has `ledger/<writer>.jsonl`, not `entries.jsonl`; do not confuse them). Note how many entries it has (`wc -l <path>/ledger/entries.jsonl`) and the date of the last one.
+4. **Loose project memory:**
+   - `CLAUDE.md`, `AGENTS.md` (at the root and in subfolders: `git ls-files | grep -iE '(^|/)(claude|agents)\.md$'`), and `~/.claude/CLAUDE.md` only if it talks about this project. Look for rules («always…», «never…», «use X, not Y») and decisions with their reasons.
+   - Notes: `docs/decisions*` (or the Spanish `docs/decisiones*`), `ADR-*`, `NOTES.md`, `TODO.md`, and similar. Accepted ADRs are not copied: `kontext find` already reads them; just note that they exist.
+   - Claude Code's automatic memory: `~/.claude/projects/<folder>/memory/`, where `<folder>` is the absolute path of the repo with every character that is not a letter or a digit replaced by `-` (`/home/ana/code/app` → `-home-ana-code-app`). Read `MEMORY.md` and the files it links to.
+5. **Claude Code in the repo:** what is in `.claude/settings.json` and `settings.local.json` (hooks and permissions) and in `.claude/skills/` and `.claude/agents/`, so you do not overwrite anything that is not yours.
+6. **If there is already a kontext project:** `kontext status` (and `kontext verify`) from the repo.
+
+Report in a short list: what there is, where it is, and how much (for example "CLAUDE.md: 3 rules and 1 decision; automatic memory: 2 notes; ctx.py: 41 entries, the last one from 2026-10-30").
+
+## 2. Installing the binary, if it is missing
+
+```sh
+cargo install --git https://github.com/OmarAlex24/kontext --locked
+```
+
+The repo is private: it needs `gh auth status` to be green (or git credentials for github.com). If there is a local checkout, `cargo install --path <checkout> --locked`. It needs Rust 1.89 or newer (`rustup`). Check with `kontext --version`.
+
+If there is no way to install it (no network, no credentials), stop here and tell the human: the rest needs the binary.
+
+With the binary, leave this skill and the others where any session on this machine can see them: `kontext install --skills-only --global --dry-run` and then without `--dry-run` (they are written to `~/.claude/skills/`).
+
+## 3. What the human decides, and the rest
+
+Ask **only once, all together**, only what you cannot work out:
+
+- **The owner** (who signs the charter and the decisions): propose the first name from `git config user.name`, in lowercase.
+- **Where the kontext-home lives** (propose `~/kontext-home/<name>`) and **whether it has a git remote** (to share it with other people or machines; without a remote it also works). Only if there is no project yet: one from the old `ctx` command stays where it is (`kontext migrate` does not move homes), and the owner is already in its `project.toml` (ask only if it does not match `git config user.name`).
+- **The cutover day**, only if another system is in use (for example `ctx.py`): until that day it keeps being used and is imported again; from that day on, you only write to kontext.
+
+In the same message, lay out the plan: the commands you are going to run and **the paths each one writes to** (`~/.config/kontext/projects.toml`, the kontext-home, `.kontext.toml`, `.claude/settings.json`, `.claude/skills/`, `.claude/agents/`), and the output of `kontext migrate --dry-run` if there is an old install. Wait for the answer.
+
+Everything else you decide yourself with the default values, without asking: the project name (the name of the repo folder), the context mode (`inject` for everyone, which `kontext init` leaves), the distill on as `init` leaves it, `default_role = "pm"`, and the agent files from `kontext install`.
+
+## 4. Migrating
+
+In this order.
+
+**a) The old `ctx` command** (if there is one): `kontext migrate --dry-run`, check that the paths are the ones you announced, and then `kontext migrate`. Run it in the code repo, so that its `.claude/` is handled too. If it reports other repos with `.ctx.toml`, run `kontext migrate` in each one. If `CTX_*` variables remain in the environment, tell the human where to change them to `KONTEXT_*` (their `~/.bashrc`, `~/.zshrc`, or the launcher for their agents); do not edit those files yourself.
+
+**b) Creating the project** (if there is none: `kontext status` fails). From the code repo:
+
+```sh
+kontext init <name> --home <path> [--remote <url>]
+```
+
+`init` makes the first name from `git config user.name` the owner. If the owner the human named is someone else, change the `owners = [...]` line in `<home>/project.toml` (say so first: it is a write).
+
+**c) The `ctx.py` ledger** (if there is one). It has no `--dry-run`, but it can be repeated without duplicating anything:
+
+```sh
+kontext import --from-v0 <folder with ledger/entries.jsonl>
+kontext verify
+```
+
+If it says the v0 chain is broken, stop and tell the human; `--force` only if they ask for it. With a cutover day, repeat the `import` on that day (it brings only what is new).
+
+**d) The loose memory.** Each decision or rule you found in CLAUDE.md, AGENTS.md, notes, or the automatic memory comes in as a **proposal**, never as a decision:
+
+1. Before each one, check whether it is already there: `kontext recall <two or three keywords>`. If there is already a decision, a proposal, or an entry imported from v0 that says the same thing, do not repeat it.
+2. Write it with its origin:
+
+   ```sh
+   kontext --actor agent:kontext-migrate propose "<the rule or decision, short>" --why "<the reason, if the source gives one>" --body "Source: <path>:<line> (<CLAUDE.md|AGENTS.md|note|automatic memory>). Text: «<verbatim quote>»" --tags migrated,<topic>
+   ```
+
+   One proposal per rule. Quote the text as it is; do not improve it or join two rules into one. If the quote contains `` ` ``, `$`, or double quotes, put that argument in single quotes (or escape them): inside double quotes, the shell runs whatever is between backticks.
+3. What is neither a rule nor a decision (session style instructions, paths, test commands, a person's data) does not go in: note it under "Left out", with its reason.
+
+The human signs them afterwards from `kontext inbox` (`kontext inbox sign <n>`); you do not accept them.
+
+## 5. Configuring
+
+In each code repo of the project:
+
+```sh
+kontext install --role pm --dry-run
+kontext install --role pm
+```
+
+It leaves `.kontext.toml` with `default_role = "pm"`, the `SessionStart` hook (and `PreCompact` and `SessionEnd` with the distill on), the `Bash(kontext:*)` permission, the skills, and the agent files, without touching the rest of `.claude/settings.json`. If it warns that it kept an agent file that was changed by hand, tell the human.
+
+## 6. Checking
+
+```sh
+kontext verify
+kontext resume --as pm --peek
+echo '{"session_id": "kontext-migrate-test", "source": "startup", "cwd": "<repo path>"}' | kontext hook session-start
+kontext inbox count
+```
+
+- `verify` says `OK` for each file in the ledger.
+- `resume` brings the charter (if there is one), the imported decisions, and the new proposals.
+- The hook prints a JSON with `hookSpecificOutput.additionalContext` that starts with the project's context. If it prints nothing, check `<home>/.kontext/hooks.log`.
+- `inbox count` counts what belongs to the human (at least the proposals you wrote).
+
+## 7. Summary for the human
+
+End with this, short:
+
+```
+kontext is installed in <repo> (project <name>, home <path>, remote <url or "no remote">).
+
+Migrated:
+- old `ctx` command: <what kontext migrate moved, or "there was none">
+- ctx.py: <N> entries imported from <path> (<by type>); verify OK
+- loose memory: <M> proposals (<from where: CLAUDE.md 3, automatic memory 1…>)
+
+Your turn to sign: `kontext inbox` (<n> pending). Each proposal says where it came from.
+
+Left out:
+- <what> — <why>
+
+To continue: <cutover day and what to do that day; CTX_* variables to change; other repos where to run kontext install>.
+```

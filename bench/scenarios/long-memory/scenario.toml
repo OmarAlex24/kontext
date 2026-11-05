@@ -1,0 +1,820 @@
+# Scenario "long-memory": four working days on the same billing project, with
+# facts the user states only once in the conversation, lots of filler that
+# fills the window, compactions and new sessions. It measures whether the agent
+# remembers (and applies) what was said in passing after all that.
+# Format: bench/README.md.
+#
+# Fact classes:
+# - A: the charter and the decisions, recorded before day 1 (baseline).
+# - B: facts said in passing on day 1, mixed with normal work; they are not in
+#   the charter or in the repo.
+# - C: two of the B facts that change on day 2; the one in force counts.
+# - Distractors: almost identical sentences planted in the filler.
+#
+# Checkpoints: 1 = day 1 after compacting; 2 = day 2, new session;
+# 3 = day 3, new session, after the changes and another compaction;
+# 4 = day 4, after the code tasks that depend on the facts.
+
+name = "long-memory"
+description = "Billing with late fees: facts said in passing, ~100k tokens of filler per session (~140k window), /compact and new sessions"
+
+[bench]
+# Turns on kontext's distill (PreCompact and SessionEnd hooks) in the kontext-*
+# variants. The harness waits for it to finish before each turn and adds its cost.
+distill = true
+
+[charter]
+title = "Collect on time with reminders and late fees"
+objective = "Overdue customers get a reminder by email, and the late fee is calculated correctly"
+non_goals = ["Sending SMS or WhatsApp messages", "Changing how invoices are issued"]
+done_when = "The acceptance tests pass"
+
+[[goals]]
+id = "reminders"
+title = "Email reminders to customers with overdue invoices"
+done_when = "One email per customer, only when due and at the right time"
+scope = [
+  "src/billing/reminders.py", "src/billing/sending.py", "src/billing/mail.py",
+  "src/billing/invoices.py", "tests/test_reminders.py", "tests/test_sending.py", "tests/test_invoices.py",
+]
+
+[[goals]]
+id = "late-fees"
+title = "Late fees and portfolio status"
+done_when = "The late fee on an overdue invoice uses the rate in force"
+scope = [
+  "src/billing/fees.py", "src/billing/portfolio.py", "src/billing/amounts.py",
+  "tests/test_fees.py", "tests/test_portfolio.py", "tests/test_amounts.py",
+]
+
+[scope]
+ignore = ["CLAUDE.md", "AGENTS.md", ".kontext.toml", ".claude/**", "**/__pycache__/**", "**/*.pyc", ".bench/**"]
+
+[[decisions]]
+id = "postmark"
+title = "Send emails with Postmark (billing.mail.Postmark), never with smtplib"
+why = "A home-made SMTP server lands in spam; Postmark already has the domain verified"
+guard = "! grep -rqi smtplib src/"
+
+[[decisions]]
+id = "cents"
+title = "Amounts are stored in cents, as integers; never float"
+why = "With float the balances don't add up when partial payments are summed"
+guard = "! grep -rnE 'float\\(' src/"
+
+[acceptance]
+# The behavior tests: they depend on the B and C facts. They are copied to
+# tests/ at the end; the agent doesn't see them.
+files = "acceptance"
+# Only the behavior ones, not the ones the agent wrote.
+command = "PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_behavior.py' -v"
+label = "Behavior %"
+
+# --- The facts that are measured -----------------------------------------------
+# `said` and `changed` have to appear word for word in a turn (the harness checks
+# it). The made-up distill records the sentences it sees.
+
+[[memory]]
+id = "extension"
+class = "B"
+said = "Ruiz Hardware Store has a payment extension until the 15th of each month"
+
+[[memory]]
+id = "sunday"
+class = "B"
+said = "we never send reminders on Sundays"
+
+[[memory]]
+id = "time"
+class = "B"
+said = "reminders go out at 9:40 in the morning"
+
+[[memory]]
+id = "grace"
+class = "B"
+said = "we give 4 days of grace after the due date before charging a late fee"
+
+[[memory]]
+id = "contact"
+class = "B"
+said = "the collections contact at Olvera Building Supplies is Itzel Barragán, extension 4417"
+
+[[memory]]
+id = "rate"
+class = "C"
+said = "the late-fee rate is 1.5 % monthly"
+changed = "the late-fee rate is no longer 1.5 %: the new one, 1.8 % monthly, is already in force"
+
+[[memory]]
+id = "threshold"
+class = "C"
+said = "we only send a reminder if the customer's overdue balance is over 3,250 pesos"
+changed = "the threshold is no longer 3,250: now a reminder is only sent if the overdue balance is over 4,100 pesos"
+
+# Almost the same as the real ones. They only appear inside the filler.
+[[distractors]]
+id = "rios"
+text = "Ríos Hardware Store has a payment extension until the 20th of each month"
+
+[[distractors]]
+id = "north"
+text = "the North branch doesn't send reminders on Saturdays"
+
+[[distractors]]
+id = "cutoff"
+text = "the cash cut-off is at 9:30 in the morning"
+
+[[distractors]]
+id = "grace-2023"
+text = "in the 2023 policy it was 7 days of grace before the late fee"
+
+[[distractors]]
+id = "barrera"
+text = "Itzel Barrera is the buyer at Bajío Steel, extension 4471"
+
+[[distractors]]
+id = "rate-2023"
+text = "in the 2023 draft policy the late-fee rate was 2 % monthly"
+
+[[distractors]]
+id = "legal"
+text = "customers with more than 41,000 pesos overdue are passed to legal"
+
+# --- Day 1 ---------------------------------------------------------------------
+
+[[days]]
+[[days.turns]]
+text = """We're going to work over several days in this billing repo of Arteaga Distributors (Python, code in src/billing, tests with `PYTHONPATH=src python3 -m unittest discover -s tests`).
+
+The direction: overdue customers get a reminder by email, and the late fee gets calculated correctly. We don't do SMS or WhatsApp, and we don't touch how invoices are issued.
+
+Two decisions we already made:
+1. Emails go out through Postmark (the class billing.mail.Postmark), never through smtplib: a home-made SMTP lands in spam.
+2. Amounts are stored in cents, as integers; never float, because balances don't add up when partial payments are summed.
+
+For now just confirm you have it; don't change anything."""
+
+[[days.turns]]
+text = """For context on how credit works here: the late-fee rate is 1.5 % monthly, and Ruiz Hardware Store has a payment extension until the 15th of each month because it pays with the biweekly paycheck. Oh, and we never send reminders on Sundays; last time we got a flood of complaints.
+
+Now then: write `days_overdue(invoice, today)` in src/billing/invoices.py (the days since the due date; 0 if it isn't due yet) and its test in tests/test_invoices.py."""
+
+[[days.turns]]
+text = """Another thing that came up at the meeting: reminders go out at 9:40 in the morning, which is when credit has already reviewed the night's deposits. And we give 4 days of grace after the due date before charging a late fee.
+
+Write `overdue_balance(invoices, customer, today)` in src/billing/invoices.py: the sum in cents of that customer's overdue balances. With its test."""
+
+[[days.turns]]
+text = """For when we get to the emails: the collections contact at Olvera Building Supplies is Itzel Barragán, extension 4417; emails to Olvera go to her desk. And we only send a reminder if the customer's overdue balance is over 3,250 pesos; below that it isn't worth it.
+
+Write `reminder_text(customer, invoices)` in src/billing/reminders.py: the email text with the customer's name, one line per invoice (number and balance with billing.amounts.format_amount) and the total. With its test."""
+
+[[days.turns]]
+kind = "fill"
+docs = "minutes"
+tokens = 20000
+seed = 101
+distractors = ["rios"]
+ask = "Here are the minutes of the credit meetings from the last few weeks. Pull out the open action items, with their owner, as a short list. Answer here; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "tickets"
+tokens = 20000
+seed = 102
+distractors = ["barrera"]
+ask = "These are the collections support tickets for the quarter. Which are the three problems that repeat the most? Answer here in a few lines; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "emails"
+tokens = 20000
+seed = 103
+distractors = ["rate-2023"]
+ask = "Emails from the credit team in October. Summarize what's pending in five bullets. Answer here; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "logbook"
+tokens = 20000
+seed = 104
+distractors = ["cutoff"]
+ask = "The logbook of the nightly processes. Is there a process that fails often? Tell me which one and how many times, in a few lines. Do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "mixed"
+tokens = 20000
+seed = 105
+distractors = ["north"]
+ask = "More material from the week (minutes, tickets and emails mixed together). Give me a half-page summary for the finance director. Answer here; do not write files."
+
+[[days.turns]]
+kind = "compact"
+
+# Checkpoint 1: did the B facts survive the compaction?
+[[days.turns]]
+kind = "probe"
+id = "p1-extension"
+class = "B"
+checkpoint = 1
+question = "Until what day does Ruiz Hardware Store have a payment extension?"
+expected = ["15|15th|fifteenth"]
+forbidden = ["20|20th|twentieth"]
+note = "Ríos Hardware Store, until the 20th, is a distractor from the filler."
+
+[[days.turns]]
+kind = "probe"
+id = "p1-rate"
+class = "B"
+checkpoint = 1
+question = "What is the late-fee rate?"
+expected = ["1.5%"]
+forbidden = ["2%"]
+note = "The 2 % is from a 2023 draft that showed up in the filler."
+
+[[days.turns]]
+kind = "probe"
+id = "p1-contact"
+class = "B"
+checkpoint = 1
+question = "Who should the emails to Olvera Building Supplies be addressed to, and what extension does that person have?"
+expected = ["Barragán", "4417"]
+forbidden = ["Barrera", "4471"]
+note = "Itzel Barrera, extension 4471, is from another company (a filler distractor)."
+
+[[days.turns]]
+kind = "probe"
+id = "p1-time"
+class = "B"
+checkpoint = 1
+question = "What time do reminders go out?"
+expected = ["9:40"]
+forbidden = ["9:30"]
+note = "9:30 is the cash cut-off (a filler distractor)."
+
+# --- Day 2: new session --------------------------------------------------------
+
+[[days]]
+# Checkpoint 2: after day 1 was compacted and closed.
+[[days.turns]]
+kind = "probe"
+id = "p2-grace"
+class = "B"
+checkpoint = 2
+question = "How many days of grace do we give before charging a late fee?"
+expected = ["4 days|four days"]
+forbidden = ["7 days|seven days"]
+
+[[days.turns]]
+kind = "probe"
+id = "p2-threshold"
+class = "B"
+checkpoint = 2
+question = "From what overdue balance do we send a customer a reminder?"
+expected = ["3250|325000"]
+forbidden = ["41000|4100000"]
+note = "Right now the threshold is 3,250 pesos (it changes later). 41,000 is for passing to legal (a distractor)."
+
+[[days.turns]]
+kind = "probe"
+id = "p2-sunday"
+class = "B"
+checkpoint = 2
+question = "Is there any day of the week when we don't send reminders?"
+expected = ["sunday|sundays"]
+forbidden = ["saturday|saturdays"]
+note = "The Saturday thing is only for the North branch (a filler distractor)."
+
+[[days.turns]]
+kind = "probe"
+id = "p2-extension"
+class = "B"
+checkpoint = 2
+question = "Which customer has a payment extension for reminders, and until what day?"
+expected = ["Ruiz", "15|15th|fifteenth"]
+forbidden = ["Ríos", "20|20th|twentieth"]
+
+[[days.turns]]
+text = """The new credit circular came out and is already in force. Two changes: the late-fee rate is no longer 1.5 %: the new one, 1.8 % monthly, is already in force. And the threshold is no longer 3,250: now a reminder is only sent if the overdue balance is over 4,100 pesos. Both apply to everything we calculate or send from today on, even if the invoice was overdue before the circular.
+
+Meanwhile, write `portfolio_summary(invoices, today)` in src/billing/portfolio.py: the overdue total per customer, in cents, as a list of (customer, total) pairs from largest to smallest. With its test."""
+
+[[days.turns]]
+text = """Write `send_reminders(invoices, today, mail, addresses)` in src/billing/reminders.py: take the invoices overdue on `today`, group them by customer and send one email per customer with `mail.send(to, subject, text)`; `addresses` is a dict customer -> address. Return how many emails it sent. No filters for now."""
+
+[[days.turns]]
+kind = "fill"
+docs = "minutes"
+tokens = 20000
+seed = 201
+distractors = ["grace-2023", "rate-2023"]
+ask = "Minutes from the collections meetings this fortnight. List the action items that are past due. Answer here; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "emails"
+tokens = 20000
+seed = 202
+distractors = ["legal"]
+ask = "The sales and credit emails from the week. Which customers come up the most, and why? Answer here in a few lines; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "tickets"
+tokens = 20000
+seed = 203
+distractors = ["north"]
+ask = "New support tickets. Group them by type of problem and tell me how many of each there are. Answer here; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "mixed"
+tokens = 20000
+seed = 204
+distractors = ["rios"]
+ask = "Another batch of documents from the week. What risks do you see for the month's collections? Three bullets. Answer here; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "logbook"
+tokens = 20000
+seed = 205
+ask = "This week's logbook. How many reconciliation runs were there, and how many payments were left without a reference in total? Approximate is fine. Do not write files."
+
+[[days.turns]]
+kind = "compact"
+
+# --- Day 3: new session --------------------------------------------------------
+
+[[days]]
+# Checkpoint 3: everything, after the changes, another compaction and another session.
+[[days.turns]]
+kind = "probe"
+id = "p3-cents"
+class = "A"
+checkpoint = 3
+question = "How do we store amounts in the code, and why?"
+expected = ["cents", "float"]
+note = "Expected: in cents, as integers, and never as float (why: with float the balances don't add up). \"Never as float\" meets the idea of float."
+
+[[days.turns]]
+kind = "probe"
+id = "p3-postmark"
+class = "A"
+checkpoint = 3
+question = "Which service do we send the emails with, and why that one?"
+expected = ["Postmark", "spam"]
+note = "Expected: with Postmark, and the reason: a home-made SMTP lands in spam."
+
+[[days.turns]]
+kind = "probe"
+id = "p3-rate"
+class = "C"
+checkpoint = 3
+question = "What is the late-fee rate in force today?"
+expected = ["1.8%"]
+forbidden = ["1.5%", "2%"]
+note = "It was 1.5 % monthly; on day 2 the user said the 1.8 % was already in force (the circular was already in effect and applies to everything calculated since then). The 2 % is from a 2023 draft (distractor). Mentioning 1.5 % as the old value is not an error; saying that 1.5 % is in force today, or that 1.8 % doesn't apply yet, is."
+
+[[days.turns]]
+kind = "probe"
+id = "p3-threshold"
+class = "C"
+checkpoint = 3
+question = "What is the minimum overdue balance today for sending a reminder?"
+expected = ["4100|410000"]
+forbidden = ["3250|325000", "41000|4100000"]
+note = "It was 3,250 pesos; on day 2 the user said 4,100 was already in force (the circular was already in effect). 41,000 is for passing to legal (a distractor)."
+
+[[days.turns]]
+kind = "probe"
+id = "p3-contact"
+class = "B"
+checkpoint = 3
+question = "Who is the collections contact at Olvera Building Supplies?"
+expected = ["Barragán"]
+forbidden = ["Barrera"]
+
+[[days.turns]]
+kind = "probe"
+id = "p3-time"
+class = "B"
+checkpoint = 3
+question = "What time do we send reminders?"
+expected = ["9:40"]
+forbidden = ["9:30"]
+
+[[days.turns]]
+kind = "probe"
+id = "p3-fee"
+class = "cross"
+checkpoint = 3
+question = "How much late fee does an invoice of 10,000 pesos that is 34 days overdue owe?"
+expected = ["180"]
+forbidden = ["150", "162", "200"]
+note = "34 days minus 4 days of grace = 30 days = one month at 1.8 %: 180 pesos. The new rate is in force and applies to the whole late fee calculated since the circular, even though the invoice went overdue before it: it isn't prorated with the old one. 150 comes from the old rate, 162 from the 7 days of grace in the 2023 policy, 200 from the 2 % in the draft."
+
+[[days.turns]]
+text = """Write `account_statement(customer, invoices, today)` in src/billing/portfolio.py: a text with each of the customer's invoices (number, due date, balance formatted, and "overdue" if it already passed its due date) and the total. With its test."""
+
+[[days.turns]]
+kind = "fill"
+docs = "emails"
+tokens = 20000
+seed = 301
+distractors = ["rate-2023", "barrera"]
+ask = "Late emails I haven't gotten to. Is there one that needs a reply from me today? Answer here in a few lines; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "logbook"
+tokens = 20000
+seed = 302
+distractors = ["cutoff"]
+ask = "Logbook for the weekend. Anything strange? A few lines. Do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "minutes"
+tokens = 20000
+seed = 303
+distractors = ["legal", "grace-2023"]
+ask = "The minutes of the monthly meeting. Make me a list of owners with how many action items each one has. Answer here; do not write files."
+
+[[days.turns]]
+kind = "fill"
+docs = "tickets"
+tokens = 20000
+seed = 304
+distractors = ["rios"]
+ask = "This week's tickets. Which customer had the most tickets? Answer here; do not write files."
+
+[[days.turns]]
+kind = "compact"
+
+# --- Day 4: new session, tasks that depend on the facts -------------------------
+# The tasks don't repeat the facts: "the rate we agreed on", "the time we agreed on".
+
+[[days]]
+[[days.turns]]
+text = """Write `late_fee(balance_cents, days_overdue)` in src/billing/fees.py: the late fee in cents (an integer), with the monthly rate we have agreed on, prorated by day (a month is 30 days) and rounded to the cent, only for the days past the grace days. With its tests in tests/test_fees.py."""
+
+[[days.turns]]
+text = """Write `schedule_send(day)` in src/billing/sending.py: it takes a `date` and returns the `datetime` when that day's reminder should go out, at the agreed time and respecting the days we don't send (if it falls on one of those, move it to the next day we do send). With its tests in tests/test_sending.py."""
+
+[[days.turns]]
+text = """Write `should_remind(customer, overdue_balance_cents, today)` in src/billing/reminders.py: True if that customer gets a reminder today, according to the balance threshold in force and the payment extensions we have agreed on. With its tests."""
+
+# Checkpoint 4: after the tasks.
+[[days.turns]]
+kind = "probe"
+id = "p4-rate"
+class = "C"
+checkpoint = 4
+question = "For the director's report: what late-fee rate are we charging?"
+expected = ["1.8%"]
+forbidden = ["1.5%", "2%"]
+note = "It was 1.5 %; on day 2 the user said the 1.8 % was already in force (the circular was already in effect). The 2 % is from a 2023 draft. Mentioning 1.5 % as the old value is not an error; saying that today we charge 1.5 %, is."
+
+[[days.turns]]
+kind = "probe"
+id = "p4-extension"
+class = "B"
+checkpoint = 4
+question = "Until what day of the month do we not send reminders to Ruiz Hardware Store?"
+expected = ["15|15th|fifteenth"]
+forbidden = ["20|20th|twentieth"]
+
+[[days.turns]]
+kind = "probe"
+id = "p4-grace"
+class = "B"
+checkpoint = 4
+question = "How many days of grace are there before the late fee?"
+expected = ["4 days|four days"]
+forbidden = ["7 days|seven days"]
+
+[[days.turns]]
+kind = "probe"
+id = "p4-sunday"
+class = "cross"
+checkpoint = 4
+question = "If a customer's reminder falls on a Sunday, what day and what time does it go out?"
+expected = ["Monday", "9:40"]
+forbidden = ["9:30"]
+
+[[days.turns]]
+kind = "probe"
+id = "p4-threshold"
+class = "cross"
+checkpoint = 4
+question = "A customer that is not Ruiz Hardware Store owes 3,800 pesos overdue. Do we send them a reminder? Say why."
+expected = ["no", "4100|410000"]
+forbidden = ["3250|325000"]
+note = "No: the threshold in force is 4,100 pesos (it was 3,250 until the day-2 circular, which was already in force)."
+
+# --- The made-up agent (--dry-run) ---------------------------------------------
+# What it knows: the session since the last compaction, CLAUDE.md and the kontext
+# hook (which carries what the made-up distill recorded). `if_known` picks the
+# implementation according to what it knows.
+
+[fake]
+# On compacting it keeps the last two turns (filler, with its distractors): so
+# `none` falls into one of them and the dry run counts a confusion.
+compact_keeps = 2
+
+[[fake.rules]]
+when = "just confirm"
+reply = "Understood: email reminders and late fees; Postmark and cents."
+
+[[fake.rules]]
+when = "late_fee(balance_cents"
+if_known = ["the new one, 1.8 % monthly, is already in force", "4 days of grace"]
+reply = "Done: late_fee with the rate in force and the grace days."
+[[fake.rules.write]]
+path = "src/billing/fees.py"
+content = '''"""Late fees, in cents."""
+
+MONTHLY_RATE_PER_MILLE = 18  # 1.8 %
+GRACE_DAYS = 4
+
+
+def late_fee(balance_cents, days_overdue):
+    days = max(0, days_overdue - GRACE_DAYS)
+    return (balance_cents * MONTHLY_RATE_PER_MILLE * days + 15000) // 30000
+'''
+
+[[fake.rules]]
+when = "late_fee(balance_cents"
+if_known = ["the late-fee rate is 1.5 % monthly", "4 days of grace"]
+reply = "Done: late fee at 1.5 %."
+[[fake.rules.write]]
+path = "src/billing/fees.py"
+content = '''"""Late fees, in cents."""
+
+
+def late_fee(balance_cents, days_overdue):
+    days = max(0, days_overdue - 4)
+    return (balance_cents * 15 * days + 15000) // 30000
+'''
+
+[[fake.rules]]
+when = "late_fee(balance_cents"
+reply = "Done: you didn't tell me the rate, so I put 2 % monthly without grace days."
+[[fake.rules.write]]
+path = "src/billing/fees.py"
+content = '''"""Late fees, in cents."""
+
+
+def late_fee(balance_cents, days_overdue):
+    return (balance_cents * 20 * max(0, days_overdue) + 15000) // 30000
+'''
+
+[[fake.rules]]
+when = "schedule_send"
+if_known = ["go out at 9:40", "we never send reminders on Sundays"]
+reply = "Done: at 9:40, and never on Sundays."
+[[fake.rules.write]]
+path = "src/billing/sending.py"
+content = '''"""When each reminder goes out."""
+
+from datetime import datetime, time, timedelta
+
+
+def schedule_send(day):
+    if day.weekday() == 6:  # Sunday
+        day = day + timedelta(days=1)
+    return datetime.combine(day, time(9, 40))
+'''
+
+[[fake.rules]]
+when = "schedule_send"
+reply = "Done: at 9:00, every day."
+[[fake.rules.write]]
+path = "src/billing/sending.py"
+content = '''"""When each reminder goes out."""
+
+from datetime import datetime, time
+
+
+def schedule_send(day):
+    return datetime.combine(day, time(9, 0))
+'''
+
+[[fake.rules]]
+when = "should_remind"
+if_known = ["is over 4,100 pesos", "ruiz hardware store has a payment extension"]
+reply = "Done: 4,100-peso threshold and Ruiz's extension."
+[[fake.rules.write]]
+path = "src/billing/reminders.py"
+mode = "append"
+content = '''
+
+THRESHOLD_CENTS = 410000
+EXTENSIONS = {"Ruiz Hardware Store": 15}
+
+
+def should_remind(customer, overdue_balance_cents, today):
+    if today.day <= EXTENSIONS.get(customer, 0):
+        return False
+    return overdue_balance_cents > THRESHOLD_CENTS
+'''
+
+[[fake.rules]]
+when = "should_remind"
+reply = "Done: to everyone who owes anything."
+[[fake.rules.write]]
+path = "src/billing/reminders.py"
+mode = "append"
+content = '''
+
+def should_remind(customer, overdue_balance_cents, today):
+    return overdue_balance_cents > 0
+'''
+
+[[fake.rules]]
+when = "days_overdue(invoice"
+reply = "Done: days_overdue and its test."
+[[fake.rules.write]]
+path = "src/billing/invoices.py"
+mode = "append"
+content = '''
+
+def days_overdue(invoice, today):
+    return max(0, (today - invoice.due).days)
+'''
+
+[[fake.rules]]
+when = "overdue_balance(invoices"
+reply = "Done: overdue_balance."
+[[fake.rules.write]]
+path = "src/billing/invoices.py"
+mode = "append"
+content = '''
+
+def overdue_balance(invoices, customer, today):
+    return sum(f.balance_cents for f in overdue(invoices, today) if f.customer == customer)
+'''
+
+[[fake.rules]]
+when = "reminder_text"
+reply = "Done: reminder_text."
+[[fake.rules.write]]
+path = "src/billing/reminders.py"
+content = '''"""Payment reminders."""
+
+from billing.amounts import format_amount
+
+
+def reminder_text(customer, invoices):
+    lines = [f"Hi {customer}, you have overdue invoices:"]
+    for f in invoices:
+        lines.append(f"- {f.number}: {format_amount(f.balance_cents)}")
+    lines.append(f"Total: {format_amount(sum(f.balance_cents for f in invoices))}")
+    return "\n".join(lines)
+'''
+
+[[fake.rules]]
+when = "portfolio_summary"
+reply = "Done: portfolio_summary."
+[[fake.rules.write]]
+path = "src/billing/portfolio.py"
+content = '''"""Overdue portfolio."""
+
+from billing.invoices import by_customer, overdue
+
+
+def portfolio_summary(invoices, today):
+    tot = {c: sum(f.balance_cents for f in fs) for c, fs in by_customer(overdue(invoices, today)).items()}
+    return sorted(tot.items(), key=lambda x: -x[1])
+'''
+
+[[fake.rules]]
+when = "send_reminders"
+reply = "Done: send_reminders."
+[[fake.rules.write]]
+path = "src/billing/reminders.py"
+mode = "append"
+content = '''
+
+def send_reminders(invoices, today, mail, addresses):
+    from billing.invoices import by_customer, overdue
+
+    n = 0
+    for customer, fs in by_customer(overdue(invoices, today)).items():
+        mail.send(addresses[customer], "Overdue invoices", reminder_text(customer, fs))
+        n += 1
+    return n
+'''
+
+[[fake.rules]]
+when = "account_statement"
+reply = "Done: account_statement."
+[[fake.rules.write]]
+path = "src/billing/portfolio.py"
+mode = "append"
+content = '''
+
+def account_statement(customer, invoices, today):
+    from billing.amounts import format_amount
+
+    fs = [f for f in invoices if f.customer == customer]
+    lines = [f"{f.number} {f.due} {format_amount(f.balance_cents)}" + (" overdue" if f.due < today else "") for f in fs]
+    lines.append(f"Total: {format_amount(sum(f.balance_cents for f in fs))}")
+    return "\n".join(lines)
+'''
+
+[[fake.rules]]
+when = "do not write files"
+reply = "Here is the summary (made up): nothing to highlight."
+
+# The questions: the first rule whose `when` is in the question; of its
+# options, the first whose `known` phrases it knows all of.
+
+[[fake.answers]]
+when = "3,800 pesos"
+[[fake.answers.options]]
+known = ["is over 4,100 pesos"]
+reply = "No: the threshold in force is 4,100 pesos and 3,800 is not over it."
+[[fake.answers.options]]
+known = ["is over 3,250 pesos"]
+reply = "Yes, because it is over 3,250 pesos."
+
+[[fake.answers]]
+when = "34 days overdue"
+[[fake.answers.options]]
+known = ["the new one, 1.8 % monthly, is already in force", "4 days of grace"]
+reply = "Those are 30 chargeable days at 1.8 % monthly: 180 pesos."
+[[fake.answers.options]]
+known = ["the late-fee rate is 1.5 % monthly", "4 days of grace"]
+reply = "30 days at 1.5 %: 150 pesos."
+
+[[fake.answers]]
+when = "falls on a sunday"
+[[fake.answers.options]]
+known = ["we never send reminders on sundays", "go out at 9:40"]
+reply = "It moves to Monday, at 9:40 in the morning."
+
+[[fake.answers]]
+when = "late-fee rate"
+[[fake.answers.options]]
+known = ["the new one, 1.8 % monthly, is already in force"]
+reply = "The rate in force is 1.8 % monthly."
+[[fake.answers.options]]
+known = ["the late-fee rate is 1.5 % monthly"]
+reply = "The late-fee rate is 1.5 % monthly."
+
+[[fake.answers]]
+when = ["payment extension", "ruiz hardware"]
+[[fake.answers.options]]
+known = ["ruiz hardware store has a payment extension until the 15th"]
+reply = "Ruiz Hardware Store, until the 15th of each month."
+
+[[fake.answers]]
+when = "olvera"
+[[fake.answers.options]]
+known = ["itzel barragan, extension 4417"]
+reply = "Itzel Barragán, extension 4417."
+
+[[fake.answers]]
+when = "what time"
+[[fake.answers.options]]
+known = ["go out at 9:40"]
+reply = "At 9:40 in the morning."
+[[fake.answers.options]]
+known = ["cash cut-off is at 9:30"]
+reply = "At 9:30 in the morning."
+
+[[fake.answers]]
+when = "days of grace"
+[[fake.answers.options]]
+known = ["4 days of grace"]
+reply = "4 days of grace."
+
+[[fake.answers]]
+when = "overdue balance"
+[[fake.answers.options]]
+known = ["is over 4,100 pesos"]
+reply = "When the overdue balance is over 4,100 pesos."
+[[fake.answers.options]]
+known = ["is over 3,250 pesos"]
+reply = "When the overdue balance is over 3,250 pesos."
+
+[[fake.answers]]
+when = "don't send reminders"
+[[fake.answers.options]]
+known = ["we never send reminders on sundays"]
+reply = "Sundays, never."
+
+[[fake.answers]]
+when = "store amounts"
+[[fake.answers.options]]
+known = ["cents, as integers; never float"]
+reply = "In cents, as integers; never float, because the balances don't add up."
+
+[[fake.answers]]
+when = "send the emails with"
+[[fake.answers.options]]
+known = ["postmark", "spam"]
+reply = "With Postmark; a home-made SMTP lands in spam."

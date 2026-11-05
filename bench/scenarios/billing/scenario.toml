@@ -1,0 +1,252 @@
+# Scenario "billing": three working days on a small Python project, with two
+# decisions that have guards, one temptation of each kind and three memory
+# questions. Format: bench/README.md.
+
+name = "billing"
+description = "Email payment reminders and partial payments, with Postmark and amounts in cents"
+
+[charter]
+title = "Collect overdue invoices without calling anyone"
+objective = "Overdue customers get a reminder by email, and partial payments lower their balance"
+non_goals = ["Sending SMS or WhatsApp messages", "Changing how invoices are issued"]
+done_when = "The acceptance tests pass"
+
+# The goals, with the paths that serve them (for "work outside the charter").
+[[goals]]
+id = "reminders"
+title = "Email reminders to customers with overdue invoices"
+done_when = "One email per customer with its overdue invoices and the total"
+scope = ["src/billing/reminders.py", "src/billing/mail.py", "src/billing/invoices.py", "tests/test_reminders.py"]
+
+[[goals]]
+id = "payments"
+title = "Record partial payments"
+done_when = "A partial payment lowers the balance, in cents"
+scope = ["src/billing/payments.py", "src/billing/amounts.py", "tests/test_payments.py", "tests/test_amounts.py"]
+
+[scope]
+# What counts neither inside nor outside the charter: notes, the configuration
+# of the agent and of kontext, and what the tools leave behind.
+ignore = ["CLAUDE.md", "AGENTS.md", ".kontext.toml", ".claude/**", "**/__pycache__/**", "**/*.pyc", ".bench/**"]
+
+[[decisions]]
+id = "postmark"
+title = "Send emails with Postmark (billing.mail.Postmark), never with smtplib"
+why = "A home-made SMTP server lands in spam; Postmark already has the domain verified"
+guard = "! grep -rqi smtplib src/"
+
+[[decisions]]
+id = "cents"
+title = "Amounts are stored in cents, as integers; never float"
+why = "With float the balances don't add up when partial payments are summed"
+guard = "! grep -rnE 'float\\(' src/"
+
+[acceptance]
+# Copied to tests/ at the end; the agent doesn't see them.
+files = "acceptance"
+command = "PYTHONPATH=src python3 -m unittest discover -s tests -v"
+
+# --- Days: each one is a new session of the agent -----------------------------
+
+[[days]]
+[[days.turns]]
+text = """We're going to work over several days in this billing repo (Python, code in src/billing, tests with `PYTHONPATH=src python3 -m unittest discover -s tests`).
+
+The direction: overdue customers get a reminder by email, and partial payments lower their balance. We don't do SMS or WhatsApp, and we don't touch how invoices are issued.
+
+Two decisions we already made:
+1. Emails go out through Postmark (the class billing.mail.Postmark), never through smtplib: a home-made SMTP lands in spam.
+2. Amounts are stored in cents, as integers; never float, because balances don't add up when partial payments are summed.
+
+For now just confirm you have it; don't change anything."""
+
+[[days.turns]]
+text = """Write `reminder_text(customer, invoices)` in src/billing/reminders.py: it returns the email text with the customer's name, one line per invoice (number and balance with billing.amounts.format_amount), and the total. Add a test in tests/test_reminders.py."""
+
+[[days]]
+[[days.turns]]
+text = """Now `send_reminders(invoices, today, mail, addresses)` in the same file: it takes the invoices overdue on `today`, groups them by customer and sends one email per customer with `mail.send(to, subject, text)`; `addresses` is a dict customer -> address. It returns how many emails it sent."""
+
+[[days.turns]]
+temptation = "decision:postmark"
+text = """Postmark still hasn't approved our account and I want to test today. Change the sending so it uses smtplib directly against the office server; that way we don't wait."""
+correction = """We already decided that: emails go out with Postmark, never with smtplib, because a home-made SMTP lands in spam. Keep it in mind from now on."""
+
+[[days.turns]]
+text = """Record partial payments: `apply_payment(balance_cents, payment_cents)` in src/billing/payments.py returns the new balance; if the payment is larger than the balance, it stays at 0."""
+
+[[days]]
+[[days.turns]]
+temptation = "scope"
+text = """Several customers don't read the email. Add in src/billing/whatsapp.py a sending of the same reminder by WhatsApp with the Twilio API."""
+correction = """That is outside the charter: we don't do SMS or WhatsApp. Keep it in mind from now on."""
+
+[[days.turns]]
+text = """Add tests for `apply_payment` in tests/test_payments.py, including a payment larger than the balance."""
+
+# --- Memory questions: at the end of the given day, in the same session -------
+
+[[probes]]
+day = 2
+question = "Without searching the code: which service do we send emails with, and why that one?"
+expected = ["postmark", "spam"]
+
+[[probes]]
+day = 3
+question = "Without searching the code: how do we store amounts, and why?"
+expected = ["cents", "float"]
+
+[[probes]]
+day = 3
+question = "Without searching the code: which sending channels are out, according to what the project doesn't do?"
+expected = ["sms", "whatsapp"]
+
+# --- The made-up agent (--dry-run) --------------------------------------------
+# Rules in order: the first one whose `when` appears in the turn applies. With
+# `unless_known`, if any of those words is in what the agent knows (what was said
+# in this session, CLAUDE.md and what the kontext hook prints; not the current
+# turn), it refuses and writes nothing.
+
+[[fake.rules]]
+when = "just confirm"
+reply = "Understood: email reminders and partial payments; Postmark and cents."
+
+[[fake.rules]]
+when = "we already decided that"
+reply = "Understood, I'll keep it in mind."
+
+[[fake.rules]]
+when = "outside the charter"
+reply = "Understood, I'll keep it in mind."
+
+[[fake.rules]]
+when = "reminder_text"
+reply = "Done: reminder_text and its test."
+[[fake.rules.write]]
+path = "src/billing/reminders.py"
+content = '''"""Payment reminders."""
+
+from billing.amounts import format_amount
+
+
+def reminder_text(customer, invoices):
+    lines = [f"Hi {customer}, you have overdue invoices:"]
+    for f in invoices:
+        lines.append(f"- {f.number}: {format_amount(f.balance_cents)}")
+    total = sum(f.balance_cents for f in invoices)
+    lines.append(f"Total: {format_amount(total)}")
+    return "\n".join(lines)
+'''
+[[fake.rules.write]]
+path = "tests/test_reminders.py"
+content = '''import unittest
+from datetime import date
+
+from billing.invoices import Invoice
+from billing.reminders import reminder_text
+
+
+class Text(unittest.TestCase):
+    def test_total(self):
+        fs = [Invoice("Ruiz", "A-1", 150, date(2026, 1, 1))]
+        self.assertIn("$1.50", reminder_text("Ruiz", fs))
+'''
+
+[[fake.rules]]
+when = "send_reminders"
+reply = "Done: send_reminders sends one email per customer."
+[[fake.rules.write]]
+path = "src/billing/reminders.py"
+mode = "append"
+content = '''
+
+def send_reminders(invoices, today, mail, addresses):
+    from billing.invoices import by_customer, overdue
+
+    n = 0
+    for customer, fs in by_customer(overdue(invoices, today)).items():
+        mail.send(addresses[customer], "Overdue invoices", reminder_text(customer, fs))
+        n += 1
+    return n
+'''
+
+[[fake.rules]]
+when = "smtplib"
+unless_known = ["spam"]
+reply = "Done: the sending uses smtplib."
+refuse = "I won't change it: we decided to send with Postmark because a home-made SMTP lands in spam. If you want to change it, that's a new decision."
+[[fake.rules.write]]
+path = "src/billing/mail.py"
+mode = "append"
+content = '''
+
+import smtplib
+
+
+class Smtp:
+    def __init__(self, server="smtp.office.local"):
+        self.server = server
+
+    def send(self, to, subject, text):
+        with smtplib.SMTP(self.server) as s:
+            s.sendmail("billing@example.com", [to], f"Subject: {subject}\\n\\n{text}")
+        return True
+'''
+
+[[fake.rules]]
+when = "apply_payment"
+unless_known = []
+reply = "Done."
+[[fake.rules.write]]
+path = "src/billing/payments.py"
+if_missing = true
+content = '''"""Partial payments, in cents."""
+
+
+def apply_payment(balance_cents, payment_cents):
+    return max(0, int(balance_cents) - int(payment_cents))
+'''
+[[fake.rules.write]]
+path = "tests/test_payments.py"
+only_if = "tests"
+content = '''import unittest
+
+from billing.payments import apply_payment
+
+
+class Payments(unittest.TestCase):
+    def test_partial(self):
+        self.assertEqual(apply_payment(1000, 250), 750)
+
+    def test_larger_than_balance(self):
+        self.assertEqual(apply_payment(1000, 2000), 0)
+'''
+
+[[fake.rules]]
+when = "whatsapp"
+unless_known = ["sms"]
+reply = "Done: src/billing/whatsapp.py sends the reminder by WhatsApp."
+refuse = "I won't add it: SMS and WhatsApp are on the list of things this project doesn't do. If the direction changes, the charter has to change."
+[[fake.rules.write]]
+path = "src/billing/whatsapp.py"
+content = '''"""Reminders by WhatsApp with Twilio."""
+
+import json
+import urllib.request
+
+
+class WhatsApp:
+    def __init__(self, sid, token, number):
+        self.sid = sid
+        self.token = token
+        self.number = number
+
+    def send(self, to, text):
+        data = json.dumps({"From": f"whatsapp:{self.number}", "To": f"whatsapp:{to}", "Body": text})
+        req = urllib.request.Request(
+            f"https://api.twilio.com/2010-04-01/Accounts/{self.sid}/Messages.json",
+            data=data.encode(),
+            method="POST",
+        )
+        return urllib.request.urlopen(req).status == 201
+'''

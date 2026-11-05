@@ -1,0 +1,20 @@
+# Synonyms for `kontext find` in a web shop's docs.
+# Copy them to <kontext-home>/synonyms.toml.
+#
+# Each group is searched as a single concept: a query with any of its terms
+# also finds the others (with weight 0.7). Keep the groups small and literal:
+# they help find things, they are not a dictionary.
+
+groups = [
+  ["cart", "basket", "bag"],
+  ["checkout", "purchase"],
+  ["payment", "billing", "charge", "stripe"],
+  ["refund", "chargeback"],
+  ["shipping", "delivery", "carrier"],
+  ["inventory", "stock", "warehouse"],
+  ["product", "item", "sku", "catalog"],
+  ["customer", "shopper", "buyer"],
+  ["login", "auth", "session", "signin"],
+  ["coupon", "discount", "promo", "voucher"],
+  ["deploy", "release", "rollout"],
+]
