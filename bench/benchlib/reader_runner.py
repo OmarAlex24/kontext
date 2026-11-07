@@ -43,10 +43,24 @@ READER_TOOLS = ["Read", "Grep", "Glob"]
 DEFAULT_READER_CMD = 'claude -p --output-format json --setting-sources "" --strict-mcp-config'
 FAKE_READER = BENCH_DIR / "fake_reader.py"
 PROMPT_PATH = BENCH_DIR / "reader" / "prompt.md"
-# The sections of prompt.md each prompt version uses. v1 is the pilot's.
+# What `kontext install` ships: the reader agent (its body is the reader's
+# instructions) and the skill (its `## Audit task` and `## Value task` sections
+# are the task texts the PM passes word for word).
+TEMPLATES = BENCH_DIR.parent / "templates"
+PM_READER_PATH = TEMPLATES / "agents" / "kontext-pm-reader.md"
+PM_SKILL_PATH = TEMPLATES / "skill-kontext-pm.md"
+# Their names among the sections (`prompt_sections`), next to prompt.md's.
+SHIPPED = {
+    "reader": "templates/agents/kontext-pm-reader.md (body)",
+    "audit": "templates/skill-kontext-pm.md, Audit task",
+    "value": "templates/skill-kontext-pm.md, Value task",
+}
+# The sections each prompt version uses. v1 is the pilot's; `skill` is what
+# ships, with the bench's own `Delegation` in front of the task.
 PROMPTS = {
     "v1": {"reader": "Reader", "audit": "Audit task", "value": "Value task", "delegation": "Delegation"},
     "v2": {"reader": "Reader v2", "audit": "Audit task v2", "value": "Value task v2", "delegation": "Delegation"},
+    "skill": {**SHIPPED, "delegation": "Delegation"},
 }
 DEFAULT_PROMPT = "v1"
 # Effort levels, as the subagent tool's `effort` parameter lists them in Claude
@@ -67,7 +81,11 @@ EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 # requests ran on it. `effort` (`--sub-effort`) is the subagent's own effort
 # level, which overrides the session's; only `CLAUDE_CODE_EFFORT_LEVEL` would
 # override it, so the calls never get that variable (`call_env`). The effort
-# each session really ran at is read back from its transcript.
+# each session really ran at is read back from its transcript. With `--prompt
+# skill` the entry's `prompt` is the shipped agent's body, but its name,
+# description and model stay these (the shipped file says `kontext-pm-reader`
+# and `model: haiku`, the alias of the same Haiku), so the configurations and
+# the gate compare like for like.
 SUBAGENT = {
     "tool": "Agent",
     "name": "pm-reader",
@@ -84,16 +102,41 @@ def config_models(name):
     return MODELS[main], (MODELS[sub] if sub else None)
 
 
-def prompt_sections(path=PROMPT_PATH):
-    """The `## ` sections of prompt.md, by heading."""
-    out, cur = {}, None
-    for line in Path(path).read_text().split("\n"):
-        if line.startswith("## "):
+def markdown_sections(text):
+    """The `## ` sections of a markdown text, by heading. A `## ` line inside a
+    fenced block (```) is text, not a heading."""
+    out, cur, fenced = {}, None, False
+    for line in text.split("\n"):
+        if line.startswith("```"):
+            fenced = not fenced
+        if line.startswith("## ") and not fenced:
             cur = line[3:].strip()
             out[cur] = []
         elif cur:
             out[cur].append(line)
     return {k: "\n".join(v).strip() for k, v in out.items()}
+
+
+def agent_body(text):
+    """The body of an agent file: what follows its frontmatter (`---` … `---`),
+    the subagent's system prompt."""
+    if not text.startswith("---\n"):
+        return text.strip()
+    end = text.find("\n---\n", 4)
+    if end < 0:
+        raise ValueError("the agent file's frontmatter is not closed")
+    return text[end + len("\n---\n") :].strip()
+
+
+def prompt_sections(path=PROMPT_PATH, skill=PM_SKILL_PATH, agent=PM_READER_PATH):
+    """The `## ` sections of prompt.md, by heading, plus the shipped texts
+    (`SHIPPED`): the reader agent's body and the skill's two task sections."""
+    out = markdown_sections(Path(path).read_text())
+    skill_sections = markdown_sections(Path(skill).read_text())
+    out[SHIPPED["reader"]] = agent_body(Path(agent).read_text())
+    out[SHIPPED["audit"]] = skill_sections["Audit task"]
+    out[SHIPPED["value"]] = skill_sections["Value task"]
+    return out
 
 
 def section(sections, prompt, piece):

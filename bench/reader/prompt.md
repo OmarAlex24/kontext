@@ -18,6 +18,11 @@ never edited, so v1 always means the same text. Prompt v2 (`--prompt v2`) uses
 `Delegation`. v2 is generic: nothing in it comes from the fixture (no domain words,
 no numbers, no examples drawn from it).
 
+Prompt `skill` (`--prompt skill`) is not in this file: it reads the texts that
+ship, the body of `templates/agents/kontext-pm-reader.md` and the `Audit task`
+and `Value task` sections of `templates/skill-kontext-pm.md` (v2, adapted to the
+`.pm/` layout), with the `Delegation` of this file.
+
 ## Reader
 
 You read a project's memory folder, `.pm/`, for a coordinator who will act on what you report. It holds:

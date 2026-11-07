@@ -1,8 +1,9 @@
 """The reader benchmark in dry runs: the spec and its validation, the fixture
 generator and its ground truth, the grader (and the v2 `ideas` diagnostic), the
-prompts, the made-up reader and its failure knobs, the transcript counting
-(effort included), the variants, the gate per prompt version, and
-bench/reader.py end to end with bench/fake_reader.py."""
+prompts (the `skill` version: the texts kontext install ships), the made-up
+reader and its failure knobs, the transcript counting (effort included), the
+variants, the gate per prompt version, and bench/reader.py end to end with
+bench/fake_reader.py."""
 
 import contextlib
 import copy
@@ -550,6 +551,8 @@ class FakeReader(unittest.TestCase):
         cls.value2 = rr.build_call("opus", "value", sections, qs, rr.DEFAULT_READER_CMD, prompt="v2")
         cls.efforts = rr.build_call("opus+sonnet", "audit", sections, qs, rr.DEFAULT_READER_CMD, effort="high",
                                     prompt="v2", sub_effort="low")
+        cls.audit_skill = rr.build_call("opus+haiku", "audit", sections, qs, rr.DEFAULT_READER_CMD, prompt="skill")
+        cls.value_skill = rr.build_call("opus+haiku", "value", sections, qs, rr.DEFAULT_READER_CMD, prompt="skill")
 
     @classmethod
     def tearDownClass(cls):
@@ -558,8 +561,9 @@ class FakeReader(unittest.TestCase):
     def grade(self, call, **knobs):
         argv, prompt = call
         env, stats = run_fake(self.root, prompt, argv[1:], **knobs)
-        task = "value" if call in (self.value, self.value2) else "audit"
-        version = "v2" if call in (self.audit2, self.value2, self.efforts) else "v1"
+        task = "value" if call in (self.value, self.value2, self.value_skill) else "audit"
+        version = ("v2" if call in (self.audit2, self.value2, self.efforts)
+                   else "skill" if call in (self.audit_skill, self.value_skill) else "v1")
         return reader_grade.grade(self.fx, task, env["result"], version)[1], env, stats
 
     def test_answers_right_without_knobs(self):
@@ -620,6 +624,19 @@ class FakeReader(unittest.TestCase):
         g, env, _ = self.grade(self.audit, MARK_PRESENT=1)
         self.assertEqual(g["recall"], 100.0)
         self.assertNotIn('"ideas"', env["result"])
+
+    def test_skill_answers_and_knobs(self):
+        g, env, stats = self.grade(self.audit_skill)
+        self.assertEqual((g["recall"], g["invented"], g["confusions"]), (100.0, 0, 0))
+        self.assertEqual(g["ideas"]["enumerated_pct"], 100.0)  # the skill's audit asks for the list
+        self.assertEqual(sorted(env["modelUsage"]), ["claude-haiku-5-5", "claude-opus-5-5"])
+        self.assertEqual((stats["agent_calls"], stats["main_dump_reads"]), (1, 0))
+        g, _, _ = self.grade(self.audit_skill, MARK_PRESENT=1)
+        self.assertEqual(g["ideas"]["marked_present"], 1)
+        g, _, _ = self.grade(self.value_skill)
+        self.assertEqual((g["value_pct"], g["confusions"]), (100.0, 0))
+        g, _, _ = self.grade(self.value_skill, STALE=1)
+        self.assertGreater(g["confusions"], 0)
 
     def test_effort_lands_in_the_transcripts(self):
         _, _, stats = self.grade(self.efforts)
@@ -733,22 +750,25 @@ class Prompts(unittest.TestCase):
             self.assertEqual(hashlib.sha256(sections[name].encode()).hexdigest(), sha, name)
         self.assertEqual(rr.DEFAULT_PROMPT, "v1")
 
-    def test_v2_is_generic(self):
+    def test_v2_and_skill_are_generic(self):
+        """v2, and the texts that ship (`skill`: the reader agent's body and the
+        skill's task sections), carry nothing of the fixture."""
         sections = rr.prompt_sections()
-        text = "\n".join(sections[n] for n in dict.fromkeys(rr.PROMPTS["v2"].values()))
-        words = set(re.sub(r"[^0-9a-z]+", " ", normalize(text)).split())
-        for w in FIXTURE_WORDS:
-            self.assertFalse({x for x in words if x.startswith(w)}, w)
-        numbers = {int(n) for n in re.findall(r"\d+", text)}
-        self.assertEqual(numbers & spec_numbers(SPEC), set())
-        for d in SPEC["dumps"]:
-            self.assertNotIn(d["date"], text)
-        # Nothing of the spec's wording either: no sentence, no 4-word run of one.
-        for i in SPEC["ideas"]:
-            for _, _, _, t in pmfixture.sentences_of(i):
-                ws = reader_grade.norm_text(t).split()
-                for k in range(len(ws) - 3):
-                    self.assertNotIn(" ".join(ws[k:k + 4]), reader_grade.norm_text(text), t)
+        for version in ("v2", "skill"):
+            text = "\n".join(sections[n] for n in dict.fromkeys(rr.PROMPTS[version].values()))
+            words = set(re.sub(r"[^0-9a-z]+", " ", normalize(text)).split())
+            for w in FIXTURE_WORDS:
+                self.assertFalse({x for x in words if x.startswith(w)}, (version, w))
+            numbers = {int(n) for n in re.findall(r"\d+", text)}
+            self.assertEqual(numbers & spec_numbers(SPEC), set(), version)
+            for d in SPEC["dumps"]:
+                self.assertNotIn(d["date"], text, version)
+            # Nothing of the spec's wording either: no sentence, no 4-word run of one.
+            for i in SPEC["ideas"]:
+                for _, _, _, t in pmfixture.sentences_of(i):
+                    ws = reader_grade.norm_text(t).split()
+                    for k in range(len(ws) - 3):
+                        self.assertNotIn(" ".join(ws[k:k + 4]), reader_grade.norm_text(text), (version, t))
 
     def test_v2_asks_for_the_list_and_the_definition(self):
         sections = rr.prompt_sections()
@@ -763,6 +783,40 @@ class Prompts(unittest.TestCase):
         self.assertEqual(sub["prompt"], sections["Reader v2"])
         self.assertIn(sections["Value task v2"].split("{questions}")[0], prompt)
         self.assertNotEqual(rr.prompt_set_sha256(sections, "v1"), rr.prompt_set_sha256(sections, "v2"))
+
+    def test_skill_takes_the_shipped_texts(self):
+        """`--prompt skill`: the reader is the agent template's body and the tasks
+        are the skill's sections, read here without the runner's helpers."""
+        body = rr.PM_READER_PATH.read_text().split("\n---\n", 1)[1].strip()
+        self.assertTrue(body.startswith("<!--"), body[:80])
+        skill = rr.PM_SKILL_PATH.read_text()
+        audit = skill.split("\n## Audit task\n", 1)[1].split("\n## Value task\n", 1)[0].strip()
+        value = skill.split("\n## Value task\n", 1)[1].strip()
+        self.assertIn("{questions}", value)
+        sections = rr.prompt_sections()
+        self.assertEqual(sections[rr.SHIPPED["reader"]], body)
+        qs = SPEC["questions"]
+        argv, prompt = rr.build_call("opus+haiku", "audit", sections, qs, rr.DEFAULT_READER_CMD, prompt="skill")
+        self.assertEqual(rr.agent_prompt_of(argv), body)
+        sub = json.loads(argv[argv.index("--agents") + 1])[rr.SUBAGENT["name"]]
+        self.assertEqual((sub["model"], sub["tools"]), ("claude-haiku-5-5", ["Read", "Grep", "Glob"]))
+        self.assertNotIn("effort", sub)
+        self.assertTrue(prompt.rstrip("\n").endswith(audit))
+        self.assertIn(rr.SUBAGENT["name"], prompt)  # the bench's Delegation in front
+        self.assertNotIn(body, prompt)
+        _, prompt = rr.build_call("opus+haiku", "value", sections, qs, rr.DEFAULT_READER_CMD, prompt="skill")
+        self.assertIn(value.split("{questions}")[0], prompt)
+        self.assertNotIn("{questions}", prompt)
+        for q in qs:
+            self.assertIn(f"- {q['id']}: {q['question']}", prompt)
+        # A direct configuration reads with the same instructions.
+        _, prompt = rr.build_call("opus", "audit", sections, qs, rr.DEFAULT_READER_CMD, prompt="skill")
+        self.assertEqual(prompt, body + "\n\n" + audit + "\n")
+        # The example entry of the skill (a `## ` line in a fence) is not a section.
+        self.assertEqual(rr.markdown_sections("## A\n```\n## not one\n```\ntext\n## B\nx"),
+                         {"A": "```\n## not one\n```\ntext", "B": "x"})
+        shas = {rr.prompt_set_sha256(sections, p) for p in ("v1", "v2", "skill")}
+        self.assertEqual(len(shas), 3)
 
 
 def rec(tid, name, inp, sidechain=False, model="claude-opus-5-5", mid="m", ctx=0):
@@ -999,6 +1053,35 @@ class DryRun(unittest.TestCase):
         for bad in (["--effort", "huge"], ["--sub-effort", "huge"], ["--prompt", "v9"]):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 reader.parse(bad)
+
+
+class SkillDryRun(unittest.TestCase):
+    """`--prompt skill` end to end: what ships is judged against `opus` reading
+    with the same texts."""
+
+    def test_the_skill_gets_its_own_gate(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            out = tmp / "skill"
+            logs = []
+            code = reader.main(["--dry-run", "--prompt", "skill", "--configs", "opus,opus+haiku", "--sizes", "m",
+                                "--seeds", "1", "--out", str(out)], log=logs.append)
+            self.assertEqual(code, 0, "\n".join(logs))
+            g = json.loads((out / "report.json").read_text())["gate"]["prompts"]
+            self.assertEqual(list(g), ["skill"])
+            self.assertEqual((g["skill"]["baseline_variant"], g["skill"]["baseline_recall"]),
+                             (N("opus", "skill"), 100.0))
+            self.assertEqual(g["skill"]["variants"][N("opus+haiku", "skill")]["verdict"], "viable")
+            body = rr.PM_READER_PATH.read_text().split("\n---\n", 1)[1].strip()
+            r = json.loads((out / "runs" / rr.run_name(V("opus+haiku", "skill"), "m", 1, "audit") / "run.json")
+                           .read_text())
+            self.assertEqual(r["prompt_version"], "skill")
+            self.assertEqual(r["agent_prompt_sha256"], rr.sha256(body))
+            self.assertEqual(r["prompt_set_sha256"], rr.prompt_set_sha256(rr.prompt_sections(), "skill"))
+            self.assertEqual(r["grades"]["ideas"]["enumerated_pct"], 100.0)
+            self.assertIn("### Prompt skill", (out / "report.md").read_text())
+        finally:
+            shutil.rmtree(tmp)
 
 
 class MixedVariants(unittest.TestCase):

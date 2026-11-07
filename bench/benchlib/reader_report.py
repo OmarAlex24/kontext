@@ -388,7 +388,7 @@ def markdown(records, table, tasks_table, verdicts, opts):
                   if agg.get("ideas_enumerated_pct")]
     if ideas_rows:
         l += [
-            "### The audit's `ideas` list (prompt v2; a diagnostic, not gated)",
+            "### The audit's `ideas` list (prompts v2 and skill; a diagnostic, not gated)",
             "",
             "Per omitted idea: never enumerated (the reader did not see it as an idea, or did not",
             "read it), enumerated but marked as present in items.md (a matching error), or",
@@ -415,7 +415,7 @@ def markdown(records, table, tasks_table, verdicts, opts):
         "  (± 2) and whose text it shares.",
         "- **Audit recall**: omitted ideas cited / omitted ideas. **Precision**: omitted ideas cited / valid",
         "  citations (deduplicated by what they point at). **Confusions**: discarded ideas or distractors",
-        "  reported as missing, plus value answers with a forbidden word. With prompt v2, only `missing`",
+        "  reported as missing, plus value answers with a forbidden word. With prompts v2 and skill, only `missing`",
         "  is graded this way; the `ideas` list is the diagnostic above.",
         "- **Value %**: questions whose `value` has the expected words and none of the forbidden ones",
         "  (every superseded value of a changed idea, a close distractor).",
@@ -446,7 +446,7 @@ def warnings(records):
                  + ", ".join(run_label(r) for r in bad[:8]))
     noideas = [r for r in records if r["grades"].get("ideas") and not r["grades"]["ideas"]["parsed"]]
     if noideas:
-        l.append(f"- {len(noideas)} v2 audit answers have no `ideas` list: " + ", ".join(run_label(r) for r in noideas[:8]))
+        l.append(f"- {len(noideas)} audit answers of v2 or skill have no `ideas` list: " + ", ".join(run_label(r) for r in noideas[:8]))
     nodel = [r for r in records if r["models"]["subagent"] and r["transcript"]["agent_calls"] == 0]
     if nodel:
         l.append(f"- {len(nodel)} delegated calls never called the subagent tool.")

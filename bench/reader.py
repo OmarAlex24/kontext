@@ -47,7 +47,8 @@ def parse(argv):
         "--prompt",
         default=rr.DEFAULT_PROMPT,
         choices=list(rr.PROMPTS),
-        help=f"prompt version of bench/reader/prompt.md (default {rr.DEFAULT_PROMPT}, the pilot's)",
+        help=f"prompt version: v1 and v2 of bench/reader/prompt.md, or skill, the texts kontext install ships "
+        f"(default {rr.DEFAULT_PROMPT}, the pilot's)",
     )
     p.add_argument(
         "--effort",

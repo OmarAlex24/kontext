@@ -7,7 +7,7 @@ cited file. Anything else is an invented citation. A valid citation maps to the
 planted sentence of the ground truth whose range it overlaps (± 2 lines) and
 whose text it shares (one contains the other, or most of the words).
 
-The v2 audit answer also lists every idea the reader found (`ideas`); its grade
+The audit answer of v2 and later prompts (`skill`) also lists every idea the reader found (`ideas`); its grade
 is a diagnostic, never an input of the gate: whether each omitted idea was
 enumerated at all and, if it was, whether it was marked as present in items.md.
 
@@ -365,8 +365,9 @@ def grade_value(fx, answer, questions):
 
 def grade(fx, task, text, prompt="v1"):
     """Extracts the JSON from the reply text and grades it. An unparseable
-    reply scores 0 and is flagged (`parse_error`). A v2 audit also gets the
-    `ideas` diagnostic; its `missing` is graded exactly as in v1."""
+    reply scores 0 and is flagged (`parse_error`). An audit of any prompt but v1
+    (v2, skill) also gets the `ideas` diagnostic; its `missing` is graded exactly
+    as in v1."""
     answer, err = extract_json(text)
     if task == "audit":
         g = grade_audit(fx, answer)
