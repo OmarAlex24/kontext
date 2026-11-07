@@ -151,6 +151,42 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         assert!(orq.contains(needed), "missing {needed:?}");
     }
     assert!(orq.lines().count() <= 150, "{} lines", orq.lines().count());
+    // The PM's memory of the user's ideas, next to them.
+    let pm = fs::read_to_string(r.join(".claude/skills/kontext-pm/SKILL.md")).unwrap();
+    assert!(
+        pm.starts_with("---\nname: kontext-pm\ndescription: "),
+        "{pm}"
+    );
+    let front = pm.split("---").nth(1).unwrap();
+    for trigger in [
+        "brain-dumps ideas",
+        "answers the coordinator's questions",
+        "comes back after time away",
+        "where things stand",
+        "value in force",
+    ] {
+        assert!(front.contains(trigger), "{trigger}: {front}");
+    }
+    for needed in [
+        ".pm/",
+        "dumps/<YYYY-MM-DD>.md",
+        "<date>-2.md",
+        "**Coordinator asked:**",
+        "**User:**",
+        "[secret removed]",
+        "| id | idea | source | state | where | evidence |",
+        "kontext-pm-reader",
+        "word for word",
+        "kontext-show",
+        "kontext-orchestrate",
+        ".gitignore",
+        "\n## Audit task\n",
+        "\n## Value task\n",
+        "{questions}",
+    ] {
+        assert!(pm.contains(needed), "missing {needed:?}");
+    }
+    assert!(pm.lines().count() <= 150, "{} lines", pm.lines().count());
     assert_eq!(
         fs::read_to_string(r.join(".kontext.toml")).unwrap(),
         "project = \"demo\"\ndefault_role = \"pm\"\n"
@@ -245,6 +281,19 @@ fn installs_agent_files_and_keeps_edited_ones() {
     }
     let scout = fs::read_to_string(agents.join("kontext-scout.md")).unwrap();
     assert!(scout.contains("tools: Read, Grep, Glob, Bash\n"), "{scout}");
+    // The reader of `.pm/` is the one agent with a fixed model (the reader
+    // benchmark chose it), and it only reads.
+    let reader = fs::read_to_string(agents.join("kontext-pm-reader.md")).unwrap();
+    assert!(
+        reader.starts_with("---\nname: kontext-pm-reader\ndescription: "),
+        "{reader}"
+    );
+    let front = reader.split("---").nth(1).unwrap();
+    assert!(front.contains("\ntools: Read, Grep, Glob\n"), "{front}");
+    assert!(front.contains("\nmodel: haiku\n"), "{front}");
+    assert!(!front.contains("effort"), "{front}");
+    assert!(reader.contains("**Coordinator asked:**"), "{reader}");
+    assert!(reader.lines().count() <= 60);
     let coord = fs::read_to_string(agents.join("kontext-coordinator.md")).unwrap();
     assert!(coord.contains("next --epic <name> --claim"), "{coord}");
     assert!(
@@ -324,10 +373,13 @@ fn skills_only_global_needs_no_project() {
         "kontext-orchestrate",
         "kontext-show",
         "kontext-migrate",
+        "kontext-pm",
     ] {
         let t = fs::read_to_string(skills.join(s).join("SKILL.md")).unwrap();
         assert!(t.starts_with(&format!("---\nname: {s}\n")), "{s}: {t}");
     }
+    // Only the skills: not the agent files, the reader included.
+    assert!(!home.join(".claude/agents").exists());
     let out = run(&["install", "--skills-only", "--global"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("already up to date"));
     // --global without --skills-only is not accepted.
