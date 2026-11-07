@@ -4,8 +4,13 @@ fresh `claude -p` in a fresh copy of the fixture, graded against its truth.
 The fixture of a `(size, seed)` is generated once (`<out>/fixtures/`), so every
 configuration reads the same bytes; each call copies it to its own temporary
 folder, so calls never share files nor a Claude Code project key.
+
+A run is keyed by its variant (configuration, prompt version, main effort,
+subagent effort), size, seed and task: the key names its folder and is in its
+run.json, so runs of different variants share one results folder and never mix.
 """
 
+import hashlib
 import json
 import os
 import shlex
@@ -38,6 +43,17 @@ READER_TOOLS = ["Read", "Grep", "Glob"]
 DEFAULT_READER_CMD = 'claude -p --output-format json --setting-sources "" --strict-mcp-config'
 FAKE_READER = BENCH_DIR / "fake_reader.py"
 PROMPT_PATH = BENCH_DIR / "reader" / "prompt.md"
+# The sections of prompt.md each prompt version uses. v1 is the pilot's.
+PROMPTS = {
+    "v1": {"reader": "Reader", "audit": "Audit task", "value": "Value task", "delegation": "Delegation"},
+    "v2": {"reader": "Reader v2", "audit": "Audit task v2", "value": "Value task v2", "delegation": "Delegation"},
+}
+DEFAULT_PROMPT = "v1"
+# Effort levels, as the subagent tool's `effort` parameter lists them in Claude
+# Code 2.1.318 transcripts. `--effort` and `--sub-effort` take one of them.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+# Overrides both the session's and the subagent's effort: the calls never get it.
+EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 
 # How a delegated configuration declares its subagent. Best effort for Claude
 # Code 2.1.318, not checked against a model: `claude --help` documents
@@ -47,12 +63,16 @@ PROMPT_PATH = BENCH_DIR / "reader" / "prompt.md"
 # Whether `model` takes a full id or only an alias (`sonnet`; the Agent tool's
 # own `model` parameter showed an alias in a local transcript) is unknown: the
 # pilot checks `modelUsage` and the subagent transcripts. Fix it here
-# (`model_as`: "id" or "alias").
+# (`model_as`: "id" or "alias"). The pilot confirmed the full id: the subagent's
+# requests ran on it. `effort` (`--sub-effort`) is the subagent's own effort
+# level, which overrides the session's; only `CLAUDE_CODE_EFFORT_LEVEL` would
+# override it, so the calls never get that variable (`call_env`). The effort
+# each session really ran at is read back from its transcript.
 SUBAGENT = {
     "tool": "Agent",
     "name": "pm-reader",
     "description": "Reads the project's memory folder .pm/ and answers with verbatim citations (quote, file, line).",
-    "fields": {"description": "description", "prompt": "prompt", "tools": "tools", "model": "model"},
+    "fields": {"description": "description", "prompt": "prompt", "tools": "tools", "model": "model", "effort": "effort"},
     "model_as": "id",
 }
 # Tool names counted as a delegation in the main session.
@@ -76,44 +96,100 @@ def prompt_sections(path=PROMPT_PATH):
     return {k: "\n".join(v).strip() for k, v in out.items()}
 
 
-def task_text(sections, task, questions):
+def section(sections, prompt, piece):
+    """The text of one piece (`reader`, `audit`, `value`, `delegation`) of a prompt version."""
+    return sections[PROMPTS[prompt][piece]]
+
+
+def prompt_set_sha256(sections, prompt):
+    """The sha256 of every section a prompt version uses, with their headings:
+    it changes if any of them changes."""
+    h = hashlib.sha256()
+    for name in dict.fromkeys(PROMPTS[prompt].values()):
+        h.update(f"## {name}\n\n{sections[name]}\n\n".encode())
+    return h.hexdigest()
+
+
+def sha256(text):
+    return hashlib.sha256(text.encode()).hexdigest() if text is not None else None
+
+
+def task_text(sections, task, questions, prompt=DEFAULT_PROMPT):
     if task == "audit":
-        return sections["Audit task"]
+        return section(sections, prompt, "audit")
     qs = "\n".join(f"- {q['id']}: {q['question']}" for q in questions)
-    return sections["Value task"].replace("{questions}", qs)
+    return section(sections, prompt, "value").replace("{questions}", qs)
 
 
-def agents_json(sub_model, reader_prompt):
+def agents_json(sub_model, reader_prompt, effort=None):
     f = SUBAGENT["fields"]
-    return json.dumps(
-        {
-            SUBAGENT["name"]: {
-                f["description"]: SUBAGENT["description"],
-                f["prompt"]: reader_prompt,
-                f["tools"]: READER_TOOLS,
-                f["model"]: sub_model if SUBAGENT["model_as"] == "id" else model_alias(sub_model),
-            }
-        },
-        ensure_ascii=False,
-    )
+    agent = {
+        f["description"]: SUBAGENT["description"],
+        f["prompt"]: reader_prompt,
+        f["tools"]: READER_TOOLS,
+        f["model"]: sub_model if SUBAGENT["model_as"] == "id" else model_alias(sub_model),
+    }
+    if effort:
+        agent[f["effort"]] = effort
+    return json.dumps({SUBAGENT["name"]: agent}, ensure_ascii=False)
 
 
-def build_call(config, task, sections, questions, reader_cmd, effort=None):
-    """(argv, the prompt for stdin). The argv is recorded as is in run.json."""
+def build_call(config, task, sections, questions, reader_cmd, effort=None, prompt=DEFAULT_PROMPT, sub_effort=None):
+    """(argv, the prompt for stdin). The argv is recorded as is in run.json.
+    `effort` is the main (or only) session's; `sub_effort`, the subagent's
+    (delegated configurations only)."""
     main, sub = config_models(config)
     argv = shlex.split(reader_cmd) + ["--model", main]
     if effort:
         argv += ["--effort", effort]
-    task_prompt = task_text(sections, task, questions)
+    task_prompt = task_text(sections, task, questions, prompt)
+    reader = section(sections, prompt, "reader")
     if sub is None:
         argv += ["--tools", ",".join(READER_TOOLS)]
-        prompt = sections["Reader"] + "\n\n" + task_prompt
+        text = reader + "\n\n" + task_prompt
     else:
         argv += ["--tools", ",".join([*READER_TOOLS, SUBAGENT["tool"]])]
-        argv += ["--agents", agents_json(sub, sections["Reader"])]
-        lead = sections["Delegation"].replace("{agent}", SUBAGENT["name"]).replace("{tool}", SUBAGENT["tool"])
-        prompt = lead + "\n\n" + task_prompt
-    return argv, prompt + "\n"
+        argv += ["--agents", agents_json(sub, reader, sub_effort)]
+        lead = section(sections, prompt, "delegation")
+        lead = lead.replace("{agent}", SUBAGENT["name"]).replace("{tool}", SUBAGENT["tool"])
+        text = lead + "\n\n" + task_prompt
+    return argv, text + "\n"
+
+
+def agent_prompt_of(argv):
+    """The subagent's prompt in an argv's `--agents`, or None."""
+    if "--agents" not in argv:
+        return None
+    try:
+        agents = json.loads(argv[argv.index("--agents") + 1])
+    except (IndexError, json.JSONDecodeError):
+        return None
+    return (agents.get(SUBAGENT["name"]) or {}).get(SUBAGENT["fields"]["prompt"])
+
+
+# ------------------------------------------------------------ variants
+
+
+def is_delegated(config):
+    return CONFIGS[config][1] is not None
+
+
+def variant_of(config, prompt=DEFAULT_PROMPT, effort_main=None, effort_sub=None):
+    """(config, prompt, main effort, subagent effort): None is the default
+    effort (not passed). A direct configuration has no subagent effort."""
+    return (config, prompt, effort_main or None, (effort_sub or None) if is_delegated(config) else None)
+
+
+def variant_name(variant):
+    """`<config>-<prompt>-emain_<level>-esub_<level>`: `default` when not passed,
+    `none` for the subagent of a direct configuration."""
+    config, prompt, em, es = variant
+    sub = es or ("default" if is_delegated(config) else "none")
+    return f"{config}-{prompt}-emain_{em or 'default'}-esub_{sub}"
+
+
+def run_name(variant, size, seed, task):
+    return f"{variant_name(variant)}-{size}-s{seed}-{task}"
 
 
 def model_alias(model_id):
@@ -156,12 +232,27 @@ def touches_dumps(name, inp):
     return name == "Grep" and (p == ".pm" or p.endswith("/.pm"))
 
 
+def record_effort(r):
+    """The effort a session record shows: `effort` of an assistant record, or
+    `params.output_config.effort` of an api-request record; else None."""
+    if r.get("type") == "assistant":
+        e = r.get("effort")
+    elif r.get("type") == "api-request":
+        params = r.get("params") if isinstance(r.get("params"), dict) else {}
+        oc = params.get("output_config") if isinstance(params.get("output_config"), dict) else {}
+        e = oc.get("effort")
+    else:
+        return None
+    return e if isinstance(e, str) and e else None
+
+
 def transcript_stats(folder):
     """From the saved Claude Code sessions of a call (`<sid>.jsonl[.gz]` the main
     one, `<sid>/subagents/*.jsonl[.gz]` the subagents'; a record with
-    `isSidechain` also counts as a subagent's): tool calls by name in the main
-    session and in subagents, delegations, and whether the main session read
-    `.pm/dumps/`. Missing or broken files count as nothing."""
+    `isSidechain`, or a request whose `querySource` is `agent:…`, also counts as
+    a subagent's): tool calls by name in the main session and in subagents,
+    delegations, whether the main session read `.pm/dumps/`, and the effort
+    levels each side ran at. Missing or broken files count as nothing."""
     out = {
         "main_files": 0,
         "sub_files": 0,
@@ -177,11 +268,16 @@ def transcript_stats(folder):
         # the system prompt plus everything read so far, unlike the envelope's sum.
         "main_peak_context": 0,
         "sub_peak_context": 0,
+        # Effort levels seen in the records (`record_effort`), and the `effort`
+        # the main session passed in its calls of the subagent tool, if any.
+        "effort_seen_main": [],
+        "effort_seen_sub": [],
+        "agent_effort_args": [],
     }
     folder = Path(folder)
     if not folder.is_dir():
         return out
-    seen = set()
+    seen_ids = set()
     for f in sorted(folder.rglob("*")):
         if not f.is_file() or not (f.name.endswith(".jsonl") or f.name.endswith(".jsonl.gz")):
             continue
@@ -193,16 +289,22 @@ def transcript_stats(folder):
         except (OSError, EOFError):
             continue
         for line in lines:
-            if '"assistant"' not in line:
+            if '"assistant"' not in line and '"effort"' not in line:
                 continue
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            msg = r.get("message") if isinstance(r, dict) else None
+            if not isinstance(r, dict):
+                continue
+            side = nested or bool(r.get("isSidechain")) or str(r.get("querySource") or "").startswith("agent:")
+            effort = record_effort(r)
+            seen = out["effort_seen_sub" if side else "effort_seen_main"]
+            if effort and effort not in seen:
+                seen.append(effort)
+            msg = r.get("message")
             if r.get("type") != "assistant" or not isinstance(msg, dict):
                 continue
-            side = nested or bool(r.get("isSidechain"))
             model = msg.get("model")
             models = out["sub_models" if side else "main_models"]
             if isinstance(model, str) and model not in models and not model.startswith("<"):
@@ -216,9 +318,9 @@ def transcript_stats(folder):
                 if not isinstance(b, dict) or b.get("type") != "tool_use":
                     continue
                 bid = b.get("id") or (str(f), msg.get("id"), i)
-                if bid in seen:
+                if bid in seen_ids:
                     continue
-                seen.add(bid)
+                seen_ids.add(bid)
                 name = str(b.get("name") or "?")
                 tools = out["sub_tools" if side else "main_tools"]
                 tools[name] = tools.get(name, 0) + 1
@@ -228,11 +330,13 @@ def transcript_stats(folder):
                 if name in AGENT_TOOLS:
                     out["agent_calls"] += 1
                     out["agent_types"].append(inp.get("subagent_type"))
+                    if inp.get("effort"):
+                        out["agent_effort_args"].append(inp["effort"])
                 if touches_dumps(name, inp):
                     out["main_dump_reads"] += 1
     out["main_read_dumps"] = out["main_dump_reads"] > 0
-    out["main_models"].sort()
-    out["sub_models"].sort()
+    for k in ("main_models", "sub_models", "effort_seen_main", "effort_seen_sub"):
+        out[k].sort()
     return out
 
 
@@ -246,6 +350,8 @@ class Options:
         reader_cmd=DEFAULT_READER_CMD,
         dry_run=False,
         effort=None,
+        sub_effort=None,
+        prompt=DEFAULT_PROMPT,
         timeout=900,
         keep_work=False,
         jobs=1,
@@ -256,6 +362,8 @@ class Options:
         self.reader_cmd = reader_cmd
         self.dry_run = dry_run
         self.effort = effort
+        self.sub_effort = sub_effort
+        self.prompt = prompt
         self.timeout = timeout
         self.keep_work = keep_work
         self.jobs = jobs
@@ -280,8 +388,24 @@ def prepare_fixtures(spec, sizes, seeds, out):
     return fixtures
 
 
-def run_dir_of(out, config, size, seed, task):
-    return Path(out) / "runs" / f"{config}-{size}-s{seed}-{task}"
+def run_dir_of(out, variant, size, seed, task):
+    return Path(out) / "runs" / run_name(variant, size, seed, task)
+
+
+def call_env(opts, work):
+    """The environment of one call: this one's, without `CLAUDE_CODE_EFFORT_LEVEL`
+    (it would override `--effort` and the subagent's `effort`), and with
+    auto-memory off. A dry run also points the made-up reader at its own
+    Claude Code folder and at the spec."""
+    env = dict(os.environ)
+    env.pop(EFFORT_ENV, None)
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    if opts.dry_run:
+        # The made-up reader writes its transcripts the way Claude Code does,
+        # and reads the spec (never the truth) to know what to look for.
+        env["CLAUDE_CONFIG_DIR"] = str(Path(work) / "claude-config")
+        env["BENCH_READER_SPEC"] = str(opts.spec_path)
+    return env
 
 
 def call_reader(argv, prompt, cwd, env, timeout):
@@ -302,39 +426,61 @@ def call_reader(argv, prompt, cwd, env, timeout):
 def run_call(opts, sections, config, size, seed, task, fixture_dir, truth):
     """One call: copy the fixture, run the reader, grade it, save its sessions
     and `run.json`. Returns the record."""
-    run_dir = run_dir_of(opts.out, config, size, seed, task)
+    variant = variant_of(config, opts.prompt, opts.effort, opts.sub_effort)
+    _, prompt_version, effort_main, effort_sub = variant
+    name = run_name(variant, size, seed, task)
+    run_dir = run_dir_of(opts.out, variant, size, seed, task)
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
-    work = Path(tempfile.mkdtemp(prefix=f"kontext-reader-{config.replace('+', '-')}-{size}-s{seed}-{task}-"))
+    work = Path(tempfile.mkdtemp(prefix=f"kontext-reader-{name.replace('+', '-')}-"))
     try:
         project = work / "project"
         shutil.copytree(Path(fixture_dir) / "root", project)
-        env = dict(os.environ)
-        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-        if opts.dry_run:
-            # The made-up reader writes its transcripts the way Claude Code does,
-            # and reads the spec (never the truth) to know what to look for.
-            env["CLAUDE_CONFIG_DIR"] = str(work / "claude-config")
-            env["BENCH_READER_SPEC"] = str(opts.spec_path)
-        argv, prompt = build_call(config, task, sections, truth["questions"], opts.reader_cmd, opts.effort)
+        env = call_env(opts, work)
+        argv, prompt = build_call(
+            config, task, sections, truth["questions"], opts.reader_cmd, effort_main, prompt_version, effort_sub
+        )
         code, stdout, stderr, seconds, timed_out = call_reader(argv, prompt, project, env, opts.timeout)
         envelope = runner.parse_envelope(stdout)
         result = envelope.get("result") if isinstance(envelope.get("result"), str) else ""
         fx = reader_grade.Fixture(Path(fixture_dir) / "root", truth)
-        answer, grades = reader_grade.grade(fx, task, result)
+        answer, grades = reader_grade.grade(fx, task, result, prompt_version)
         sessions = runner.save_claude_sessions(env, project, run_dir / "transcripts" / "claude")
         stats = transcript_stats(run_dir / "transcripts" / "claude")
         total = runner.usage_of(envelope)
         by_model = usage_by_model(envelope)
         main, sub = config_models(config)
         record = {
+            "run": name,
+            "variant": variant_name(variant),
+            "key": {
+                "config": config,
+                "prompt": prompt_version,
+                "effort_main": effort_main,
+                "effort_sub": effort_sub,
+                "size": size,
+                "seed": seed,
+                "task": task,
+            },
             "config": config,
             "size": size,
             "seed": seed,
             "task": task,
             "dry_run": opts.dry_run,
             "models": {"main": main, "subagent": sub},
+            "spec": {"version": truth.get("spec_version"), "sha256": truth.get("spec_sha256")},
+            "prompt_version": prompt_version,
+            # The exact text on stdin, the subagent's prompt in `--agents`, and
+            # every section of the prompt version (the report's header).
+            "prompt_sha256": sha256(prompt),
+            "agent_prompt_sha256": sha256(agent_prompt_of(argv)),
+            "prompt_set_sha256": prompt_set_sha256(sections, prompt_version),
+            # Requested (None: not passed) and seen in the transcripts.
+            "effort_main": effort_main,
+            "effort_sub": effort_sub,
+            "effort_seen_main": stats["effort_seen_main"],
+            "effort_seen_sub": stats["effort_seen_sub"],
             "argv": argv,
             "prompt": prompt,
             "fixture": {
@@ -387,8 +533,10 @@ def run_all(opts, configs, sizes, seeds, tasks):
             done[0] += 1
             g = rec["grades"]
             score = f"recall {g['recall']:.0f}%" if t == "audit" else f"value {g['value_pct']:.0f}%"
+            if g.get("ideas"):
+                score += f", omitted enumerated {g['ideas']['enumerated_pct']:.0f}%"
             opts.log(
-                f"[{done[0]}/{len(jobs)}] {c} · {z} · seed {s} · {t}: {score}, "
+                f"[{done[0]}/{len(jobs)}] {rec['variant']} · {z} · seed {s} · {t}: {score}, "
                 f"invented {g['invented']}, {rec['seconds']:.1f} s, {rec['usage']['cost_usd']:.3f} USD"
                 + (" (error)" if rec["is_error"] else "")
             )

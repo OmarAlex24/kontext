@@ -7,6 +7,10 @@ cited file. Anything else is an invented citation. A valid citation maps to the
 planted sentence of the ground truth whose range it overlaps (± 2 lines) and
 whose text it shares (one contains the other, or most of the words).
 
+The v2 audit answer also lists every idea the reader found (`ideas`); its grade
+is a diagnostic, never an input of the gate: whether each omitted idea was
+enumerated at all and, if it was, whether it was marked as present in items.md.
+
 The gate is fixed here and in bench/README.md before any real run. It is not
 changed after seeing results.
 """
@@ -248,6 +252,68 @@ def grade_audit(fx, answer):
     }
 
 
+def truthy(v):
+    return v is True or (isinstance(v, str) and v.strip().lower() == "true")
+
+
+def grade_ideas(fx, answer):
+    """The diagnostic of a v2 audit's `ideas` list (not part of the gate). Per
+    omitted idea: `not enumerated` (no valid entry of `ideas` points at one of
+    its sentences), `marked present` (every entry that does says `in_items:
+    true`: a matching error) or `marked missing`; and whether it made it to
+    `missing`. Also how many of all the user's ideas were enumerated, by kind."""
+    omitted = fx.truth["omitted"]
+    items = answer.get("ideas") if isinstance(answer, dict) else None
+    out = {
+        "parsed": isinstance(items, list),
+        "entries": 0,
+        "invalid": 0,
+        "unmapped": 0,
+        "omitted": {},
+        "enumerated_pct": 0.0,
+        "marked_present": 0,
+        "not_enumerated": 0,
+        "coverage_pct": 0.0,
+        "by_kind": {},
+    }
+    marks = {}  # idea -> [in_items of each entry]
+    for c in items if out["parsed"] else []:
+        out["entries"] += 1
+        chk = check_citation(fx, c)
+        if not chk["valid"]:
+            out["invalid"] += 1
+            continue
+        s = map_citation(fx, c, chk)
+        if s is None or not s.get("idea") or s["kind"] not in ("said", "change", "discard"):
+            out["unmapped"] += 1
+            continue
+        marks.setdefault(s["idea"], []).append(truthy(c.get("in_items")))
+    reported = set(grade_audit(fx, answer)["found"]) if out["parsed"] else set()
+    for x in omitted:
+        m = marks.get(x)
+        status = "not enumerated" if not m else ("marked present" if all(m) else "marked missing")
+        out["omitted"][x] = {"status": status, "reported": x in reported}
+    n = len(omitted)
+    enumerated = [x for x, v in out["omitted"].items() if v["status"] != "not enumerated"]
+    out["enumerated_pct"] = 100.0 * len(enumerated) / n if n else 100.0
+    out["marked_present"] = sum(1 for v in out["omitted"].values() if v["status"] == "marked present")
+    out["not_enumerated"] = n - len(enumerated)
+    ideas = fx.truth["ideas"]
+    out["coverage_pct"] = 100.0 * len(set(marks) & set(ideas)) / len(ideas) if ideas else 0.0
+    for x, i in ideas.items():
+        k = out["by_kind"].setdefault(i["kind"], [0, 0])
+        k[0] += 1 if x in marks else 0
+        k[1] += 1
+    return out
+
+
+def in_force(fx, idea):
+    """The planted sentence that sets an idea's value in force: its last change,
+    or its own sentence if it never changed."""
+    ss = [s for s in fx.truth["sentences"] if s.get("idea") == idea and s["kind"] in ("said", "change")]
+    return max(ss, key=lambda s: s.get("step") or 0) if ss else None
+
+
 def grade_value(fx, answer, questions):
     """Per question, `keyword_verdict` on `value` (a forbidden word is a
     confusion) and whether its citation is valid; value % is the mean score."""
@@ -282,6 +348,7 @@ def grade_value(fx, answer, questions):
                 "invented": not chk["valid"],
                 "cites": ({"kind": s["kind"], "idea": s.get("idea"), "distractor": s.get("distractor")} if s else None),
                 "cites_idea": bool(s and s.get("idea") == q["idea"] and s["kind"] in ("said", "change")),
+                "cites_in_force": bool(s and s == in_force(fx, q["idea"])),
             }
         )
     n = len(questions)
@@ -296,12 +363,15 @@ def grade_value(fx, answer, questions):
     }
 
 
-def grade(fx, task, text):
+def grade(fx, task, text, prompt="v1"):
     """Extracts the JSON from the reply text and grades it. An unparseable
-    reply scores 0 and is flagged (`parse_error`)."""
+    reply scores 0 and is flagged (`parse_error`). A v2 audit also gets the
+    `ideas` diagnostic; its `missing` is graded exactly as in v1."""
     answer, err = extract_json(text)
     if task == "audit":
         g = grade_audit(fx, answer)
+        if prompt != "v1":
+            g["ideas"] = grade_ideas(fx, answer)
     elif task == "value":
         g = grade_value(fx, answer, fx.truth["questions"])
     else:

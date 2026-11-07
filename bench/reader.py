@@ -4,9 +4,13 @@ folder for an Opus coordinator? See bench/README.md, "Reader benchmark".
 
     python3 bench/reader.py --dry-run             # dry run, no model
     python3 bench/reader.py --yes                 # for real: spends tokens
+
+Each invocation runs one prompt version and one pair of efforts; several
+invocations into the same --out build one report, a row per variant.
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -39,7 +43,24 @@ def parse(argv):
         help="results folder (default bench/results/<date>-reader[-dry]/); an existing one is added to",
     )
     p.add_argument("--reader-cmd", default=None, help=f"the base command (default: {rr.DEFAULT_READER_CMD})")
-    p.add_argument("--effort", default=None, help="passed through as --effort <level>")
+    p.add_argument(
+        "--prompt",
+        default=rr.DEFAULT_PROMPT,
+        choices=list(rr.PROMPTS),
+        help=f"prompt version of bench/reader/prompt.md (default {rr.DEFAULT_PROMPT}, the pilot's)",
+    )
+    p.add_argument(
+        "--effort",
+        default=None,
+        choices=rr.EFFORT_LEVELS,
+        help="the main (or only) session's effort, passed as --effort <level> (default: not passed)",
+    )
+    p.add_argument(
+        "--sub-effort",
+        default=None,
+        choices=rr.EFFORT_LEVELS,
+        help="the pm-reader subagent's effort, the `effort` of its --agents entry (delegated configs only)",
+    )
     p.add_argument("--jobs", type=int, default=1, help="calls at a time (1)")
     p.add_argument("--keep-work", action="store_true", help="don't delete each call's temporary folder")
     p.add_argument("--timeout", type=int, default=900, help="seconds per call (900)")
@@ -89,6 +110,14 @@ def main(argv=None, log=print):
     if earlier and any(r.get("dry_run") != a.dry_run for r in earlier):
         log(f"reader.py: {out} holds {'real' if a.dry_run else 'dry'} runs; use another --out")
         return 2
+    spec_sha = pmfixture.load_spec()["_sha256"]
+    if earlier and any((r.get("spec") or {}).get("sha256") != spec_sha for r in earlier):
+        log(f"reader.py: {out} holds runs of another version of bench/reader/spec.toml; use another --out")
+        return 2
+    if a.sub_effort and not any(rr.is_delegated(c) for c in configs):
+        log("reader.py: --sub-effort only applies to delegated configurations; none was asked for")
+    if os.environ.get(rr.EFFORT_ENV):
+        log(f"reader.py: {rr.EFFORT_ENV} is set here; the calls run without it (it would override the efforts)")
     # A dry run never calls a model, whatever --reader-cmd says.
     reader_cmd = rr.fake_reader_cmd() if a.dry_run else (a.reader_cmd or rr.DEFAULT_READER_CMD)
     out.mkdir(parents=True, exist_ok=True)
@@ -97,6 +126,8 @@ def main(argv=None, log=print):
         reader_cmd=reader_cmd,
         dry_run=a.dry_run,
         effort=a.effort,
+        sub_effort=a.sub_effort,
+        prompt=a.prompt,
         timeout=a.timeout,
         keep_work=a.keep_work,
         jobs=a.jobs,
