@@ -194,3 +194,102 @@ The numbers of a dry run only prove that the harness works end to end (preparing
 - The filler asks not to write files, but a real agent may do it anyway; those lines count as "outside the charter".
 - The `resume --as pm` view does not show facts (each coordinator sees them). If the distill saves a B fact as a fact and not as a proposal, the `kontext-inject` variant does not get it in the hook and the agent has to look for it (`kontext recall`). That is part of what is measured.
 - "Outside the charter" is calculated per file. A change outside the scope inside a file that does serve a goal is not noticed; the guards cover what matters of that kind.
+
+## Reader benchmark
+
+It measures whether a cheaper model can read a project's memory folder for an Opus coordinator, and at what cost. The folder is `.pm/`: `dumps/*.md` (the user's brain-dumps, verbatim and never edited, with material they pasted from elsewhere), `items.md` (the numbered list of ideas with their state: pending, in progress, done or discarded) and `status.md` (a short "where we are"). Every configuration gets byte-identical `.pm/` folders and the same two reading tasks.
+
+| `--configs` | Who reads | |
+|---|---|---|
+| `opus` | Opus 5.5 (`claude-opus-5-5`) reads `.pm/` itself | default |
+| `opus+sonnet` | Opus 5.5 is the main session and delegates the reading to a `pm-reader` subagent on `claude-sonnet-5-5`; Opus gives the final answer | default |
+| `opus+haiku` | The same with the subagent on `claude-haiku-5-5` | default |
+| `sonnet`, `haiku` | That model reads directly | diagnosis only, not gated |
+
+> **Warning: a real run spends tokens.** The pilot is one seed: the three default configurations × 3 sizes × 2 tasks = 18 calls, roughly 3–10 USD (an estimate; the pilot confirms it). `reader.py` refuses to run without `--dry-run` or `--yes`.
+
+```sh
+# Dry run: the reader is bench/fake_reader.py; no model, no cost
+python3 bench/reader.py --dry-run --seeds 2
+
+# For real, under the clean environment (above, "Clean environment and API billing")
+env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+  CLAUDE_CONFIG_DIR="$HOME/.cache/kontext-bench/claude-config" \
+  ANTHROPIC_API_KEY="$(cat clave.txt)" \
+  python3 bench/reader.py --yes
+```
+
+| Option | What it does |
+|---|---|
+| `--configs a,b` | Default `opus,opus+sonnet,opus+haiku`; also `sonnet`, `haiku` |
+| `--sizes a,b` | `s`, `m`, `l` (default all three) |
+| `--seeds N`, `--first-seed K` | Fixtures per size (1, the pilot) and the first one; to add seeds later, the same `--out` and `--first-seed` |
+| `--tasks a,b` | `audit`, `value` (default both) |
+| `--out <folder>` | Default `bench/results/<date>-reader[-dry]/`. An existing folder is added to, and the report covers every run in it |
+| `--reader-cmd "<cmd>"` | The base command. Default `claude -p --output-format json --setting-sources "" --strict-mcp-config`; the harness adds `--model`, `--tools`, `--agents` and `--effort`. Ignored with `--dry-run`, which always uses the made-up reader |
+| `--effort <level>` | Passed through as `--effort` |
+| `--jobs N` | Calls at a time (1) |
+| `--timeout S` | Seconds per call (900; raise it for `l`) |
+| `--keep-work` | Does not delete each call's temporary folder |
+| `--dry-run`, `--yes` | Made-up reader, or confirms a real run |
+
+### The calls
+
+Each call is one fresh `claude -p`, with the prompt on stdin, in a fresh temporary copy of the fixture: calls never share files or a Claude Code project key. `reader.py` inherits the environment and sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+
+- Direct: `--model <id> --tools Read,Grep,Glob`; the prompt is the reader's instructions and the task.
+- Delegated: `--model claude-opus-5-5 --tools Read,Grep,Glob,Agent --agents '{"pm-reader": {"description": …, "prompt": <the reader's instructions>, "tools": ["Read", "Grep", "Glob"], "model": <subagent id>}}'`; the prompt tells the main session to delegate the reading of `.pm/` to `pm-reader`, not to read the dumps itself, and to return the final JSON.
+
+The prompts are in `bench/reader/prompt.md` (its `Reader` section is the future body of a `pm-reader` agent). The subagent tool's name (`Agent`) and the `--agents` field names are best effort for Claude Code 2.1.318: they are in one constant, `SUBAGENT` in `benchlib/reader_runner.py`, for the pilot to fix. Two things only a real call can tell: whether `model` in `--agents` takes a full id or only an alias, and whether the subagent really ran on it (see the models in `modelUsage` and in the subagent's transcript, both in `run.json` and in the report).
+
+### Fixtures
+
+`benchlib/pmfixture.py` turns `bench/reader/spec.toml`, a size and a seed into a `.pm/` folder and its ground truth. The same inputs give the same bytes. The spec is Crumb, an ordering app for a neighborhood bakery: 12 ideas, 6 stated plainly, 2 that change value in a later dump (pickup slots 15 → 30 minutes, order history 20 → 50 per page), 2 said in passing in a paragraph about something else, 2 discarded later ("Forget the dark mode"), and 9 distractors: near-identical ideas of other people or projects ("the café next door takes pre-orders until 9 pm", "Ana's clinic project wants SMS reminders"), planted inside the pasted material by `benchlib/fill.py`.
+
+- **Dumps:** 3 dated files, each the user's paragraphs (one per line) with pasted material between them (`fill.generate`: minutes, tickets, logbooks, emails of the user's day job).
+- **items.md:** a list with ids and states, each idea paraphrased (so the audit is semantic, not string matching). It omits 2 or 3 live ideas, at least one said in passing; it never lists a discarded idea as pending (absent or `discarded`, by seed); it carries the old value of at least one changed idea.
+- **The seed decides:** which ideas are omitted, which changed ones are stale, whether each discarded one is absent or listed, the paraphrase of each item, the order of the user's paragraphs and where the pasted material falls between them, the 3 optional distractors (4 are always there: the value questions rely on them) and where each one goes.
+- **Sizes**, of the whole `.pm/`: `s` ~10k tokens, `m` ~50k, `l` ~150k, defined in characters at 4 characters per token (`pmfixture.CHARS_PER_TOKEN`; not measured: the usual figure for English prose, and the filler, with its numbers and names, is probably denser). To recalibrate after the pilot, the report shows the characters of each size next to the peak context of the direct calls (the largest single request in the session's transcript: the system prompt plus what was read). The input tokens of the envelopes are a cost figure, not a size: they add up every request of the call, and each one carries the whole context again. At `m` the first dump is ~100k characters and ~1,500 lines, at `l` ~300k and ~4,700: the reader has to read in pieces. At `l`, reading everything verbatim may not fit in a direct reader's window and Claude Code may compact in the middle of the task; that is one reason `l` is reported and not gated.
+- **Ground truth** (`fixtures/<size>-s<seed>/truth.json`, next to `root/`, the folder that gets copied; the reader never sees it): each idea's state (omitted, listed or discarded) and, for every planted sentence (the ideas', the changes', the discards', the distractors' and the items'), its file and its final line range, found in the files once they are written.
+
+### Tasks
+
+1. `audit`: "Which of the user's ideas in `.pm/dumps/` are not in `.pm/items.md`? Do not include ideas the user later discarded, nor ideas from other people or projects." Answer `{"missing": [{"quote", "file", "line"}]}`.
+2. `value`: 4 questions (`[[questions]]` in the spec): the two changed values (both may be stale in items.md, both with a close distractor), the pre-order cutoff (close distractor) and the custom cake notice (said in passing, close distractor). Answer `{"answers": [{"id", "value", "quote", "file", "line"}]}`.
+
+The JSON comes from `.result` of the envelope, as `src/distill.rs` reads it: fences and text around it are tolerated. An answer that does not parse scores 0 and is flagged in the report.
+
+### Grading
+
+Deterministic, no model judge (`benchlib/reader_grade.py`):
+
+- A citation is **valid** if its quote, normalized (case, accents, whitespace, quotes, markdown and punctuation; `…` splits it into pieces that have to appear in order), has at least 15 characters and is inside lines [line − 2, line + 2] of the cited file. The path may be absolute or relative. Anything else is an **invented** citation, whatever the reason (not in the file, wrong line, no such file, too short, missing fields; `run.json` keeps the reason).
+- A valid citation maps to the planted sentence whose range it overlaps (± 2 lines) and whose text it shares: one contains the other, or 60 % of the shorter one's words. Range alone would blame a filler line next to a distractor on the distractor.
+- **audit:** a true positive cites an omitted idea (deduplicated by idea); citing a listed idea is a false positive (also when it was cited by its change sentence or with its stale value: it is in the list); citing a discarded idea (by any of its sentences) or a distractor is a **confusion**; anything else valid is "other". Recall = omitted ideas found / omitted ideas; precision = omitted ideas found / valid citations, deduplicated by what they point at.
+- **value:** `metrics.keyword_verdict` on the `value` field, with the question's `expected` and `forbidden` (same `a|b` syntax as the scenarios); a forbidden word is a confusion. Value % = mean score. Its citation is checked the same way (invalid = invented) but does not change the score. As in the dry-run judge of the scenarios, a value that mentions the old one as history ("30, it used to be 15") is a forbidden hit; the prompt asks for the value alone.
+
+### The gate
+
+Fixed before any real run; it is not changed after seeing results. The constants are `GATE_*` in `benchlib/reader_grade.py`. At size `m`, mean over the seeds, against `opus`, a delegated configuration `opus+X` is **viable** if:
+
+1. its audit recall ≥ `opus` audit recall − 10 points;
+2. its value % ≥ `opus` value % − 10 points;
+3. it invents ≤ 1 citation per run on average, a run being one call (one task of one seed), both tasks counted;
+4. it reports ≤ 1 discarded idea as missing in total across the seeds.
+
+Sanity check: if `opus` itself has an audit recall under 80 % at `m`, the report says the task is ill-posed and judges no configuration. Size `l` is reported, not gated. The report prints each verdict mechanically.
+
+### Results
+
+`bench/results/<date>-reader[-dry]/`:
+
+- `report.md` and `report.json`: one row per configuration and size, mean ± standard deviation over the seeds, of audit recall, precision, invented citations per call, confusions, value %, cost in USD (total and per model: opus, sonnet, haiku), input tokens (uncached, cache writes and cache reads), seconds, delegations and main-session dump reads (per seed, both tasks together); a table per task; the fixture sizes; the gate; warnings (errors, unparseable answers, delegated calls that never delegated or that read the dumps from the main session).
+- `fixtures/<size>-s<seed>/`: `root/.pm/` and `truth.json`.
+- `runs/<config>-<size>-s<seed>-<task>/run.json`: the exact argv, the prompt, the raw envelope, the parsed answer and every graded citation, wall time, usage in total and per model from `modelUsage` (tokens by type and `costUSD` of each model, as the envelope gives them), the fixture's sha256, and from the transcripts: tool calls by name in the main session and in subagents, calls of the subagent tool and their `subagent_type`, the main session's Read or Grep calls on `.pm/dumps/`, and the models seen.
+- `runs/…/transcripts/claude/*.jsonl.gz`: the call's Claude Code sessions, the subagents' in `<session>/subagents/`.
+
+Cost always comes from the envelopes, so it is 0 in dry runs. Claude Code may also use a small model of its own during a call; it appears in `modelUsage` and in the per-model cost, and counts.
+
+### The made-up reader
+
+`bench/fake_reader.py` is invoked like `claude -p`, accepts the same flags and returns the same envelope with zero usage. It uses no model and does not read the ground truth: it looks for the spec's sentences in the copy of `.pm/` it runs in and answers from them. With `--agents` it "delegates": one call of the subagent tool in the main session, the reads in a subagent transcript, and both models in `modelUsage`. Knobs for the tests: `FAKE_READER_MISS=<n>` (leaves out n missing ideas), `FAKE_READER_INVENT=1` (a fabricated citation), `FAKE_READER_DISCARD=1` (reports a discarded idea), `FAKE_READER_DISTRACT=1` (reports a distractor), `FAKE_READER_STALE=1` (old values), `FAKE_READER_BYPASS=1` (the main session reads the dumps too) and `FAKE_READER_GARBLE=1` (no JSON). As with the made-up agent, a dry run only proves that the harness works.
