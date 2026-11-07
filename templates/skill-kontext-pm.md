@@ -67,7 +67,7 @@ When the user comes back after time away, or asks where things stand:
 
 1. **Do not read the dumps yourself**: that is the point, your context stays small. Launch the `kontext-pm-reader` subagent (in Claude Code, the `Agent` tool with `subagent_type` `kontext-pm-reader`) and give it the text under "Audit task" below, word for word. It answers with JSON: `ideas` (every idea it found) and `missing` (those not in items.md), each with `quote`, `file` and `line`.
 2. **Verify each idea in `missing`** before you believe it: one targeted Grep of items.md (and of the places its rows point to) for that idea, and one Grep of the cited file for a piece of the quote. Drop the ones that are covered: on real data the reader flags an idea that items.md has in other words, and now and then a quote is not verbatim.
-3. **Add the confirmed ones** to items.md as pending, with the reader's citation as their source.
+3. **Add the confirmed ones** to items.md as pending, with the reader's citation as their source (`dumps/<file>:<line>`, without the `.pm/` in front).
 4. **Show the user where things stand**, following the `kontext-show` skill for how to show it (do not repeat its rules here). The `.pm` part, each with its evidence: done; in progress; waiting for the user; pending; and newly found missing (the ones from step 3).
 
 If `kontext-pm-reader` is not among your agents (`kontext install` installs it; `kontext install --skills-only` brings only the skills), say so and ask the user before reading the dumps yourself.
