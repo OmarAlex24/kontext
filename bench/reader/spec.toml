@@ -1,0 +1,371 @@
+# The reader benchmark's fixture: a fictional greenfield app, the ideas the user
+# says about it in three brain-dumps, and the questions about its values.
+# `benchlib/pmfixture.py` turns this, a size and a seed into a `.pm/` folder and
+# its ground truth. See bench/README.md, "Reader benchmark".
+#
+# Every sentence below appears word for word in the dumps (the generator checks
+# it). Use single spaces and no line breaks inside a sentence.
+#
+# Fairness rule (since version 2): every sentence of the user's own paragraphs
+# that states something the app should do or respect (a feature, a rule, a
+# limit, a number, a default, a preference or a decision, however it is
+# phrased) is a planted idea below, with its paraphrases. Everything else in
+# the paragraphs is narrative or context: no requests, no rules, and none of
+# the values the questions ask about. A reader that reports such a sentence
+# would otherwise be marked wrong for being right.
+
+# The version of this file's content. Truth and run.json record it, with the
+# sha256 of the file's bytes. Version 1 is the pilot's.
+version = 2
+name = "bakery"
+app = "Crumb, the ordering app for Rosa's neighborhood bakery"
+# Fixed dates: nothing in the fixture depends on the day it is generated.
+updated = "2026-10-19"
+
+# Lines the user writes before pasting something; the seed picks them.
+paste_intros = [
+  "Pasting this here so I don't lose it:",
+  "Copying the thread from my day job, I need to get back to it later:",
+  "Dumping these notes here for now:",
+  "(pasted from my notes app)",
+  "Saving this for later, ignore it for the app:",
+]
+# How many of the distractors without `always` each fixture carries (below).
+optional_count = 3
+# How many live ideas items.md leaves out in every fixture (at least one of
+# them `passing`).
+omitted_count = 3
+
+# ------------------------------------------------------------------ ideas
+#
+# kind:
+#   clear      stated plainly, in a paragraph about it;
+#   changed    stated plainly, and its value changes in later dumps (`change`,
+#              one sentence per change, in date order);
+#   passing    said in passing, one sentence in the middle of a paragraph about
+#              something else;
+#   discarded  stated, and explicitly dropped in a later dump (`discard`).
+#
+# `items` are the paraphrases `items.md` uses (one is picked by the seed); a
+# changed idea has `items_old` (paraphrases with any superseded value) and
+# `items_new` (with the value in force).
+#
+# `values`: the idea's value after its first sentence and after each change
+# (the last one is in force). Every idea a question asks about has them; the
+# generator checks them against the question, and bench/fake_reader.py answers
+# with them. A change states its new value outright, unless the idea has
+# `relative = true`: then its change says it relative to the old value
+# ("twice as many", "one hour earlier") and never names the value in force.
+
+[[ideas]]
+id = "preorder-cutoff"
+kind = "changed"
+relative = true
+said = "Customers should be able to pre-order bread until 8 pm the night before."
+change = ["Let's close the pre-orders one hour earlier than I said, Rosa wants to plan the dough before dinner."]
+items_old = ["Next-day pre-orders close at 8 pm.", "Pre-ordering for tomorrow stays open until 8 pm the evening before."]
+items_new = ["Next-day pre-orders close at 7 pm.", "Pre-ordering for tomorrow stays open until 7 pm the evening before."]
+values = ["8 pm", "7 pm"]
+
+[[ideas]]
+id = "pickup-slots"
+kind = "changed"
+said = "Pickup slots should be 15 minutes long so the counter never gets crowded."
+change = [
+  "Thinking about it more, the pickup slots should be 30 minutes long instead of 15, because people are always late.",
+  "After two more Saturdays Rosa finds 30-minute slots too loose, so let's make the pickup slots 20 minutes long.",
+]
+items_old = [
+  "Pickup is booked in 15-minute windows.",
+  "Customers choose a 15-minute pickup window.",
+  "Pickup is booked in 30-minute windows.",
+  "Customers choose a 30-minute pickup window.",
+]
+items_new = ["Pickup is booked in 20-minute windows.", "Customers choose a 20-minute pickup window."]
+values = ["15 minutes", "30 minutes", "20 minutes"]
+
+[[ideas]]
+id = "slot-reminder"
+kind = "clear"
+said = "The customer picks a slot when ordering and gets a reminder."
+items = ["Customers choose their pickup slot at checkout and get a reminder of it.", "A reminder of the chosen pickup slot goes to the customer."]
+
+[[ideas]]
+id = "product-page"
+kind = "clear"
+said = "Product pages should be simple, a photo, the price and what is inside."
+items = ["Simple product pages: a photo, the price and the ingredients.", "Each product page shows just a photo, its price and what it contains."]
+
+[[ideas]]
+id = "allergen-tags"
+kind = "clear"
+said = "Every product needs allergen tags for gluten, nuts, dairy and eggs."
+items = ["Allergen labels on each product (gluten, nuts, dairy, eggs).", "Products carry allergen info: gluten, nuts, dairy and eggs."]
+
+[[ideas]]
+id = "loyalty-card"
+kind = "clear"
+said = "I want a stamp card where every tenth loaf of bread is free."
+items = ["Loyalty stamps: the 10th loaf is on the house.", "Stamp card with one free loaf after nine paid ones."]
+
+[[ideas]]
+id = "sold-out-badge"
+kind = "clear"
+said = "When a product sells out, the app should show a sold-out badge instead of hiding it."
+items = ["Sold-out products stay visible with a badge.", "Show a 'sold out' label on finished products rather than removing them."]
+
+[[ideas]]
+id = "wholesale-invoices"
+kind = "clear"
+said = "Cafés that buy wholesale should get one invoice at the end of the month instead of paying per order."
+items = ["Monthly invoicing for the wholesale café customers.", "Wholesale accounts settle one invoice per month."]
+
+[[ideas]]
+id = "order-history"
+kind = "changed"
+relative = true
+said = "The order history should show 12 orders per page."
+change = ["Let's show twice as many orders per page in the order history, scrolling is fine on a phone."]
+items_old = ["Order history is paginated at 12 orders a page.", "Past orders list: 12 per page."]
+items_new = ["Order history is paginated at 24 orders a page.", "Past orders list: 24 per page."]
+values = ["12", "24"]
+
+[[ideas]]
+id = "ready-push"
+kind = "clear"
+said = "The app should send a push notification when the order is ready to pick up."
+items = ["Push notification when an order is ready.", "Notify the customer by push once the order can be collected."]
+
+[[ideas]]
+id = "open-orders-limit"
+kind = "passing"
+said = "A customer can have at most three open orders at a time."
+items = ["Limit of three open orders per customer.", "No customer can hold more than 3 open orders at once."]
+values = ["three"]
+
+[[ideas]]
+id = "cake-notice"
+kind = "passing"
+said = "Custom cake orders need 48 hours of notice."
+items = ["Custom cakes require two days of notice (48 h).", "48-hour lead time on custom cake orders."]
+values = ["48 hours"]
+
+[[ideas]]
+id = "prices-tax"
+kind = "passing"
+said = "All prices in the app include tax."
+items = ["Prices are shown with tax included.", "Displayed prices are tax-inclusive."]
+
+[[ideas]]
+id = "favorite-reorder"
+kind = "passing"
+said = "It would be nice if regulars could save a favorite order and repeat it with one tap."
+items = ["One-tap reorder of a saved favorite order.", "Regulars can save a favorite order and repeat it."]
+
+[[ideas]]
+id = "monday-closed"
+kind = "passing"
+said = "The bakery is closed on Mondays, so there are no pickups that day."
+items = ["No pickups on Mondays (closing day).", "Monday is the closing day: no pickup slots then."]
+values = ["Mondays"]
+
+[[ideas]]
+id = "dark-mode"
+kind = "discarded"
+said = "I'd like a dark mode for the app, it looks good at night."
+discard = "Forget the dark mode, nobody orders croissants at midnight."
+items = ["Dark mode for the app.", "Dark theme option."]
+
+[[ideas]]
+id = "home-delivery"
+kind = "discarded"
+said = "We could offer home delivery for orders within 2 km of the bakery."
+discard = "Let's drop home delivery for good: the bakery has no driver."
+items = ["Home delivery within 2 km.", "Delivery to homes near the bakery (2 km radius)."]
+
+# ------------------------------------------------------------------ dumps
+#
+# The user's own paragraphs, one dump per date. `{said:<id>}` and
+# `{discard:<id>}` are replaced by the idea's sentence, `{change:<id>}` by its
+# first change and `{change2:<id>}` by its second; each one has to be used
+# exactly once, and each change in a later dump than the sentence before it.
+# The first paragraph of each dump stays first; the seed shuffles the rest and
+# drops the pasted material between them.
+
+[[dumps]]
+date = "2026-10-05"
+paragraphs = [
+  "OK, first brain-dump about Crumb, the app for Rosa's bakery. Rosa is tired of taking orders over the phone and on scraps of paper, and that is how this whole thing started.",
+  "Rosa's biggest headache is guessing how much to bake. {said:preorder-cutoff} After that she knows how much dough to make.",
+  "Then the pickup, which is where the Saturday mess happens. {said:pickup-slots} {said:slot-reminder}",
+  "{said:product-page} {said:allergen-tags} Rosa says half her questions at the counter are about allergies.",
+  "Regulars matter a lot here. {said:loyalty-card} Rosa already does it on paper cards and people love it.",
+  "{said:sold-out-badge} People like to see what they missed, and Rosa thinks it makes them come earlier the next day.",
+  "{said:wholesale-invoices} A few cafés on the street buy croissants every morning, and paying each order separately is a pain for them.",
+  "For the account screen: {said:order-history} Nobody needs more than that on a phone.",
+  "Rosa's nephew Teo helps at the counter on weekends and knows every regular by name. {said:open-orders-limit} He will also hand out the flyers around the neighborhood when we launch.",
+  "Some extras that came to mind on the bus. {said:dark-mode} {said:home-delivery} Not sure about either yet.",
+]
+
+[[dumps]]
+date = "2026-10-12"
+paragraphs = [
+  "Second dump, after a week of talking with Rosa and watching the counter on Saturday morning.",
+  "{change:pickup-slots} On Saturday half of the early customers came in late, coffee in hand.",
+  "{change:preorder-cutoff} She tried it on paper last week and the last orders kept coming in while she was cleaning up.",
+  "The oven technician came on Tuesday and spent the whole morning on the thermostat. {said:cake-notice} He also said the proofing cabinet needs a new seal before winter, which Rosa had not budgeted for.",
+  "{discard:dark-mode} Rosa laughed when I showed her a black screen on my phone.",
+  "{said:ready-push} The counter gets busy and people stand around waiting otherwise.",
+  "Rosa's accountant came by on Thursday to close the quarter and complained about the shoebox of receipts. {said:prices-tax} She also found a flour invoice in the shoebox that nobody had paid.",
+]
+
+[[dumps]]
+date = "2026-10-19"
+paragraphs = [
+  "Third dump. Short one, mostly corrections and the photo session.",
+  "{change:order-history} The wholesale cafés have long histories and scroll through them every week.",
+  "{change2:pickup-slots} Last Saturday the counter sat empty for long stretches.",
+  "{discard:home-delivery} We can revisit it if she ever hires someone.",
+  "The photographer can come on Thursday for the product photos, and she needs the list of breads by Wednesday. {said:favorite-reorder} She charges per photo, so the list of breads will be short.",
+  "The city is repaving the street in November, and the parking spots in front of the bakery will be gone for two weeks. {said:monday-closed} Rosa is worried the cafés will order less during the works.",
+]
+
+# ------------------------------------------------------------------ distractors
+#
+# Near-identical ideas of someone else or of another project, planted inside the
+# pasted material (benchlib/fill.py's carriers). `always` ones are in every
+# fixture (the value questions rely on them); the seed picks `optional_count`
+# (at the top) of the others. Written without a final period: the carrier adds
+# its own. `value`: the value a question about the `near` idea must not take
+# (the generator checks that the question forbids it, and that the distractor
+# is `always`).
+
+[[distractors]]
+id = "pizzeria-slots"
+near = "pickup-slots"
+text = "Luis's pizzeria app books pickups in 10-minute slots"
+value = "10-minute"
+always = true
+
+[[distractors]]
+id = "bookstore-history"
+near = "order-history"
+text = "Marta's bookstore app shows 25 orders per page in its order history"
+value = "25"
+always = true
+
+[[distractors]]
+id = "cafe-preorders"
+near = "preorder-cutoff"
+text = "the café next door takes pre-orders until 9 pm the night before"
+value = "9 pm"
+always = true
+
+[[distractors]]
+id = "riverside-cakes"
+near = "cake-notice"
+text = "the Riverside bakery asks for 72 hours of notice on custom cakes"
+value = "72 hours"
+always = true
+
+[[distractors]]
+id = "flower-orders"
+near = "open-orders-limit"
+text = "the flower shop on the corner lets each customer keep up to five open orders"
+value = "five"
+always = true
+
+[[distractors]]
+id = "market-sundays"
+near = "monday-closed"
+text = "the farmers' market stall by the church takes no orders on Sundays"
+value = "Sundays"
+always = true
+
+[[distractors]]
+id = "cafe-pdf"
+text = "the café next door's app exports every receipt as a PDF"
+
+[[distractors]]
+id = "clinic-sms"
+near = "slot-reminder"
+text = "Ana's clinic project wants SMS reminders the day before each appointment"
+
+[[distractors]]
+id = "cafe-stamps"
+near = "loyalty-card"
+text = "the café next door gives a free coffee after eight stamps on its loyalty card"
+
+[[distractors]]
+id = "gym-dark-mode"
+near = "dark-mode"
+text = "the gym's booking app added a dark mode last month and the members love it"
+
+[[distractors]]
+id = "canteen-allergens"
+near = "allergen-tags"
+text = "the school canteen project tags every dish with its allergens"
+
+[[distractors]]
+id = "clinic-fees"
+near = "prices-tax"
+text = "Ana's clinic project shows its fees before tax"
+
+# ------------------------------------------------------------------ questions
+#
+# The `value` task. `expected` and `forbidden` use the scenarios' syntax:
+# whole words, case and accents ignored, `a|b` accepts either form. `forbidden`
+# carries every superseded value of the idea (one may be stale in items.md)
+# and the value of its close distractor; the generator checks both.
+#
+#   q1  changed twice, the last dump wins       15 -> 30 -> 20, distractor 10
+#   q2  changed relatively ("twice as many")    12 -> 24, distractor 25
+#   q3  changed relatively ("one hour earlier") 8 pm -> 7 pm, distractor 9 pm
+#   q4  said in passing                          48 hours, distractor 72
+#   q5  said in passing, as a plain limit        three, distractor five
+#   q6  said in passing, as a plain fact         Mondays, distractor Sundays
+#
+# q1-q3 are changed ideas: in every fixture at least one of them is listed in
+# items.md with a superseded value (which ones is up to the seed).
+
+[[questions]]
+id = "q1"
+idea = "pickup-slots"
+question = "How long is one pickup slot?"
+expected = ["20"]
+forbidden = ["15", "30", "10"]
+
+[[questions]]
+id = "q2"
+idea = "order-history"
+question = "How many orders does one page of the order history show?"
+expected = ["24"]
+forbidden = ["12", "25"]
+
+[[questions]]
+id = "q3"
+idea = "preorder-cutoff"
+question = "Until what time can customers pre-order for the next morning?"
+expected = ["7 pm|7pm|7:00 pm|7 p.m.|19:00|19h"]
+forbidden = ["8 pm|8pm|8:00 pm|8 p.m.|20:00|20h", "9 pm|9pm|9:00 pm|9 p.m.|21:00|21h"]
+
+[[questions]]
+id = "q4"
+idea = "cake-notice"
+question = "How much notice does a custom cake order need?"
+expected = ["48|two days|2 days"]
+forbidden = ["72|three days|3 days"]
+
+[[questions]]
+id = "q5"
+idea = "open-orders-limit"
+question = "How many open orders can one customer have at the same time?"
+expected = ["3|three"]
+forbidden = ["5|five"]
+
+[[questions]]
+id = "q6"
+idea = "monday-closed"
+question = "On which day of the week are there no pickups?"
+expected = ["monday|mondays"]
+forbidden = ["sunday|sundays"]

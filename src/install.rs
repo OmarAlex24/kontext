@@ -9,15 +9,17 @@
 //! - The skill `.claude/skills/kontext/SKILL.md` (from `templates/skill-kontext.md`)
 //!   and the orchestrate skill, `.claude/skills/kontext-orchestrate/SKILL.md`
 //!   (from `templates/skill-kontext-orchestrate.md`), the skill that shows the
-//!   human how things are going, `.claude/skills/kontext-show/SKILL.md`, and the
+//!   human how things are going, `.claude/skills/kontext-show/SKILL.md`, the
 //!   skill that installs kontext and migrates the project's memory into it,
-//!   `.claude/skills/kontext-migrate/SKILL.md`. All four are always replaced.
-//!   With `--skills-only [--global]`, only those, in the repo or in
+//!   `.claude/skills/kontext-migrate/SKILL.md`, and the PM's memory of the
+//!   user's ideas, `.claude/skills/kontext-pm/SKILL.md`. All five are always
+//!   replaced. With `--skills-only [--global]`, only those, in the repo or in
 //!   `~/.claude/skills/` ([`plan_skills`]).
-//! - The agent files `.claude/agents/kontext-*.md` (from `templates/agents/`).
-//!   If one already exists with different content (you changed it by hand, or
-//!   it comes from another version), it is kept and a warning is shown;
-//!   `--force` replaces it.
+//! - The agent files `.claude/agents/kontext-*.md` (from `templates/agents/`),
+//!   among them `kontext-pm-reader.md`, the reader the `kontext-pm` skill
+//!   launches. If one already exists with different content (you changed it
+//!   by hand, or it comes from another version), it is kept and a warning is
+//!   shown; `--force` replaces it.
 //! - The `Bash(kontext:*)` permission in `permissions.allow` of
 //!   `.claude/settings.json`, if it is missing.
 //! - The repo in `[[repos]]` of `project.toml`, if it is missing.
@@ -56,6 +58,10 @@ pub const SKILLS: &[(&str, &str)] = &[
         "kontext-migrate",
         include_str!("../templates/skill-kontext-migrate.md"),
     ),
+    (
+        "kontext-pm",
+        include_str!("../templates/skill-kontext-pm.md"),
+    ),
 ];
 
 /// The agent files (DESIGN §12): name and content.
@@ -75,6 +81,10 @@ pub const AGENTS: &[(&str, &str)] = &[
     (
         "kontext-scout.md",
         include_str!("../templates/agents/kontext-scout.md"),
+    ),
+    (
+        "kontext-pm-reader.md",
+        include_str!("../templates/agents/kontext-pm-reader.md"),
     ),
 ];
 

@@ -98,8 +98,8 @@ kontext verify
 | `kontext show <id>` | A full entry with its history. Accepts prefixes (`D-7f3`) |
 | `kontext recall <words> [--limit N] [--since YYYY-MM-DD]` | Searches the ledger and Claude Code's transcripts |
 | `kontext hook session-start` | Called by Claude Code when a session starts. Never fails and doesn't advance cursors |
-| `kontext install [--dry-run] [--force] [--role <role>]` | In a code repo: `.kontext.toml`, the start hook and the `Bash(kontext:*)` permission in `.claude/settings.json`, the skills `kontext`, `kontext-orchestrate`, `kontext-show` and `kontext-migrate` in `.claude/skills/`, the agent files (phase 3), and the repo in `[[repos]]` of `project.toml`. Shows the diff before writing |
-| `kontext install --skills-only [--global] [--dry-run]` | Only the skills, in the repo's `.claude/skills/` or, with `--global`, in `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`). Doesn't need a project |
+| `kontext install [--dry-run] [--force] [--role <role>]` | In a code repo: `.kontext.toml`, the start hook and the `Bash(kontext:*)` permission in `.claude/settings.json`, the skills `kontext`, `kontext-orchestrate`, `kontext-show`, `kontext-migrate` and `kontext-pm` in `.claude/skills/`, the agent files (phase 3, and the `.pm/` reader), and the repo in `[[repos]]` of `project.toml`. Shows the diff before writing |
+| `kontext install --skills-only [--global] [--dry-run]` | Only the skills, in the repo's `.claude/skills/` or, with `--global`, in `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`). Not the agent files. Doesn't need a project |
 
 All of them accept `--json` (the ones that write print the new entry; the views print their data), `--actor`, `--role` and `--model` (in `install`, `--role` is the `default_role` of `.kontext.toml`).
 
@@ -206,7 +206,7 @@ Hook errors are logged to `<kontext-home>/.kontext/hooks.log`; the hook always e
 
 ### Agent files
 
-`kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. If one already exists with different content (you changed it by hand), it is kept and you are warned; `kontext install --force` replaces it.
+`kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. It also writes `kontext-pm-reader.md`, the reader of the PM's memory (below, "The PM's memory of your ideas"), the one that sets its model: `haiku`. If one already exists with different content (you changed it by hand), it is kept and you are warned; `kontext install --force` replaces it.
 
 ### Team flow
 
@@ -272,6 +272,26 @@ kontext plan        # exits with 1: base is left with no wave, and Problems says
 ```
 
 The agent files follow the wave protocol: the coordinator doesn't talk to the user (it escalates with `kontext ask --to pm`), it closes the epic once all its tasks are closed with evidence, and it tells the pm with a `kontext log` and its report; implementers and testers only ask their coordinator.
+
+## The PM's memory of your ideas (`.pm/`)
+
+Over days of work you say many things to the session that coordinates (the PM), some in passing, many as short answers to its questions. The skill `kontext-pm` keeps them so none is silently lost, in a `.pm/` folder at the root of the repo:
+
+- `dumps/<date>.md`: what you said, verbatim and append-only (a long day goes on in `<date>-2.md`, `-3`…, so each file can be read whole). An answer is saved with the questions it answers (`**Coordinator asked:**`), so "2. merge it yourself" still means something a week later. Secrets become `[secret removed]`; nothing else is changed.
+- `items.md`: one row per idea, with where it went (the kontext task, decision, PR or doc) and its evidence. It points at the work; the plans and tasks stay in kontext.
+- `status.md`: where things stand, short. `shots/`: screenshots used as evidence.
+
+Only the PM writes it, and after each message it lists back the ideas it took and asks whether it missed one. When you come back, or ask where things stand, it runs a coverage audit without reading the dumps itself: the `kontext-pm-reader` subagent (Haiku, read-only) lists every idea in the dumps and reports those missing from `items.md`; the PM checks each one before adding it, and shows you what is done, in progress, waiting for you, pending and newly found. In a public repo it asks before committing `.pm/` (or gitignores it).
+
+`kontext install` installs the skill and the reader. `kontext install --skills-only` brings only the skill; in a repo that must not get the start hook, copy the two files by hand:
+
+```sh
+mkdir -p .claude/skills/kontext-pm .claude/agents
+cp <kontext>/templates/skill-kontext-pm.md .claude/skills/kontext-pm/SKILL.md
+cp <kontext>/templates/agents/kontext-pm-reader.md .claude/agents/
+```
+
+Why a Haiku reader: in the [reader benchmark](./bench/reports/2026-11-06-reader.md) (one fictional project), with its prompt v2, which these files carry adapted to the layout above, Opus handing the reading to Haiku found every missing idea, as Opus reading by itself did, at about a fifth of the cost; a higher effort added nothing. `python3 bench/reader.py --prompt skill` measures the texts that ship. The details are in [DESIGN.md §12.3](./DESIGN.md).
 
 ## Phase 4 commands
 

@@ -586,8 +586,8 @@ pub enum Cmd {
         /// Also replaces the agent files you changed by hand
         #[arg(long)]
         force: bool,
-        /// Only the skills (kontext, kontext-orchestrate, kontext-show and kontext-migrate), in the
-        /// repo's .claude/skills/; no project needed
+        /// Only the skills (kontext, kontext-orchestrate, kontext-show, kontext-migrate and
+        /// kontext-pm), in the repo's .claude/skills/, without the agent files; no project needed
         #[arg(long)]
         skills_only: bool,
         /// With --skills-only: in your user's skills (~/.claude/skills/, or $CLAUDE_CONFIG_DIR/skills/)
