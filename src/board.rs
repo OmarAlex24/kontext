@@ -11,7 +11,8 @@ use crate::model::{Entry, is_record_kind};
 use crate::state::{State, Status, string_list};
 use crate::tasks::{self, TaskStatus, epic_name, touches_epic};
 use crate::views::{
-    capped, charter_lines, entry_json, field, new_line, one_line, plural, question_is_for, when,
+    capped, charter_lines, entry_json, field, largest_fitting, new_line, one_line, partial_notice,
+    plural, question_is_for, when,
 };
 
 /// The last activity on an epic (ms): the epic itself, its tasks, their
@@ -227,6 +228,11 @@ struct Level {
     detail: bool,
     facts: bool,
     list_cap: Option<usize>,
+    /// The last cuts, only when the ones above are not enough: how many of
+    /// the other decisions in force, and then of the epic's, are listed (the
+    /// newest; `None`: all of them).
+    others: Option<usize>,
+    epic_decisions: Option<usize>,
 }
 
 const JOURNAL_N: usize = 10;
@@ -341,7 +347,14 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
     if ds.is_empty() {
         l.push("- (none)".into());
     }
-    for d in &ds {
+    // The newest stay: the decisions are in ledger order.
+    let from = ds
+        .len()
+        .saturating_sub(lv.epic_decisions.unwrap_or(usize::MAX));
+    if from > 0 {
+        l.push(partial_notice(from, ""));
+    }
+    for d in &ds[from..] {
         let why = if d.why.trim().is_empty() || !lv.detail {
             String::new()
         } else {
@@ -357,11 +370,17 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
     if !others.is_empty() {
         l.push(String::new());
         l.push(format!("## Other decisions in force ({})", others.len()));
-        let titles: Vec<String> = others
+        let from = others.len().saturating_sub(lv.others.unwrap_or(usize::MAX));
+        if from > 0 {
+            l.push(partial_notice(from, ""));
+        }
+        let titles: Vec<String> = others[from..]
             .iter()
             .map(|d| format!("{} {}", d.id, d.title.trim()))
             .collect();
-        l.push(format!("- {}", titles.join("; ")));
+        if !titles.is_empty() {
+            l.push(format!("- {}", titles.join("; ")));
+        }
     }
 
     let ts = st.tasks_of(&epic.id);
@@ -527,9 +546,10 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
 }
 
 /// `kontext brief <epic>`, cut to the budget: the journal first, then the why
-/// of decisions and criteria, facts, and then the lists. The charter, the
-/// goals, the titles of decisions in force, the open tasks, and the mark are
-/// never cut.
+/// of decisions and criteria, facts, and then the lists. If that is not
+/// enough, the titles of the other decisions in force and then the epic's get
+/// what is left (the newest), with a line that says how many are not shown.
+/// The charter, the goals, the open tasks, and the mark are never cut.
 pub fn brief(st: &State, new: &[Entry], o: &BriefOpts) -> String {
     let epic = st.get(&o.epic).expect("the epic exists");
     let new: Vec<Entry> = new
@@ -543,6 +563,8 @@ pub fn brief(st: &State, new: &[Entry], o: &BriefOpts) -> String {
         detail: true,
         facts: true,
         list_cap: None,
+        others: None,
+        epic_decisions: None,
     };
     let mut text = build_brief(st, new, o, lv);
     while text.chars().count() > o.max_chars && lv.journal > 0 {
@@ -560,12 +582,39 @@ pub fn brief(st: &State, new: &[Entry], o: &BriefOpts) -> String {
         }
         text = build_brief(st, new, o, lv);
     }
-    if text.chars().count() > o.max_chars {
-        text.push_str(&format!(
-            "\n(kontext: this is over {} characters; the charter, the goals, the decisions in force, the open tasks, and the mark are never cut)\n",
-            o.max_chars
-        ));
+    if text.chars().count() <= o.max_chars {
+        return text;
     }
+    // A long ledger of decisions: first the other decisions get what is
+    // left, then the epic's own.
+    let others = st.law().len() - epic_decisions(st, epic, None).len();
+    if let Some(t) = largest_fitting(others, o.max_chars, |n| {
+        lv.others = Some(n);
+        build_brief(st, new, o, lv)
+    }) {
+        return t;
+    }
+    lv.others = Some(0);
+    let own = epic_decisions(st, epic, None).len();
+    if let Some(t) = largest_fitting(own, o.max_chars, |n| {
+        lv.epic_decisions = Some(n);
+        build_brief(st, new, o, lv)
+    }) {
+        return t;
+    }
+    // Not even the rest fits: the shorter of all the titles and none.
+    lv.epic_decisions = Some(0);
+    let none = build_brief(st, new, o, lv);
+    let without = if none.chars().count() < text.chars().count() {
+        text = none;
+        " even without the titles of the decisions in force"
+    } else {
+        ""
+    };
+    text.push_str(&format!(
+        "\n(kontext: this is over {} characters{without}; the charter, the goals, the open tasks, and the mark are never cut)\n",
+        o.max_chars
+    ));
     text
 }
 

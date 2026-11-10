@@ -9,7 +9,7 @@ The conversation is disposable: it gets compacted, cut off, or switched to anoth
 
 ## Before working: read
 
-- `kontext resume --as <role>`: the charter, the goals, the decisions in force, what is open, and what is new since your last read. Read it at startup if the hook did not already put it in your context.
+- `kontext resume --as <role>`: the charter, the goals, the decisions in force, what is open, and what is new since your last read. Read it at startup if the hook did not already put it in your context. If it says the list of decisions is partial, search with `kontext recall <words>` before you propose or decide something.
 - `kontext show <id>`: a full entry with its history (why it was decided, what it replaced, who answered). Accepts prefixes: `kontext show D-7f3`.
 - `kontext recall <words>`: searches the ledger and the earlier conversations. Use it before asking something that may already have been discussed.
 - `kontext find <topic>`: searches the docs of the project's repos (ADRs, READMEs) and says which section to read; `kontext find --show <path:line>` prints only that section.
