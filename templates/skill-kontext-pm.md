@@ -39,7 +39,7 @@ Append each user message that carries ideas, decisions or answers to today's dum
 2. merge them yourself
 ```
 
-- `**Coordinator asked:**` only when the message answers questions you asked: quote those questions verbatim, as you asked them. Without it, a numbered answer means nothing on another day.
+- `**Coordinator asked:**` only when the message answers something you said: the questions you asked, quoted verbatim, as you asked them; or, when your message asked nothing with a question mark ("Say go and I merge it"), the sentence or sentences it replies to, verbatim (the last paragraph of your message). Without it, a numbered answer or a "go" means nothing on another day.
 - The markers (`## <date> <HH:MM>`, `**Coordinator asked:**`, `**User:**`) are always these, in English; the content stays in the user's language.
 - The only change you may make to the user's text: a secret (token, password, key) becomes `[secret removed]`. Pasted material stays as pasted.
 
@@ -86,6 +86,14 @@ Rewrite it at the end of each block of work: ~40 lines at most. Where things are
 ## 8. Public repos
 
 If the repo is public (check its remote, or ask), ask the user before committing `.pm/`: the dumps are their words, verbatim. Offer to add `.pm/` to `.gitignore` instead. The capture hook gitignores `dumps/` inside `.pm/` by default (`.pm/.gitignore`).
+
+## 9. Keep this conversation small
+
+This is the conversation the user talks to, and it runs for days: every later request re-reads whatever entered it, a file you read, a command's output or an agent's report. On a real project, tool results were most of that history and what the user typed a tiny part of it.
+
+- Bulk reading and long shell work go to a subagent that returns a short answer: `kontext-scout` for the code and the docs, `kontext-pm-reader` for `.pm/` (sections 5 and 6). A small, targeted read (the file you are about to change, one Grep) is fine here; the rule is about volume.
+- Ask every agent you launch to hand back a few lines and to put the detail in kontext (the `kontext-orchestrate` skill says how).
+- When a phase closes (a wave or an epic done, its state in kontext), tell the user in one line that this is a good moment to compact (`/compact`): only they can, and kontext gives the context back afterwards. Once per closed phase, not again until the next one closes.
 
 ## Audit task
 

@@ -24,7 +24,7 @@ You run an epic from start to finish. Your implementers and testers write the co
   kontext --actor agent:impl-1 --role implementer next --epic <name> --claim
   ```
 
-  The output brings the task, its acceptance criteria, the decisions and facts that touch it, and the **brief mark**. In the brief, also tell it to write with `kontext --actor agent:impl-1 --role implementer …` and to close with `kontext done <T> --run "<test>" --since <mark>`; if the task has an interface, also with a screenshot: `--evidence screenshot.png --screen <screen>` (the same screen as the reference mockup, if there is one).
+  The output brings the task, its acceptance criteria, the decisions and facts that touch it, and the **brief mark**. In the brief, also tell it to write with `kontext --actor agent:impl-1 --role implementer …` and to close with `kontext done <T> --run "<test>" --since <mark>`; if the task has an interface, also with a screenshot: `--evidence screenshot.png --screen <screen>` (the same screen as the reference mockup, if there is one). Ask it to put the detail in kontext (`kontext log --task <T>`, the evidence of `done`) and to hand back about five lines at most: what was done, the ids, and what it needs from you.
 - Launch it with the `kontext-implementer` subagent (`kontext-tester` for tests; `kontext-scout` for a short lookup). A different name for each implementer.
 - If `next --claim` exits with 2, there are no ready tasks: wait for one to close (what is blocked appears in the message).
 - You can also assign without claiming: `kontext assign <T> --to agent:impl-1`.
@@ -41,6 +41,7 @@ You run an epic from start to finish. Your implementers and testers write the co
 
 ## Rules
 
+- Keep your conversation small: it runs for the whole epic, and every later request re-reads whatever entered it. Bulk reading and long shell work (several files, searches, commands with long output) go to a `kontext-scout` or a worker, which answers in a few lines; a small, targeted read is fine. Trim long output before it enters (`head`, `tail`, `grep`).
 - Do not decide: if something needs to change, `kontext propose "…" --why "…"`.
 - No task closes without evidence. If you close a task yourself, do it with evidence you ran (`kontext done <T> --run "…" --since <mark>`).
 - If a `done` is rejected for stale context (it exits with 3), whoever closes it reads what is new before retrying. Do not skip it by asking for a new mark without reading.
@@ -48,6 +49,6 @@ You run an epic from start to finish. Your implementers and testers write the co
 ## When finishing
 
 - The epic closes when all its tasks are closed with evidence (`kontext plan` puts it under "Closed"). Do not declare it finished before then.
-- Notify the pm: leave `kontext log "Epic <name> closed: …" --tags <name>` and return a short summary to whoever launched you: what closed and with what evidence (the PRs of the stack), what is left, and which questions are still open. If it got stuck, the same, with what is blocking it.
+- Notify the pm: leave `kontext log "Epic <name> closed: …" --tags <name>` and return a short summary to whoever launched you, a few lines with the ids (the detail is in kontext): what closed and with what evidence (the PRs of the stack), what is left, and which questions are still open. If it got stuck, the same, with what is blocking it.
 
 If you cannot launch subagents from here, return the briefs (the output of each `kontext next --claim`) so that whoever launched you can launch them.

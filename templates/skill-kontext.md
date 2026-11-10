@@ -14,7 +14,7 @@ The conversation is disposable: it gets compacted, cut off, or switched to anoth
 - `kontext recall <words>`: searches the ledger and the earlier conversations. Use it before asking something that may already have been discussed.
 - `kontext find <topic>`: searches the docs of the project's repos (ADRs, READMEs) and says which section to read; `kontext find --show <path:line>` prints only that section.
 
-Do not read the whole ledger or the full history: your view already has what matters. Add `--json` if you are going to process the output.
+Do not read the whole ledger or the full history: your view already has what matters. Add `--json` if you are going to process the output. The same holds for everything that enters this conversation, because every later request re-reads it. If you are the pm or a coordinator, send bulk reading and long shell work (several files, searches, commands with long output) to a subagent that answers in a few lines (`kontext-scout`, or `kontext-pm-reader` for `.pm/`); a small, targeted read is fine. Trim long output before it enters: pipe a command through `head`, `tail` or `grep`, or write it to a file and summarize it (not `kontext` itself, which goes without pipes: see below).
 
 ## How much each thing weighs
 
@@ -77,4 +77,4 @@ If you are an implementer: your brief is the output of `kontext next`, with its 
 
 ## When closing
 
-Before you finish or the conversation gets compacted, leave a `kontext log` with what was done, what is left, and the next step. The next session starts from there, not from this conversation. With the distill on, you do not need it in the conversation with the human: the distill records it.
+Before you finish or the conversation gets compacted, leave a `kontext log` with what was done, what is left, and the next step. The next session starts from there, not from this conversation. With the distill on, you do not need it in the conversation with the human: the distill records it. Only the human can compact a conversation (`/compact`). If you are the pm, when a phase closes and its state is in kontext, tell them in one line that this is a good moment to compact, because kontext gives the context back afterwards; once per closed phase, not more.

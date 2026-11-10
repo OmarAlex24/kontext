@@ -120,6 +120,16 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "{skill}"
     );
     assert!(skill.lines().count() <= 80);
+    // The rules that keep the conversation the human talks to small (DESIGN §9.6).
+    for rule in [
+        "every later request re-reads it",
+        "send bulk reading and long shell work",
+        "Trim long output before it enters",
+        "good moment to compact",
+        "once per closed phase",
+    ] {
+        assert!(skill.contains(rule), "kontext skill: missing {rule:?}");
+    }
     // The orchestrate skill, next to it and in the same way.
     let orq = fs::read_to_string(r.join(".claude/skills/kontext-orchestrate/SKILL.md")).unwrap();
     assert!(
@@ -147,6 +157,10 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "kontext ask --to pm",
         "Shall I start?",
         "stale context",
+        "every later request re-reads",
+        "Do not do bulk reading or long shell work there",
+        "ask for a short hand-back",
+        "about five lines at most",
     ] {
         assert!(orq.contains(needed), "missing {needed:?}");
     }
@@ -183,9 +197,18 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "\n## Audit task\n",
         "\n## Value task\n",
         "{questions}",
+        "the sentence or sentences it replies to",
+        "## 9. Keep this conversation small",
+        "every later request re-reads",
+        "Bulk reading and long shell work go to a subagent",
+        "good moment to compact",
+        "Once per closed phase",
     ] {
         assert!(pm.contains(needed), "missing {needed:?}");
     }
+    // Those rules stay out of the task sections the reader benchmark measures.
+    let tasks = &pm[pm.find("\n## Audit task\n").unwrap()..];
+    assert!(!tasks.contains("compact"), "{tasks}");
     assert!(pm.lines().count() <= 150, "{} lines", pm.lines().count());
     assert_eq!(
         fs::read_to_string(r.join(".kontext.toml")).unwrap(),
@@ -379,6 +402,29 @@ fn installs_agent_files_and_keeps_edited_ones() {
         "{coord}"
     );
     assert!(coord.contains("kontext ask \"…\" --to pm"), "{coord}");
+    // Small conversations (DESIGN §9.6): the coordinator does no bulk reading
+    // and asks its workers for a short hand-back; the workers give one.
+    for rule in [
+        "Keep your conversation small",
+        "every later request re-reads",
+        "Bulk reading and long shell work",
+        "hand back about five lines at most",
+    ] {
+        assert!(coord.contains(rule), "coordinator: missing {rule:?}");
+    }
+    for name in ["kontext-implementer", "kontext-tester", "kontext-scout"] {
+        let text = fs::read_to_string(agents.join(format!("{name}.md"))).unwrap();
+        for rule in ["Hand back about five lines at most", "re-reads"] {
+            assert!(text.contains(rule), "{name}: missing {rule:?}");
+        }
+    }
+    for name in ["kontext-implementer", "kontext-tester"] {
+        let text = fs::read_to_string(agents.join(format!("{name}.md"))).unwrap();
+        assert!(
+            text.contains("Put the detail in kontext"),
+            "{name}: missing the detail rule"
+        );
+    }
     let skill = fs::read_to_string(r.join(".claude/skills/kontext/SKILL.md")).unwrap();
     assert!(
         skill.contains("kontext epic add") && skill.contains("kontext-coordinator"),

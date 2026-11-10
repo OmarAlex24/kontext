@@ -98,12 +98,14 @@ Do not depend on subagents that launch subagents. The coordinator lives where th
 | PM | `--role pm` | `kontext resume --as pm` | `kontext plan` and `kontext standup` at each boundary |
 | Coordinator | `--actor agent:epic:<x> --role coordinator` (and `KONTEXT_EPIC=<x>` in the environment you launch it with, for its hook) | `kontext brief <x>` | every task closed with evidence, the epic's PR stack, a `kontext log` with the summary, and its report to the PM |
 | Implementer or tester | `--actor agent:<x>-impl-1 --role implementer` | its brief: the output of `kontext next --epic <x> --claim` (with the mark) | `kontext done <T> --run "<test>" --since <mark>` |
-| Scout | `--actor agent:scout --role scout` | only the question | `kontext fact "…" --path <path>` and a report of 15 lines at most |
+| Scout | `--actor agent:scout --role scout` | only the question | `kontext fact "…" --path <path>` and a hand-back of about five lines |
 
 - The identity goes in the arguments of each command (`kontext --actor … --role … <command>`), not in variables in front: a `Bash(kontext:*)` permission does not cover `KONTEXT_ACTOR=… kontext …` (the `kontext` skill, "How to invoke kontext").
 - The coordinator takes each task on behalf of its worker (`kontext --actor agent:<x>-impl-1 --role implementer next --epic <x> --claim`) and pastes the full output into its brief.
 - Everyone escalates with `kontext ask` one level up (`--task <T>` for the worker, `--to pm` for the coordinator). Nobody decides: they propose.
 - Each epic comes out as its own PR stack, on its own branch or worktree.
+
+**Keep the PM's and the coordinators' conversations small.** They run longest, and every later request re-reads whatever entered them. Do not do bulk reading or long shell work there (several files, searches, commands with long output): give it to a scout, which answers in a few lines; a small, targeted read is fine. In every brief you write, ask for a short hand-back: the detail goes into kontext (`kontext log "…" --task <T>`, `kontext done <T> --run "…" --evidence …`, `kontext fact`), and the report back is about five lines at most: what was done, the ids, and what is needed from whoever launched it.
 
 ## 6. When something fails
 

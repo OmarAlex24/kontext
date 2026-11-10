@@ -338,6 +338,35 @@ pub fn said_date(file: &str) -> Option<String> {
     re.captures(file).map(|c| c[1].to_string())
 }
 
+/// The skill's marker of the quoted coordinator lines in a dump entry.
+pub const ASKED_MARKER: &str = "**Coordinator asked:**";
+/// The skill's marker of the user's own text in a dump entry.
+pub const USER_MARKER: &str = "**User:**";
+
+/// Whether line `i` (0-based) of a dump is the user's own text. An entry's
+/// header (`## <date> <HH:MM>`), its markers and the lines under
+/// `**Coordinator asked:**` (until `**User:**`) are not; a file without the
+/// skill's markers is all the user's, as before.
+fn users_own(lines: &[String], i: usize) -> bool {
+    static HEADER: OnceLock<Regex> = OnceLock::new();
+    let header =
+        HEADER.get_or_init(|| Regex::new(r"^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$").unwrap());
+    let marker = |l: &str| l.trim() == ASKED_MARKER || l.trim() == USER_MARKER;
+    let line = &lines[i];
+    if header.is_match(line) || marker(line) {
+        return false;
+    }
+    for l in lines[..i].iter().rev() {
+        if header.is_match(l) || l.trim() == USER_MARKER {
+            return true;
+        }
+        if l.trim() == ASKED_MARKER {
+            return false;
+        }
+    }
+    true
+}
+
 /// Reads the dumps once each.
 struct Dumps<'a> {
     pm: &'a Path,
@@ -345,7 +374,10 @@ struct Dumps<'a> {
 }
 
 impl Dumps<'_> {
-    fn quote(&mut self, src: &Source) -> Option<String> {
+    /// The cited line, when it is the user's own text. A line the coordinator
+    /// said (quoted under `**Coordinator asked:**`) or a marker is never shown
+    /// as the user's words: no quote, and a note.
+    fn quote(&mut self, src: &Source, notes: &mut Vec<String>) -> Option<String> {
         let n = src.line?;
         let pm = self.pm;
         let lines = self.files.entry(src.file.clone()).or_insert_with(|| {
@@ -361,7 +393,16 @@ impl Dumps<'_> {
                 .ok()
                 .map(|t| t.lines().map(str::to_string).collect())
         });
-        let line = lines.as_ref()?.get(n.checked_sub(1)?)?;
+        let lines = lines.as_ref()?;
+        let i = n.checked_sub(1)?;
+        let line = lines.get(i)?;
+        if !users_own(lines, i) {
+            notes.push(format!(
+                "{}:{n} is not the user's own text (a marker or a line the coordinator said): not quoted",
+                src.file
+            ));
+            return None;
+        }
         let q = one_line(line, QUOTE_MAX);
         (!q.is_empty()).then_some(q)
     }
@@ -537,9 +578,9 @@ fn idea(
 ) -> Idea {
     let source = parse_source(&row.source);
     let said = source.as_ref().and_then(|s| said_date(&s.file));
-    let quote = source.as_ref().and_then(|s| dumps.quote(s));
-    let evidence = parse_evidence(&row.evidence);
     let mut notes = Vec::new();
+    let quote = source.as_ref().and_then(|s| dumps.quote(s, &mut notes));
+    let evidence = parse_evidence(&row.evidence);
     // The entries cited in `where` and in `evidence`, once each.
     let mut refs: Vec<Reference> = Vec::new();
     let mut entries: Vec<&Entry> = Vec::new();
@@ -1056,6 +1097,63 @@ mod tests {
         assert_eq!(&q[2..], &[None, None, None, None]);
         assert_eq!(ideas.ideas[0].said.as_deref(), Some("2026-11-07"));
         assert_eq!(ideas.ideas[3].said.as_deref(), Some("2026-01-01"));
+    }
+
+    #[test]
+    fn coordinator_lines_are_never_quoted_as_the_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let pm = &dir.path().join("pm");
+        fs::create_dir_all(pm.join("dumps")).unwrap();
+        // Lines: 1 header, 3 asked marker, 5-6 the coordinator's, 8 user
+        // marker, 10 the user's, 12 a `> ` the user typed, 14 the next header,
+        // 16 user marker, 18 the user's.
+        fs::write(
+            pm.join("dumps/2026-11-07.md"),
+            "## 2026-11-07 10:42\n\n**Coordinator asked:**\n\n\
+             > Say go and I merge the PDF export\n> and drop the old one.\n\n\
+             **User:**\n\ngo, and add paging\n\n> quoting the old spec: 30 per page\n\n\
+             ## 2026-11-07 11:00\n\n**User:**\n\nkeep 50 per page\n",
+        )
+        .unwrap();
+        let rows: String = [1, 3, 5, 6, 8, 10, 12, 14, 18]
+            .iter()
+            .map(|n| format!("| P{n} | x | dumps/2026-11-07.md:{n} | pending | | |\n"))
+            .collect();
+        let md = format!(
+            "| id | idea | source | state | where | evidence |\n|---|---|---|---|---|---|\n{rows}"
+        );
+        let ideas = build(&state(), "demo", &[], pm, &md);
+        let q: Vec<(&str, Option<&str>)> = ideas
+            .ideas
+            .iter()
+            .map(|i| (i.id.as_str(), i.quote.as_deref()))
+            .collect();
+        assert_eq!(
+            q,
+            vec![
+                ("P1", None),
+                ("P3", None),
+                ("P5", None),
+                ("P6", None),
+                ("P8", None),
+                ("P10", Some("go, and add paging")),
+                ("P12", Some("> quoting the old spec: 30 per page")),
+                ("P14", None),
+                ("P18", Some("keep 50 per page")),
+            ]
+        );
+        let p5 = &ideas.ideas[2];
+        assert_eq!(
+            p5.notes,
+            vec![
+                "dumps/2026-11-07.md:5 is not the user's own text (a marker or a line the coordinator said): not quoted"
+            ]
+        );
+        assert!(ideas.ideas[5].notes.is_empty());
+        // The text view and the JSON never carry the coordinator's line as a quote.
+        assert!(!text(&ideas).contains("Say go"));
+        let json = serde_json::to_string(&ideas).unwrap();
+        assert!(!json.contains("Say go"), "{json}");
     }
 
     #[test]

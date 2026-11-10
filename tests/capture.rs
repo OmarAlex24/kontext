@@ -241,19 +241,26 @@ fn a_typed_prompt_lands_in_the_dump_with_the_question_it_answers() {
          **User:**\n\n1. drop it\n2. merge them yourself\n"
     );
 
-    // The last assistant text has no question: no block.
+    // The last assistant text has no question: its last paragraph.
     c.add(&[
         user_line("1. drop it\n2. merge them yourself", "2026-11-07T01:45:00Z"),
-        assistant_line("Done, both merged.", "m-2", "2026-11-07T01:46:00Z"),
+        assistant_line(
+            "Both merged.\n\nSay go and I start the PDF export.",
+            "m-2",
+            "2026-11-07T01:46:00Z",
+        ),
     ]);
-    c.prompt_at("2026-11-07T01:47:00Z", "thanks, next the PDF", "p-3");
+    c.prompt_at("2026-11-07T01:47:00Z", "go", "p-3");
     let d = c.dump("2026-11-07.md");
     assert!(
-        d.ends_with("\n\n## 2026-11-07 10:47\n\n**User:**\n\nthanks, next the PDF\n"),
+        d.ends_with(
+            "\n\n## 2026-11-07 10:47\n\n**Coordinator asked:**\n\n\
+             > Say go and I start the PDF export.\n\n**User:**\n\ngo\n"
+        ),
         "{d}"
     );
     // The same prompt_id again (a retried hook) is not written twice.
-    c.prompt_at("2026-11-07T01:47:00Z", "thanks, next the PDF", "p-3");
+    c.prompt_at("2026-11-07T01:47:00Z", "go", "p-3");
     assert_eq!(c.dump("2026-11-07.md"), d);
 
     let log = c.log();
@@ -261,9 +268,68 @@ fn a_typed_prompt_lands_in_the_dump_with_the_question_it_answers() {
     assert!(log.contains("capture: wrote 1 entry"), "{log}");
     assert!(log.contains(".pm/dumps/2026-11-07.md"), "{log}");
     assert!(log.contains("the prompt was already written"), "{log}");
-    for secret_word in ["CSV", "invoices", "merge", "PDF", "keep the old", "drop it"] {
+    for secret_word in [
+        "CSV",
+        "invoices",
+        "merge",
+        "PDF",
+        "keep the old",
+        "drop it",
+        "Say go",
+    ] {
         assert!(!log.contains(secret_word), "{secret_word} in {log}");
     }
+}
+
+#[test]
+fn a_reply_without_a_question_keeps_the_paragraph_it_replies_to() {
+    let c = cap();
+    // A message that ends in a code block: the paragraph before it.
+    c.add(&[assistant_line(
+        "The paging is done.\n\nSay go and I apply this to staging:\n\n```toml\n[paging]\nsize = 50\n```",
+        "m-1",
+        "2026-11-07T01:40:00Z",
+    )]);
+    c.prompt("go", "p-1");
+    assert_eq!(
+        c.dump("2026-11-07.md"),
+        "## 2026-11-07 10:42\n\n**Coordinator asked:**\n\n\
+         > Say go and I apply this to staging:\n\n**User:**\n\ngo\n"
+    );
+
+    // A trailing heading is skipped; a secret in the paragraph is removed.
+    let c = cap();
+    c.add(&[assistant_line(
+        "Staging is ready.\n\nI will deploy with token=ghp_abcdefghijklmnopqrstuvwxyz0123\nonce you approve.\n\n## Next",
+        "m-1",
+        "2026-11-07T01:40:00Z",
+    )]);
+    c.prompt("approved", "p-1");
+    let d = c.dump("2026-11-07.md");
+    assert!(
+        d.contains(
+            "**Coordinator asked:**\n\n> I will deploy with token=[secret removed]\n> once you approve.\n\n**User:**\n\napproved\n"
+        ),
+        "{d}"
+    );
+    assert!(
+        !d.contains("ghp_") && !d.contains("## Next") && !d.contains("Staging"),
+        "{d}"
+    );
+
+    // Only a code block and a rule: no block.
+    let c = cap();
+    c.add(&[assistant_line(
+        "```\ncargo test\n```\n\n---",
+        "m-1",
+        "2026-11-07T01:40:00Z",
+    )]);
+    c.prompt("ok", "p-1");
+    assert_eq!(
+        c.dump("2026-11-07.md"),
+        "## 2026-11-07 10:42\n\n**User:**\n\nok\n"
+    );
+    assert!(!c.log().contains("cargo"), "{}", c.log());
 }
 
 #[test]

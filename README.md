@@ -211,6 +211,8 @@ With `[capture] enabled = true` in `project.toml` (off by default), `kontext ins
 
 `kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. It also writes `kontext-pm-reader.md`, the reader of the PM's memory (below, "The PM's memory of your ideas"), the one that sets its model: `haiku`. If one already exists with different content (you changed it by hand), it is kept and you are warned; `kontext install --force` replaces it.
 
+The skills and agent files also keep the conversation you talk to small, since every request re-reads it: bulk reading goes to a subagent, delegated agents hand back about five lines and put the detail in kontext, long output is trimmed, and at the end of a phase the PM tells you it is a good moment to `/compact`. These are instructions, not yet measured ([DESIGN.md §9.6](./DESIGN.md)).
+
 ### Team flow
 
 ```sh
@@ -280,7 +282,7 @@ The agent files follow the wave protocol: the coordinator doesn't talk to the us
 
 Over days of work you say many things to the session that coordinates (the PM), some in passing, many as short answers to its questions. The skill `kontext-pm` keeps them so none is silently lost, in a `.pm/` folder at the root of the repo:
 
-- `dumps/<date>.md`: what you said, verbatim and append-only (a long day goes on in `<date>-2.md`, `-3`…, so each file can be read whole). An answer is saved with the questions it answers (`**Coordinator asked:**`), so "2. merge it yourself" still means something a week later. Secrets become `[secret removed]`; nothing else is changed.
+- `dumps/<date>.md`: what you said, verbatim and append-only (a long day goes on in `<date>-2.md`, `-3`…, so each file can be read whole). An answer is saved with the questions it answers, or the proposal it replies to (`**Coordinator asked:**`), so "2. merge it yourself" or "go" still means something a week later. Secrets become `[secret removed]`; nothing else is changed.
 - `items.md`: one row per idea, with where it went (the kontext task, decision, PR or doc) and its evidence. It points at the work; the plans and tasks stay in kontext.
 - `status.md`: where things stand, short. `shots/`: screenshots used as evidence.
 
@@ -298,7 +300,7 @@ enabled = true                          # off by default; run `kontext install` 
 # worktrees = false                     # true: also in linked git worktrees (their own .pm/)
 ```
 
-- Each message you type to the PM session goes into today's dump (`.pm/dumps/<YYYY-MM-DD>.md`, local date, `-2`, `-3`… past 60 KB) the moment you send it, in the skill's format, with the lines of the coordinator's last message that ask something (those with `?`, the last 20 within 2,000 characters) under `**Coordinator asked:**`. Answers you give through the question tool (`AskUserQuestion`) are added at the end of the turn, numbered with their questions.
+- Each message you type to the PM session goes into today's dump (`.pm/dumps/<YYYY-MM-DD>.md`, local date, `-2`, `-3`… past 60 KB) the moment you send it, in the skill's format, with the lines of the coordinator's last message that ask something (those with `?`, the last 20 within 2,000 characters) under `**Coordinator asked:**`. If that message asked nothing with a question mark ("Say go and I merge it"), its last paragraph goes there instead (code blocks, a trailing heading or rule skipped; at most 600 characters, whole lines from the end), so a "go" still says what it approved. `kontext ideas` and the report never show those quoted lines as your words. Answers you give through the question tool (`AskUserQuestion`) are added at the end of the turn, numbered with their questions.
 - Only the `pm` role, never a subagent. Machine text is skipped: task notifications, system reminders, cross-session and agent messages, local command output and its caveat, `[Request interrupted by user`, delegate reports (`Delegated task node:`) and pull-request updates (`Update on pull request #`) that a harness posts as user turns, a bare slash command, an empty prompt, and whatever starts with a prefix in `skip_prefixes`. When in doubt it is written; `hooks.log` says which rule skipped a prompt, never its text.
 - Nothing said before capture was on is written. Secrets become `[secret removed]`: those the distill removes, plus, for the capture only, vendor-prefixed tokens (`abc_` and 20 or more letters and digits with a digit) and UUIDs (`abc_<uuid>`), 32-character hex strings with a letter and a digit (not a 40-character git SHA or a 64-character hash) and Slack tokens (`xoxb-…`). When it creates `.pm/dumps/` it also writes `.pm/.gitignore` with `dumps/`, if there is none; it never touches the repo's `.gitignore`.
 - The PM no longer appends what the hook wrote: it checks today's dump with one Grep and appends a message only if it is not there.

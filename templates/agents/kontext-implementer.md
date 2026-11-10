@@ -35,4 +35,4 @@ Your brief brings the task, its acceptance criteria, the decisions and facts tha
 
 ## When finishing
 
-Return a short report to whoever launched you: what you did, with what evidence you closed, and what is left pending.
+Put the detail in kontext (`kontext log "…" --task <T>`, the evidence of `kontext done`), not in your report: whoever launched you re-reads that report on every later request. Hand back about five lines at most: what you did, the ids (the task, the PR, any question you asked), and what you need from your coordinator, if anything.
