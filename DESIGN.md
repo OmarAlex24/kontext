@@ -353,6 +353,8 @@ A hook never blocks the session: on any error it exits with 0 and logs it in `.k
 
 > **Implemented with the capture hook (§12.3):** with `[capture] enabled = true`, `kontext install` also adds `UserPromptSubmit` → `kontext hook user-prompt-submit` and `Stop` → `kontext hook stop`, and `SessionEnd` → `kontext hook session-end` if the distill did not already add it: one entry, which then does both jobs, each only if it is on. As with the distill's hooks, turning the setting off later does not remove them (`install` never removed the distill's either): each run checks the setting and does nothing.
 
+> **Implemented with `kontext doctor`:** the hooks record the absolute path of the binary that ran `install`, so a hook installed from `target/debug/kontext` dies silently when `target/` is cleaned. `kontext install` prints a note when the running binary is in a cargo build directory (`target/debug` or `target/release`), in a dry run too; it does not refuse and the exit code does not change. `kontext doctor` (§10) finds it afterwards, with the hooks that point at a missing binary.
+
 ### 9.4 The start hook on a `resume`
 
 Claude Code runs the `SessionStart` hook on every `claude --resume`, not only when the session opens, and what it puts in each time stays in the conversation. In the long-memory benchmark each turn was a separate `claude -p --resume`: a one-day session carried 8 nearly identical copies of the `resume` (about 3 thousand tokens each), and each call read them again from the cache.
@@ -383,7 +385,7 @@ If a change needs to break this, it is discussed first and measured.
 
 ### 9.6 Keeping the main conversation small
 
-§9.5 keeps the prefix valid; it does not keep it short. Measured on a real long project conversation (the session a human talks to, 8 days, one model): 3,939 requests, each re-reading on average 208 thousand tokens of history, and re-reading that history was the largest part of its cost. By characters, the history was 60 % tool results (file reads, shell output, thread reads), 21 % tool calls, 8 % reports handed back by delegated agents, 7 % the coordinator's own text and 0.2 % what the human typed.
+§9.5 keeps the prefix valid; it does not keep it short. Measured on a real long project conversation (the session a human talks to, 8 days, one model): 3,939 requests, each re-reading on average 208 thousand tokens of history, and re-reading that history was the largest part of its cost. By characters, as `kontext measure` counts them, the history was 46 % tool results (mostly shell output and thread reads; images and other non-text blocks are not counted), 28 % tool calls, 11 % reports handed back by delegated agents, 9 % the coordinator's own text and 0.2 % what the human typed.
 
 So the installed texts carry four rules, each where its reader is:
 - **No bulk reading in the long conversations.** The PM and the coordinator send reading several files, searching, or commands with long output to a subagent (the scout, or `kontext-pm-reader` for `.pm/`) that answers in a few lines; small, targeted reads are fine (`kontext`, `kontext-pm`, `kontext-orchestrate`, `kontext-coordinator`).
@@ -391,7 +393,7 @@ So the installed texts carry four rules, each where its reader is:
 - **Trim output before it enters:** long command output goes through `head`, `tail` or `grep`, or to a file that is summarized (`kontext`; `kontext` itself still goes without pipes, §12).
 - **Compact at the end of a phase.** An agent cannot compact its own conversation; only the human can (`/compact`). When a phase closes and its state is in kontext, the PM says once, in one line, that it is a good moment to compact, since kontext gives the context back afterwards (`kontext`, `kontext-pm`).
 
-These are instructions to agents, not mechanisms: nothing enforces them, and no run has measured what they save. The first measurement will be a real project used with them for a week.
+These are instructions to agents, not mechanisms: nothing enforces them, and no run has measured what they save. The first measurement will be a real project used with them for a week. `kontext measure` (§10) is the tool for that comparison: the same numbers from the transcripts before and after, each cut to its time window.
 
 ## 10. Commands
 
@@ -420,6 +422,8 @@ These are instructions to agents, not mechanisms: nothing enforces them, and no 
 | `kontext inbox [count\|sign\|answer\|dismiss\|confirm]` / `kontext inbox --everyone` / `kontext report [--html]` | human | The human's inbox, everyone's inbox and the report (§20) |
 | `kontext ideas` | human | The user's ideas in `.pm/items.md` and the state of each one, from the ledger (§12.3) |
 | `kontext hook <event>` | 2 | Entry point for the hooks |
+| `kontext doctor` | install | Checks an installation (binary, `PATH`, config, kontext-home, hooks, capture, skills, hook log) and says what fixes each problem. Writes nothing |
+| `kontext measure <transcript>…` | cost | Numbers about Claude Code conversations from their transcripts (§9.6). Needs no project |
 
 All read commands accept `--json` for the agents.
 
@@ -446,6 +450,10 @@ All read commands accept `--json` for the agents.
 > - It listens on loopback by default. With loopback, a request whose `Host` is not `127.0.0.1`, `localhost` or `[::1]` with the page's port gets a 403 (against DNS rebinding). Another address only with `--host`, with a warning on stderr. The response carries a `Content-Security-Policy` with no external origins; the page doesn't cite any external URL (a test checks it).
 > - The page queries `/api/state` every 5 s and only redraws if the response changed; the open detail and the earlier pages already loaded are kept. All ledger text goes in with `textContent`.
 > - `examples/demo.sh [folder]` builds a realistic sample project (with `KONTEXT_NOW` to spread it over three days and its own `KONTEXT_CONFIG_DIR`) and the `kontext ui` tests run against it.
+
+> **Implemented with `doctor` and `measure`:**
+> - `kontext doctor [--json]` exists to diagnose a broken setup, so it does not start with "open the project or fail": each check runs on its own, all are reported, each finding is `ok`, `note` or `problem` (with the command or action that fixes it), and it exits with 1 if there is any problem. It writes nothing: it does not open the `Store` (that creates the SQLite index) nor take locks, it reads the chains with the same verifier as `kontext verify`, what is not committed or pushed with the same code as `kontext status` (`git rev-parse`, `remote`, `symbolic-ref` and `show`, which do not touch the git index), and the skills and agent files with `install`'s plan, without applying it. A test snapshots every file of the config, the kontext-home and the code repo before and after a run, healthy and broken. The hooks are read from the repo's `.claude/settings.json` and `settings.local.json` and from the user's settings, each binary's full path unquoted (the inverse of `install`'s quoting); a problem if one is missing, if they point at different binaries, if one is in a cargo build directory, if there is no `SessionStart` hook, if `PATH` resolves `kontext` to another file, or if the capture is on without its hooks. The hook log is `<RFC 3339 time> <what happened>`, and an error line says `error: `; doctor counts them and gives the time of the last.
+> - `kontext measure <transcript>… [--since] [--until] [--json]` reads the transcripts a line at a time, without a project or kontext configuration, and prints counts, sizes, tool names and `kontext` subcommand names only, never text, file contents or arguments. The rules (requests by distinct `message.id` with the last usage, sidechains skipped, how each part of the history is counted, how a `kontext` command is recognized, the time window) are in the README, "Measuring conversations". The machine-text rule is the capture hook's (§12.3), so "typed by the human" counts what the capture would write; the `kontext` subcommands come from the CLI definition (clap). No prices.
 
 ## 11. Configuration
 

@@ -342,6 +342,15 @@ pub fn read_lines_from(path: &Path, offset: u64) -> Result<Vec<(u64, Option<Valu
 /// Only the `text` blocks of a record's message (or its string content),
 /// without `<system-reminder>`: no tools, no reasoning. Empty if it has none.
 pub fn text_blocks(rec: &Value) -> String {
+    SYSREM
+        .replace_all(&raw_text_blocks(rec), "")
+        .trim()
+        .to_string()
+}
+
+/// Like [`text_blocks`], as written: `<system-reminder>` and surrounding
+/// whitespace kept (`kontext measure` counts what fills the history).
+pub(crate) fn raw_text_blocks(rec: &Value) -> String {
     let parts: Vec<String> = match rec.get("message").and_then(|m| m.get("content")) {
         Some(Value::String(s)) => vec![s.clone()],
         Some(Value::Array(blocks)) => blocks
@@ -352,7 +361,7 @@ pub fn text_blocks(rec: &Value) -> String {
             .collect(),
         _ => Vec::new(),
     };
-    SYSREM.replace_all(&parts.join("\n"), "").trim().to_string()
+    parts.join("\n")
 }
 
 /// Is a record's flag (`isSidechain`, `isMeta`…) set?

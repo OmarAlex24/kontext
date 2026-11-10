@@ -548,15 +548,46 @@ pub fn resolve_project(flag: Option<&str>) -> Result<Resolved> {
 pub fn resolve_project_in(flag: Option<&str>, dir: &Path) -> Result<Resolved> {
     let machine = Machine::load()?;
     let writer = machine.writer()?;
+    let (name, _) = choose_project(flag, dir, &machine)?;
+    let home = machine.project_home(&name)?;
+    Project::load(&home)?;
+    Ok(Resolved { name, home, writer })
+}
+
+/// Where the name of the project came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectSource {
+    /// `--project`.
+    Flag,
+    /// `$KONTEXT_PROJECT`.
+    Env,
+    /// The `.kontext.toml` at this path.
+    Link(PathBuf),
+    /// The only project registered.
+    OnlyOne,
+}
+
+/// The name of the project to use and where it came from, in the order of
+/// [`resolve_project`], without checking that it is registered.
+pub fn choose_project(
+    flag: Option<&str>,
+    dir: &Path,
+    machine: &Machine,
+) -> Result<(String, ProjectSource)> {
     let env = std::env::var("KONTEXT_PROJECT")
         .ok()
         .filter(|s| !s.is_empty());
-    let name = if let Some(n) = flag.map(str::to_string).or(env) {
-        n
-    } else if let Some((_, link)) = find_repo_link(dir)? {
-        link.project
+    Ok(if let Some(n) = flag {
+        (n.to_string(), ProjectSource::Flag)
+    } else if let Some(n) = env {
+        (n, ProjectSource::Env)
+    } else if let Some((path, link)) = find_repo_link(dir)? {
+        (link.project, ProjectSource::Link(path))
     } else if machine.projects.len() == 1 {
-        machine.projects.keys().next().unwrap().clone()
+        (
+            machine.projects.keys().next().unwrap().clone(),
+            ProjectSource::OnlyOne,
+        )
     } else if machine.projects.is_empty() {
         bail!(
             "no projects are registered in {}. Create one with `kontext init <name>`",
@@ -569,10 +600,7 @@ pub fn resolve_project_in(flag: Option<&str>, dir: &Path) -> Result<Resolved> {
              the KONTEXT_PROJECT variable, or a .kontext.toml with project = \"<name>\" in the repo",
             names.join(", ")
         );
-    };
-    let home = machine.project_home(&name)?;
-    Project::load(&home)?;
-    Ok(Resolved { name, home, writer })
+    })
 }
 
 /// Writes a file in one go (temporary file and `rename`).

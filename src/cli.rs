@@ -2,7 +2,8 @@
 //! debugging commands (`debug append`, `debug claim`, `debug state`). Phase 2:
 //! charter, goals, sign, decisions, questions, log, views, `recall`, `hook` and
 //! `install`. Phase 3: epics, tasks, `assign`, `release`, `reopen`, `next`,
-//! `brief`, `done` and `fact`.
+//! `brief`, `done` and `fact`. Outside the phases: `doctor` and `measure`, which
+//! never open the project (see their modules).
 //!
 //! Exit codes: 0 ok, 1 error, 2 refused (nothing was written because a rule
 //! isn't met), 3 stale context in `done`.
@@ -598,6 +599,22 @@ pub enum Cmd {
         #[arg(long, requires = "skills_only")]
         global: bool,
     },
+    /// Checks this installation: the binary, PATH, config and project, kontext-home, hooks,
+    /// capture, skills and the hook log. Writes nothing; exits with 1 if anything is a problem
+    Doctor,
+    /// Numbers about Claude Code conversations from their transcripts: requests, tokens, what
+    /// fills the history, tools and kontext commands. Never prints their text; needs no project
+    Measure {
+        /// Transcript files (.jsonl)
+        #[arg(required = true, value_name = "TRANSCRIPT")]
+        transcripts: Vec<PathBuf>,
+        /// Only lines from this moment on (RFC 3339, inclusive)
+        #[arg(long, value_name = "RFC3339")]
+        since: Option<String>,
+        /// Only lines up to this moment (RFC 3339, inclusive)
+        #[arg(long, value_name = "RFC3339")]
+        until: Option<String>,
+    },
     #[command(hide = true)]
     Debug {
         #[command(subcommand)]
@@ -686,6 +703,21 @@ fn exe_quoted() -> Result<String> {
     Ok(install::shell_quote(&exe.display().to_string()))
 }
 
+/// For `kontext install`: if this binary is in a cargo build directory, the
+/// hooks record a path that `cargo clean` deletes. A note, never a refusal.
+fn build_dir_note() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = fs::canonicalize(&exe).unwrap_or(exe);
+    let checkout = install::cargo_build_checkout(&exe)?;
+    Some(format!(
+        "Note: this kontext is {}, in a cargo build directory: the hooks point at a file that \
+         `cargo clean` deletes. Install it with `cargo install --path {} --locked` and run \
+         `kontext install` again with the installed binary. `kontext doctor` checks it.",
+        exe.display(),
+        checkout.display()
+    ))
+}
+
 fn open(project: Option<&str>) -> Result<Store> {
     let p = config::resolve_project(project)?;
     let mut store = Store::open(&p.home, &p.writer)?;
@@ -715,6 +747,35 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         sign: cli.sign,
     };
     match cli.cmd {
+        // Neither opens the project: `doctor` diagnoses a broken setup, and
+        // `measure` needs no kontext configuration at all.
+        Cmd::Doctor => {
+            let r = crate::doctor::run(project);
+            if cx.json {
+                print_json(&r.json())?;
+            } else {
+                print!("{}", r.text());
+            }
+            Ok(if r.problems() > 0 {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
+        Cmd::Measure {
+            transcripts,
+            since,
+            until,
+        } => {
+            let window = crate::measure::Window::parse(since.as_deref(), until.as_deref())?;
+            let m = crate::measure::measure(&transcripts, window)?;
+            if cx.json {
+                print_json(&m.json())?;
+            } else {
+                print!("{}", m.text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Hook { event } => {
             // By hand, in a terminal, there is no JSON on stdin: don't wait for it.
             use std::io::IsTerminal;
@@ -1965,6 +2026,14 @@ impl Ctx<'_> {
     }
 
     fn install(&self, dry_run: bool, force: bool, role: &str) -> Result<ExitCode> {
+        let code = self.install_inner(dry_run, force, role)?;
+        if let Some(note) = build_dir_note() {
+            println!("{note}");
+        }
+        Ok(code)
+    }
+
+    fn install_inner(&self, dry_run: bool, force: bool, role: &str) -> Result<ExitCode> {
         let resolved = config::resolve_project(self.project)?;
         let repo = install::repo_root(&std::env::current_dir()?);
         if repo == resolved.home {

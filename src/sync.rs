@@ -110,7 +110,7 @@ fn has_rev(home: &Path, rev: &str) -> bool {
 }
 
 /// Is `home` the root of a git repo?
-fn is_repo_root(home: &Path) -> bool {
+pub fn is_repo_root(home: &Path) -> bool {
     let Some(top) = git_try(home, &["rev-parse", "--show-toplevel"]) else {
         return false;
     };
@@ -512,24 +512,34 @@ pub struct Status {
     pub signing_key: Option<String>,
 }
 
-pub fn status(store: &mut Store, project: &Project) -> Result<Status> {
-    let home = store.home().to_path_buf();
-    let writer = store.writer().to_string();
-    let cu = store.index().catch_up()?;
-    let local = read_tail(&store.writer_file()).map(|t| t.0).unwrap_or(0);
-    let repo = is_repo_root(&home);
-    let remote = if repo { remote_name(&home) } else { None };
-    let branch = if repo { branch(&home) } else { None };
-    let committed = if repo && has_rev(&home, "HEAD") {
-        lines_at(&home, "HEAD", &writer)
+/// The writer's own entries not committed yet and, with a remote, not pushed
+/// (according to the last fetch). Read-only: `git rev-parse`, `remote`,
+/// `symbolic-ref` and `show`, and the tail of the writer's file.
+#[derive(Debug, Clone, Default)]
+pub struct Pending {
+    pub repo: bool,
+    pub remote: Option<String>,
+    pub branch: Option<String>,
+    pub uncommitted: u64,
+    pub unpushed: Option<u64>,
+}
+
+pub fn pending(home: &Path, writer: &str) -> Pending {
+    let file = home.join("ledger").join(format!("{writer}.jsonl"));
+    let local = read_tail(&file).map(|t| t.0).unwrap_or(0);
+    let repo = is_repo_root(home);
+    let remote = if repo { remote_name(home) } else { None };
+    let branch = if repo { branch(home) } else { None };
+    let committed = if repo && has_rev(home, "HEAD") {
+        lines_at(home, "HEAD", writer)
     } else {
         0
     };
     let unpushed = match (&remote, &branch) {
         (Some(r), Some(b)) => {
             let rref = format!("refs/remotes/{r}/{b}");
-            let there = if has_rev(&home, &rref) {
-                lines_at(&home, &rref, &writer)
+            let there = if has_rev(home, &rref) {
+                lines_at(home, &rref, writer)
             } else {
                 0
             };
@@ -537,6 +547,26 @@ pub fn status(store: &mut Store, project: &Project) -> Result<Status> {
         }
         _ => None,
     };
+    Pending {
+        repo,
+        remote,
+        branch,
+        uncommitted: local.saturating_sub(committed),
+        unpushed,
+    }
+}
+
+pub fn status(store: &mut Store, project: &Project) -> Result<Status> {
+    let home = store.home().to_path_buf();
+    let writer = store.writer().to_string();
+    let cu = store.index().catch_up()?;
+    let Pending {
+        remote,
+        branch,
+        uncommitted,
+        unpushed,
+        ..
+    } = pending(&home, &writer);
     let report = verify::run(&home)?;
     let st = store.state()?;
     let machine = Machine::load()?;
@@ -550,7 +580,7 @@ pub fn status(store: &mut Store, project: &Project) -> Result<Status> {
         remote,
         branch,
         last_sync: last_sync(&home),
-        uncommitted: local.saturating_sub(committed),
+        uncommitted,
         unpushed,
         index_entries: store.index().count()?,
         index_caught_up: cu.entries,

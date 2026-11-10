@@ -282,7 +282,7 @@ fn main_assistant(rec: &Value) -> bool {
             != Some("<synthetic>")
 }
 
-fn message_id(rec: &Value) -> Option<&str> {
+pub(crate) fn message_id(rec: &Value) -> Option<&str> {
     rec.get("message")
         .and_then(|m| m.get("id"))
         .and_then(Value::as_str)
