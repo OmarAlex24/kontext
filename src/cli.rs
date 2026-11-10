@@ -2094,8 +2094,9 @@ impl Ctx<'_> {
         let linked = matches!(crate::git::checkout(&repo), Some((_, true)));
         if linked && how.worktree_role.is_some() {
             bail!(
-                "{} is a linked git worktree: worktree_role is read from the main checkout's \
-                 .kontext.toml; run this there",
+                "{} is a linked git worktree: worktree_role is set in the main checkout's \
+                 .kontext.toml (a tracked one reaches the worktrees once it is committed); run \
+                 this there",
                 repo.display()
             );
         }
