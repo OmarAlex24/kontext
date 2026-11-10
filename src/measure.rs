@@ -932,6 +932,11 @@ mod tests {
         );
         assert_eq!(c("Update on pull request #12"), Category::PrUpdates);
         assert_eq!(c("<task-notification>x"), Category::OtherMachineText);
+        // Another session's message, in Claude Code's wrapper: not the human's.
+        assert_eq!(
+            c("Another Claude session sent a message: the invoices export is merged"),
+            Category::OtherMachineText
+        );
         assert_eq!(c("/clear"), Category::OtherMachineText);
         assert_eq!(user_text_category("go", true), Category::OtherMachineText);
     }

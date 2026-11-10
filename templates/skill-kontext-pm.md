@@ -45,6 +45,8 @@ Append each user message that carries ideas, decisions or answers to today's dum
 
 One writer per message. When kontext's capture hook is on, kontext appends each user message to today's dump by itself, in this same format, before you see it: do not append it again. Check with one Grep of today's dump for a piece of the message, and append it yourself only if it is not there (the hook is off, or it skipped the message). Answers given through a question tool reach the dump at the end of the turn; if you need to cite one before that, append it yourself in this format.
 
+If this is the conversation the human types into, name it once with `kontext capture here`: once any conversation is named, the hook captures only named ones, so a coordinator sharing your folder does not get into the dumps. A conversation that gets its messages from other agents never names itself. If the Grep shows the hook did not write a message, append it yourself as above and check `kontext doctor`: the conversation's id changes on `/clear`, and it has to be named again.
+
 In a linked git worktree, `.pm/` is the main checkout's, not the worktree's: run `kontext doctor` once and use the path on its `.pm/ here:` line (under Capture) wherever this skill says `.pm/`, and put it in one line before the task text you give `kontext-pm-reader`. If doctor says this checkout captures, the hook saves each message: do not save the dumps by hand. If it says the worktree is not marked as the PM's, tell the user its fix.
 
 ## 3. Confirm

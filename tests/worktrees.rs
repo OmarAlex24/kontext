@@ -61,7 +61,8 @@ impl W {
             .env_remove("KONTEXT_ROLE")
             .env_remove("KONTEXT_EPIC")
             .env_remove("KONTEXT_CAPTURE_DISABLE")
-            .env_remove("KONTEXT_NOW");
+            .env_remove("KONTEXT_NOW")
+            .env_remove("CLAUDE_CODE_SESSION_ID");
         c
     }
 

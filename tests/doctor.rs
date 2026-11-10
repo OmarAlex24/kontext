@@ -64,7 +64,8 @@ impl Setup {
             .env_remove("KONTEXT_PROJECT")
             .env_remove("KONTEXT_ACTOR")
             .env_remove("KONTEXT_ROLE")
-            .env_remove("KONTEXT_EPIC");
+            .env_remove("KONTEXT_EPIC")
+            .env_remove("CLAUDE_CODE_SESSION_ID");
         c
     }
 

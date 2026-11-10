@@ -15,6 +15,12 @@
 //!   only one marked as the PM's ([`marked`]), into the main checkout's
 //!   `.pm/`, or any one into its own with `[capture] worktrees = true`
 //!   ([`target`]).
+//! - Named conversations ([`named`]): when at least one `session_id` is named
+//!   for the project on this machine (`kontext capture here`), only those are
+//!   captured, on top of the rules above; with none named, every one that
+//!   passes them. Two conversations in one checkout (the PM's and a
+//!   coordinator's) have the same role and folder: only the id tells them
+//!   apart. The list is `.kontext/capture-sessions.json`, local.
 //! - The state (per transcript: how far it was scanned, when it was first
 //!   seen, the ids already written) lives in `.kontext/capture/`, local, under
 //!   `.kontext/capture.lock`. The first time a transcript is seen it starts at
@@ -80,6 +86,8 @@ pub const MACHINE_PREFIXES: &[&str] = &[
     // requests it watches. On a real project they were 4 of every 5 turns.
     "Delegated task node:",
     "Update on pull request #",
+    // Claude Code's fixed wrapper for a message another session sends.
+    "Another Claude session sent a message:",
 ];
 
 /// What `[capture]` says in project.toml.
@@ -867,6 +875,124 @@ fn scan(tp: &Path, prev: Option<Mark>, now_ms: i64) -> Result<(Mark, Vec<Answere
     Ok((m, out))
 }
 
+// ---------------------------------------------------------------- named conversations
+
+/// The conversations named for capture, in the kontext-home's `.kontext/`
+/// (local, never synced; not under `capture/`, whose old files are pruned).
+pub const NAMED_FILE: &str = "capture-sessions.json";
+/// The variable Claude Code sets in hook and Bash tool subprocesses: the
+/// `session_id` of the hook's input (a new one after `/clear`).
+pub const SESSION_ENV: &str = "CLAUDE_CODE_SESSION_ID";
+/// The command that names the current conversation.
+pub const NAME_COMMAND: &str = "kontext capture here";
+
+/// A conversation named for capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Named {
+    /// Its `session_id`.
+    pub id: String,
+    /// When it was named (RFC 3339).
+    pub at: String,
+    /// The folder it was named from.
+    pub dir: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct NamedList {
+    sessions: Vec<Named>,
+}
+
+pub fn named_path(home: &Path) -> PathBuf {
+    config::internal_dir(home).join(NAMED_FILE)
+}
+
+/// The conversations named for capture on this machine; none if the file does
+/// not exist. An error if it cannot be read: the hook then writes nothing
+/// rather than everything. Creates nothing.
+pub fn named(home: &Path) -> Result<Vec<Named>> {
+    let p = named_path(home);
+    let text = match fs::read_to_string(&p) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let list: NamedList = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("{} cannot be read: {e}", p.display()))?;
+    Ok(list.sessions)
+}
+
+/// The current conversation's id from [`SESSION_ENV`], if set.
+pub fn session_from_env() -> Option<String> {
+    std::env::var(SESSION_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Runs `f` under `.kontext/capture.lock`.
+fn locked<T>(home: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let internal = config::ensure_internal_dir(home)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(internal.join("capture.lock"))?;
+    lock.lock()?;
+    f()
+}
+
+fn save_named(home: &Path, sessions: Vec<Named>) -> Result<()> {
+    let text = serde_json::to_string_pretty(&NamedList { sessions })? + "\n";
+    config::write_atomic(&named_path(home), text.as_bytes())
+}
+
+/// Names a conversation for capture. Returns whether it was new and the list.
+pub fn name(home: &Path, id: &str, dir: &Path) -> Result<(bool, Vec<Named>)> {
+    locked(home, || {
+        let mut list = named(home)?;
+        if list.iter().any(|n| n.id == id) {
+            return Ok((false, list));
+        }
+        list.push(Named {
+            id: id.to_string(),
+            at: jiff::Timestamp::from_millisecond(crate::tasks::now_ms())?.to_string(),
+            dir: dir.display().to_string(),
+        });
+        save_named(home, list.clone())?;
+        Ok((true, list))
+    })
+}
+
+/// Forgets one named conversation (`Some(id)`), or all of them (`None`, which
+/// also clears a list that cannot be read). Returns the ids forgotten and the
+/// list left.
+pub fn forget(home: &Path, id: Option<&str>) -> Result<(Vec<String>, Vec<Named>)> {
+    locked(home, || {
+        let Some(id) = id else {
+            let gone = named(home)
+                .map(|l| l.into_iter().map(|n| n.id).collect())
+                .unwrap_or_default();
+            match fs::remove_file(named_path(home)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            return Ok((gone, Vec::new()));
+        };
+        let mut list = named(home)?;
+        let before = list.len();
+        list.retain(|n| n.id != id);
+        if list.len() == before {
+            return Ok((Vec::new(), list));
+        }
+        if list.is_empty() {
+            fs::remove_file(named_path(home))?;
+        } else {
+            save_named(home, list.clone())?;
+        }
+        Ok((vec![id.to_string()], list))
+    })
+}
+
 // ---------------------------------------------------------------- the hook
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -904,6 +1030,37 @@ pub fn hook(home: &Path, dir: &Path, event: &str, data: &Value) -> Result<String
         }
         Target::Main(pm) | Target::OwnWorktree(pm) | Target::Marked(pm) => pm,
     };
+    // Named conversations: a list that cannot be read writes nothing (an
+    // error in hooks.log), never everything.
+    let named = named(home).map_err(|e| {
+        e.context(format!(
+            "the list of named conversations cannot be read, nothing written \
+             (`kontext capture forget --all` empties it, then `{NAME_COMMAND}` in the PM's \
+             conversation)"
+        ))
+    })?;
+    if !named.is_empty() {
+        let n = named.len();
+        match data
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            None => {
+                return Ok(format!(
+                    "capture: {n} named on this machine and no session_id in the payload, \
+                     nothing written"
+                ));
+            }
+            Some(id) if !named.iter().any(|c| c.id == id.trim()) => {
+                return Ok(format!(
+                    "capture: this conversation is not one of the {n} named on this machine, \
+                     nothing written (`{NAME_COMMAND}` in it names it)"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
 
     let internal = config::ensure_internal_dir(home)?;
     let lock = OpenOptions::new()
