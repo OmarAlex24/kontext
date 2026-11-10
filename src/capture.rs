@@ -11,8 +11,10 @@
 //!   the transcript gained since last time for answers to the `AskUserQuestion`
 //!   tool, and writes each one once.
 //! - Off unless `[capture] enabled = true`, and with `KONTEXT_CAPTURE_DISABLE`.
-//!   Only the `pm` role, never a sidechain entry, and not in a linked git
-//!   worktree unless `[capture] worktrees = true`.
+//!   Only the `pm` role, never a sidechain entry. In a linked git worktree,
+//!   only one marked as the PM's ([`marked`]), into the main checkout's
+//!   `.pm/`, or any one into its own with `[capture] worktrees = true`
+//!   ([`target`]).
 //! - The state (per transcript: how far it was scanned, when it was first
 //!   seen, the ids already written) lives in `.kontext/capture/`, local, under
 //!   `.kontext/capture.lock`. The first time a transcript is seen it starts at
@@ -85,8 +87,10 @@ pub const MACHINE_PREFIXES: &[&str] = &[
 pub struct Settings {
     pub enabled: bool,
     pub skip_prefixes: Vec<String>,
-    /// Also capture in a linked git worktree (off: agents delegated into
-    /// their own worktree are not the human, and those dumps die with it).
+    /// Capture in every linked git worktree, into its own `.pm/` (off: agents
+    /// delegated into their own worktree are not the human, and those dumps
+    /// die with it; only a worktree marked as the PM's captures, into the main
+    /// checkout's `.pm/`).
     pub worktrees: bool,
 }
 
@@ -102,6 +106,99 @@ impl Settings {
                 .filter(|p| !p.trim().is_empty())
                 .collect(),
         }
+    }
+}
+
+/// Where the capture writes for a session in a folder, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// Not in a git repo: nothing.
+    NotGit,
+    /// A main checkout: its own `.pm/`.
+    Main(PathBuf),
+    /// A linked worktree with `[capture] worktrees = true`: its own `.pm/`.
+    OwnWorktree(PathBuf),
+    /// A linked worktree marked as the PM's ([`marked`]): the main checkout's
+    /// `.pm/`.
+    Marked(PathBuf),
+    /// A linked worktree not marked as the PM's: nothing. The `.pm/` it would
+    /// read ([`crate::ideas::pm_dir`]), if any, and what would mark it
+    /// ([`how_to_mark`]).
+    Unmarked { pm: Option<PathBuf>, fix: String },
+    /// A marked worktree of a bare repository: there is no main checkout.
+    NoMain,
+}
+
+impl Target {
+    /// The `.pm/` written into, if any.
+    pub fn pm(&self) -> Option<&Path> {
+        match self {
+            Target::Main(p) | Target::OwnWorktree(p) | Target::Marked(p) => Some(p),
+            _ => None,
+        }
+    }
+}
+
+/// The command that marks a linked worktree as the PM's.
+pub const MARK_COMMAND: &str = "kontext install --link-only";
+
+/// A linked worktree is the PM's when it has a `.kontext.toml` of its own at
+/// its root with `default_role = "pm"`, which git does not track (a tracked
+/// one is in every worktree, so it marks none).
+pub fn marked(root: &Path) -> bool {
+    let p = root.join(".kontext.toml");
+    let Ok(text) = fs::read_to_string(&p) else {
+        return false;
+    };
+    let pm = toml::from_str::<config::RepoLink>(&text)
+        .ok()
+        .and_then(|l| l.default_role)
+        .is_some_and(|r| r.trim() == "pm");
+    pm && !crate::git::tracked(root, ".kontext.toml")
+}
+
+/// What marks the unmarked linked worktree at `root` as the PM's: the mark
+/// command when it has no `.kontext.toml`; otherwise what is wrong with the
+/// one it has (`--link-only` keeps an existing file as it is).
+pub fn how_to_mark(root: &Path) -> String {
+    let p = root.join(".kontext.toml");
+    if !p.is_file() {
+        return format!("run `{MARK_COMMAND}` in it");
+    }
+    if crate::git::tracked(root, ".kontext.toml") {
+        return format!(
+            "its .kontext.toml is tracked by git, so every worktree has it and it marks none: \
+             untrack it ({} stays as it is) and run `{MARK_COMMAND}` in it",
+            p.display()
+        );
+    }
+    format!("set default_role = \"pm\" in {}", p.display())
+}
+
+/// Where the capture writes for a session in `dir`: a main checkout, its own
+/// `.pm/`; a linked worktree, its own with `[capture] worktrees = true`, else
+/// the main checkout's only when it is marked as the PM's.
+pub fn target(dir: &Path, worktrees: bool) -> Target {
+    let Some((root, linked)) = crate::git::checkout(dir) else {
+        return Target::NotGit;
+    };
+    let pm = crate::ideas::pm_dir_of(&root, linked, worktrees);
+    if !linked || worktrees {
+        // Its own `.pm/`: `pm_dir_of` always has one here.
+        let pm = pm.unwrap_or_else(|| root.join(PM_DIR));
+        return if linked {
+            Target::OwnWorktree(pm)
+        } else {
+            Target::Main(pm)
+        };
+    }
+    match (marked(&root), pm) {
+        (true, Some(pm)) => Target::Marked(pm),
+        (true, None) => Target::NoMain,
+        (false, pm) => Target::Unmarked {
+            pm,
+            fix: how_to_mark(&root),
+        },
     }
 }
 
@@ -791,16 +888,22 @@ pub fn hook(home: &Path, dir: &Path, event: &str, data: &Value) -> Result<String
     if role != "pm" {
         return Ok(format!("capture: role {role:?} is not pm, nothing written"));
     }
-    let Some((root, linked)) = crate::git::checkout(dir) else {
-        return Ok("capture: not in a git repo, nothing written".into());
+    let pm = match target(dir, settings.worktrees) {
+        Target::NotGit => return Ok("capture: not in a git repo, nothing written".into()),
+        Target::Unmarked { fix, .. } => {
+            return Ok(format!(
+                "capture: a linked git worktree not marked as the PM's, nothing written \
+                 (if the PM works here, {fix})"
+            ));
+        }
+        Target::NoMain => {
+            return Ok(
+                "capture: a worktree of a bare repository has no main checkout, nothing written"
+                    .into(),
+            );
+        }
+        Target::Main(pm) | Target::OwnWorktree(pm) | Target::Marked(pm) => pm,
     };
-    if linked && !settings.worktrees {
-        return Ok(
-            "capture: a linked git worktree, nothing written ([capture] worktrees is not true)"
-                .into(),
-        );
-    }
-    let pm = root.join(PM_DIR);
 
     let internal = config::ensure_internal_dir(home)?;
     let lock = OpenOptions::new()

@@ -350,7 +350,9 @@ pub struct CaptureCfg {
     /// machine text and are not written, on top of the built-in ones.
     #[serde(default)]
     pub skip_prefixes: Vec<String>,
-    /// Also capture in a linked git worktree (off by default).
+    /// Capture in every linked git worktree, into its own `.pm/` (off by
+    /// default: only a worktree marked as the PM's captures, into the main
+    /// checkout's `.pm/`).
     #[serde(default)]
     pub worktrees: bool,
 }
@@ -410,7 +412,7 @@ enabled = true
 # [capture]
 # enabled = true
 # skip_prefixes = ["<my-tool-output>"]   # prompts that start like this are machine text
-# worktrees = false                      # true: also in linked git worktrees (their own .pm/)
+# worktrees = false                      # true: in every linked git worktree (its own .pm/)
 
 [claims]
 lease = "2h"
@@ -514,20 +516,124 @@ pub struct RepoLink {
     pub project: String,
     #[serde(default)]
     pub default_role: Option<String>,
+    /// The role of a session in a linked git worktree that has no
+    /// `.kontext.toml` of its own (read from the main checkout's file).
+    #[serde(default)]
+    pub worktree_role: Option<String>,
 }
 
-/// The nearest `.kontext.toml`, walking up from `start`.
-pub fn find_repo_link(start: &Path) -> Result<Option<(PathBuf, RepoLink)>> {
-    for dir in start.ancestors() {
+/// Whose a `.kontext.toml` found for a folder is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    /// The checkout's own: in a main checkout (or outside git) the nearest
+    /// one; in a linked git worktree, one git does not track.
+    Own,
+    /// In a linked git worktree, one git tracks: the repo's file, the same in
+    /// every checkout, so not the worktree's own.
+    Tracked,
+    /// In a linked git worktree without one, the main checkout's.
+    MainCheckout,
+}
+
+/// A `.kontext.toml` found for a folder.
+#[derive(Debug, Clone)]
+pub struct FoundLink {
+    pub path: PathBuf,
+    pub link: RepoLink,
+    pub kind: LinkKind,
+}
+
+impl FoundLink {
+    /// The repo's file rather than a linked worktree's own: its
+    /// `worktree_role` applies.
+    pub fn for_worktrees(&self) -> bool {
+        self.kind != LinkKind::Own
+    }
+}
+
+fn read_link(p: &Path) -> Result<RepoLink> {
+    let s = fs::read_to_string(p)?;
+    toml::from_str(&s).with_context(|| format!("could not read {}", p.display()))
+}
+
+fn found(path: PathBuf, kind: LinkKind) -> Result<Option<FoundLink>> {
+    let link = read_link(&path)?;
+    Ok(Some(FoundLink { path, link, kind }))
+}
+
+/// The `.kontext.toml` for `start`: the nearest one walking up from it. In a
+/// linked git worktree it first walks up only to the worktree's root (a file
+/// git tracks there is the repo's, [`LinkKind::Tracked`]), then takes the one
+/// at the root of the main checkout (there is none for a bare repository),
+/// and only then goes on walking up from above the worktree.
+pub fn find_repo_link(start: &Path) -> Result<Option<FoundLink>> {
+    let mut above: Option<PathBuf> = None;
+    if let Some((root, true)) = crate::git::checkout(start) {
+        let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+        let root = root.canonicalize().unwrap_or(root);
+        for dir in start.ancestors().take_while(|d| d.starts_with(&root)) {
+            let p = dir.join(".kontext.toml");
+            if p.is_file() {
+                let rel = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy();
+                let kind = if crate::git::tracked(&root, &rel) {
+                    LinkKind::Tracked
+                } else {
+                    LinkKind::Own
+                };
+                return found(p, kind);
+            }
+        }
+        if let Some(p) = crate::git::main_checkout(&root).map(|m| m.join(".kontext.toml"))
+            && p.is_file()
+        {
+            return found(p, LinkKind::MainCheckout);
+        }
+        match root.parent() {
+            Some(p) => above = Some(p.to_path_buf()),
+            None => return Ok(None),
+        }
+    }
+    for dir in above.as_deref().unwrap_or(start).ancestors() {
         let p = dir.join(".kontext.toml");
         if p.is_file() {
-            let s = fs::read_to_string(&p)?;
-            let link: RepoLink =
-                toml::from_str(&s).with_context(|| format!("could not read {}", p.display()))?;
-            return Ok(Some((p, link)));
+            return found(p, LinkKind::Own);
         }
     }
     Ok(None)
+}
+
+/// The role of a session in `dir`, and where it came from: `$KONTEXT_ROLE`;
+/// the `default_role` of the checkout's own `.kontext.toml`; in a linked
+/// worktree without one, the repo's file (tracked, or the main checkout's):
+/// its `worktree_role`, then its `default_role`; then `pm`.
+pub fn role_in(dir: &Path) -> (String, String) {
+    if let Ok(r) = std::env::var("KONTEXT_ROLE")
+        && !r.trim().is_empty()
+    {
+        return (r.trim().to_string(), "$KONTEXT_ROLE".into());
+    }
+    let set = |r: &Option<String>| {
+        r.as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+    };
+    if let Ok(Some(f)) = find_repo_link(dir) {
+        let keys: &[(&str, &Option<String>)] = if f.for_worktrees() {
+            &[
+                ("worktree_role", &f.link.worktree_role),
+                ("default_role", &f.link.default_role),
+            ]
+        } else {
+            &[("default_role", &f.link.default_role)]
+        };
+        for (key, value) in keys {
+            if let Some(r) = set(value) {
+                return (r, format!("{key} in {}", f.path.display()));
+            }
+        }
+    }
+    ("pm".into(), "no role set".into())
 }
 
 /// A project that is already resolved.
@@ -539,7 +645,8 @@ pub struct Resolved {
 }
 
 /// Which project to use: `--project`, then `$KONTEXT_PROJECT`, then the nearest
-/// `.kontext.toml` going up, and if only one is registered, that one.
+/// `.kontext.toml` going up (in a linked git worktree without one, the main
+/// checkout's: [`find_repo_link`]), and if only one is registered, that one.
 pub fn resolve_project(flag: Option<&str>) -> Result<Resolved> {
     resolve_project_in(flag, &std::env::current_dir()?)
 }
@@ -561,8 +668,8 @@ pub enum ProjectSource {
     Flag,
     /// `$KONTEXT_PROJECT`.
     Env,
-    /// The `.kontext.toml` at this path.
-    Link(PathBuf),
+    /// The `.kontext.toml` at this path, and whose it is.
+    Link(PathBuf, LinkKind),
     /// The only project registered.
     OnlyOne,
 }
@@ -581,8 +688,8 @@ pub fn choose_project(
         (n.to_string(), ProjectSource::Flag)
     } else if let Some(n) = env {
         (n, ProjectSource::Env)
-    } else if let Some((path, link)) = find_repo_link(dir)? {
-        (link.project, ProjectSource::Link(path))
+    } else if let Some(f) = find_repo_link(dir)? {
+        (f.link.project, ProjectSource::Link(f.path, f.kind))
     } else if machine.projects.len() == 1 {
         (
             machine.projects.keys().next().unwrap().clone(),
