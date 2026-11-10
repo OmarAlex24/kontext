@@ -66,19 +66,11 @@ fn read_input(stdin: &mut dyn Read) -> Value {
     }
 }
 
-/// The role: `$KONTEXT_ROLE`, then `default_role` in `.kontext.toml`, then `pm`.
+/// The role: `$KONTEXT_ROLE`, then `default_role` in the checkout's own
+/// `.kontext.toml`, then (in a linked git worktree without one) `worktree_role`
+/// and `default_role` in the main checkout's, then `pm` ([`config::role_in`]).
 pub fn role_for(dir: &Path) -> String {
-    if let Ok(r) = std::env::var("KONTEXT_ROLE")
-        && !r.trim().is_empty()
-    {
-        return r.trim().to_string();
-    }
-    if let Ok(Some((_, link))) = config::find_repo_link(dir)
-        && let Some(r) = link.default_role.filter(|r| !r.trim().is_empty())
-    {
-        return r;
-    }
-    "pm".into()
+    config::role_in(dir).0
 }
 
 /// The mode of the role in `[context]`: its own, then `default`, then `inject`.

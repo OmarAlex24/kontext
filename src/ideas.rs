@@ -200,20 +200,39 @@ impl Ideas {
 
 // ------------------------------------------------------------ where
 
+/// The `.pm/` folder of the checkout that contains `dir`: `<root>/.pm` in a
+/// main checkout, and in a linked git worktree the main checkout's, unless
+/// `own_in_worktrees` (`[capture] worktrees = true`) gives the worktree its
+/// own. `None` outside a git repo, or in a worktree of a bare repository.
+pub fn pm_dir(dir: &Path, own_in_worktrees: bool) -> Option<PathBuf> {
+    let (root, linked) = crate::git::checkout(dir)?;
+    pm_dir_of(&root, linked, own_in_worktrees)
+}
+
+/// [`pm_dir`] for a checkout already found ([`crate::git::checkout`]).
+pub fn pm_dir_of(root: &Path, linked: bool, own_in_worktrees: bool) -> Option<PathBuf> {
+    if !linked || own_in_worktrees {
+        return Some(root.join(PM_DIR));
+    }
+    crate::git::main_checkout(root).map(|m| m.join(PM_DIR))
+}
+
 /// The `.pm/` folder that has an `items.md`: the one of the git repo the
-/// command runs in, or else that of the first project repo on this machine.
-pub fn locate(repos: &Repos) -> Option<PathBuf> {
-    let has = |root: &Path| {
-        let pm = root.join(PM_DIR);
-        pm.join("items.md").is_file().then_some(pm)
-    };
-    if let Some(pm) = repos.here().and_then(|h| has(&h.root)) {
+/// command runs in ([`pm_dir`]), or else that of the first project repo on
+/// this machine.
+pub fn locate(repos: &Repos, own_in_worktrees: bool) -> Option<PathBuf> {
+    let has = |pm: PathBuf| pm.join("items.md").is_file().then_some(pm);
+    if let Some(pm) = repos
+        .here()
+        .and_then(|h| pm_dir(&h.root, own_in_worktrees))
+        .and_then(has)
+    {
         return Some(pm);
     }
     repos
         .available()
         .into_iter()
-        .find_map(|(_, root)| has(&root))
+        .find_map(|(_, root)| has(root.join(PM_DIR)))
 }
 
 // ------------------------------------------------------------ table

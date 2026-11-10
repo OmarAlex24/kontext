@@ -1,7 +1,17 @@
 //! `kontext install` (DESIGN §9.3): prepares a code repo to use `kontext`.
 //!
-//! - `.kontext.toml` with `project` and `default_role`, if it does not exist.
-//! - The `SessionStart` hook in `.claude/settings.json`, merged without
+//! - `.kontext.toml` with `project` and `default_role`, if it does not exist
+//!   (an existing one is kept as it is). `--worktree-role <role>` sets its
+//!   `worktree_role` key ([`with_worktree_role`]). `--link-only` writes only
+//!   this file ([`plan_link_only`]): in a linked git worktree, with
+//!   `default_role = "pm"`, it marks the worktree as the PM's. A new file
+//!   there that git neither tracks nor ignores gets a note with the line for
+//!   `info/exclude` ([`exclude_note`]); so does a new `settings.local.json`
+//!   with `--local`.
+//! - The `SessionStart` hook in `.claude/settings.json` (with `--local`, or
+//!   when kontext's hooks are already there, `.claude/settings.local.json`:
+//!   kontext's entries live in one of the two, and `--local` removes them from
+//!   `settings.json` without touching the rest, [`remove_kontext`]), merged without
 //!   touching the rest (like `merge_hooks` in v0). If a `kontext` start hook
 //!   already exists with another path, its path is changed instead of adding
 //!   another one. With the distill on, also `PreCompact` and `SessionEnd`
@@ -23,9 +33,11 @@
 //!   launches. If one already exists with different content (you changed it
 //!   by hand, or it comes from another version), it is kept and a warning is
 //!   shown; `--force` replaces it.
-//! - The `Bash(kontext:*)` permission in `permissions.allow` of
-//!   `.claude/settings.json`, if it is missing.
-//! - The repo in `[[repos]]` of `project.toml`, if it is missing.
+//! - The `Bash(kontext:*)` permission in `permissions.allow` of the same
+//!   settings file as the hooks, if it is missing.
+//! - The repo in `[[repos]]` of `project.toml`, if it is missing: named after
+//!   the folder, in a linked worktree the main checkout's (a worktree of a
+//!   bare repo leaves `[[repos]]` alone, with a note).
 //!
 //! Before writing, the diff of each file is shown. With `--dry-run` nothing
 //! is written. Running it twice changes nothing the second time.
@@ -282,6 +294,90 @@ pub fn merge_permission(settings: &Json, perm: &str) -> Result<Json> {
     Ok(s)
 }
 
+/// `true` if the command is `<path>/kontext hook <event>`, for any event.
+fn is_kontext_command(cmd: &str) -> bool {
+    hook_parts(cmd)
+        .is_some_and(|(bin, _)| Path::new(&bin).file_name().is_some_and(|n| n == "kontext"))
+}
+
+/// `true` if `settings` has any of kontext's entries: a `kontext hook` or the
+/// [`PERMISSION`].
+pub fn has_kontext(settings: &Json) -> bool {
+    remove_kontext(settings) != *settings
+}
+
+/// `true` if `settings` has a `kontext hook` command: where they are decides
+/// which settings file kontext's entries live in (the permission alone does
+/// not).
+pub fn has_kontext_hooks(settings: &Json) -> bool {
+    let Json::Obj(root) = settings else {
+        return false;
+    };
+    let Some(Json::Obj(events)) = root.get("hooks") else {
+        return false;
+    };
+    events.values().any(|groups| match groups {
+        Json::Arr(groups) => groups.iter().any(|g| match g {
+            Json::Obj(g) => match g.get("hooks") {
+                Some(Json::Arr(hs)) => hs
+                    .iter()
+                    .any(|h| h.str_of("command").is_some_and(is_kontext_command)),
+                _ => false,
+            },
+            _ => false,
+        }),
+        _ => false,
+    })
+}
+
+/// `settings` without kontext's entries: its hooks (and the groups and event
+/// lists left empty by removing them) and the [`PERMISSION`] (and the
+/// `allow` and `permissions` left empty by removing it). Everything else, and
+/// a container that was already empty, stays as it was.
+pub fn remove_kontext(settings: &Json) -> Json {
+    let mut s = settings.clone();
+    let Json::Obj(root) = &mut s else {
+        return s;
+    };
+    if let Some(Json::Obj(hooks)) = root.get_mut("hooks") {
+        let before = hooks.len();
+        hooks.retain(|_, groups| {
+            let Json::Arr(groups) = groups else {
+                return true;
+            };
+            let n = groups.len();
+            groups.retain_mut(|g| {
+                let Json::Obj(g) = g else { return true };
+                let Some(Json::Arr(hs)) = g.get_mut("hooks") else {
+                    return true;
+                };
+                let m = hs.len();
+                hs.retain(|h| !h.str_of("command").is_some_and(is_kontext_command));
+                hs.len() == m || !hs.is_empty()
+            });
+            groups.len() == n || !groups.is_empty()
+        });
+        if hooks.is_empty() && before > 0 {
+            root.shift_remove("hooks");
+        }
+    }
+    if let Some(Json::Obj(perms)) = root.get_mut("permissions") {
+        let mut emptied = false;
+        if let Some(Json::Arr(allow)) = perms.get_mut("allow") {
+            let n = allow.len();
+            allow.retain(|p| !matches!(p, Json::Str(x) if x == PERMISSION));
+            if allow.is_empty() && n > 0 {
+                perms.shift_remove("allow");
+                emptied = perms.is_empty();
+            }
+        }
+        if emptied {
+            root.shift_remove("permissions");
+        }
+    }
+    s
+}
+
 /// Merges the `SessionStart` hook into `settings`. Returns the result.
 pub fn merge_hooks(settings: &Json, command: &str) -> Result<Json> {
     merge_hook(
@@ -332,6 +428,8 @@ pub struct Plan {
     pub changes: Vec<Change>,
     /// Agent files that already exist with other content and are kept.
     pub kept: Vec<PathBuf>,
+    /// What to tell the user besides the diffs (where the hooks stay).
+    pub notes: Vec<String>,
 }
 
 fn read_opt(p: &Path) -> Result<Option<String>> {
@@ -427,6 +525,116 @@ pub struct Options<'a> {
     pub capture: bool,
     /// Replaces the agent files even if they have changes.
     pub force: bool,
+    /// The hooks and the permission go in `.claude/settings.local.json`, and
+    /// kontext's own entries leave `.claude/settings.json`.
+    pub local: bool,
+    /// Sets `worktree_role` in `.kontext.toml`.
+    pub worktree_role: Option<&'a str>,
+}
+
+/// The `.kontext.toml` of `repo`: kept as it is if it exists, else `project`
+/// and `default_role`; with `worktree_role`, that key set too.
+pub fn plan_link(
+    repo: &Path,
+    project_name: &str,
+    default_role: &str,
+    worktree_role: Option<&str>,
+) -> Result<Change> {
+    let path = repo.join(".kontext.toml");
+    let before = read_opt(&path)?;
+    let mut after = match &before {
+        Some(b) => b.clone(),
+        None => format!(
+            "project = {}\ndefault_role = {}\n",
+            toml::Value::from(project_name),
+            toml::Value::from(default_role)
+        ),
+    };
+    if let Some(r) = worktree_role {
+        after = with_worktree_role(&after, r)
+            .with_context(|| format!("could not set worktree_role in {}", path.display()))?;
+    }
+    Ok(Change {
+        path,
+        before,
+        after,
+    })
+}
+
+/// `text` (a `.kontext.toml`) with `worktree_role = "<role>"` among its
+/// top-level keys: that line replaced if there is one, otherwise added after
+/// the last of them (before the first table). The rest of the file stays as
+/// it was.
+pub fn with_worktree_role(text: &str, role: &str) -> Result<String> {
+    let line = format!("worktree_role = {}", toml::Value::from(role));
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let top = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let is_key = |l: &String| {
+        l.trim_start()
+            .strip_prefix("worktree_role")
+            .is_some_and(|r| r.trim_start().starts_with('='))
+    };
+    match lines[..top].iter().position(is_key) {
+        Some(i) => lines[i] = line,
+        None => {
+            let at = lines[..top]
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .map_or(0, |i| i + 1);
+            lines.insert(at, line);
+        }
+    }
+    let out = lines.join("\n") + "\n";
+    let parsed: crate::config::RepoLink = toml::from_str(&out)?;
+    if parsed.worktree_role.as_deref() != Some(role) {
+        bail!("it does not read back; set it by hand");
+    }
+    Ok(out)
+}
+
+/// Where the settings of a repo are, read.
+struct SettingsFile {
+    path: PathBuf,
+    before: Option<String>,
+    json: Json,
+}
+
+fn read_settings(path: PathBuf) -> Result<SettingsFile> {
+    let before = read_opt(&path)?;
+    let json = match before.as_deref().filter(|t| !t.trim().is_empty()) {
+        Some(t) => serde_json::from_str::<Json>(t).map_err(|e| {
+            anyhow::anyhow!(
+                "{} is not valid JSON ({e}); fix it first. Nothing was written",
+                path.display()
+            )
+        })?,
+        None => Json::obj(),
+    };
+    if !matches!(json, Json::Obj(_)) {
+        bail!(
+            "{} is not a JSON object; nothing was written",
+            path.display()
+        );
+    }
+    Ok(SettingsFile { path, before, json })
+}
+
+impl SettingsFile {
+    /// The change to `json`: the file as it was if nothing changed.
+    fn change(self, json: &Json) -> Result<Change> {
+        let after = match &self.before {
+            Some(b) if *json == self.json => b.clone(),
+            _ => serde_json::to_string_pretty(json)? + "\n",
+        };
+        Ok(Change {
+            path: self.path,
+            before: self.before,
+            after,
+        })
+    }
 }
 
 /// Only the skills, in `dir` (a Claude Code `skills/` folder). They are always
@@ -444,46 +652,69 @@ pub fn plan_skills(dir: &Path) -> Result<Plan> {
     Ok(Plan {
         changes,
         kept: Vec::new(),
+        notes: Vec::new(),
     })
 }
 
 /// What `kontext install` would do, without writing anything.
 pub fn plan(o: &Options) -> Result<Plan> {
     let mut changes = Vec::new();
+    let mut notes = Vec::new();
 
-    let link = o.repo.join(".kontext.toml");
-    let before = read_opt(&link)?;
-    let after = match &before {
-        Some(b) => b.clone(),
-        None => format!(
-            "project = {}\ndefault_role = {}\n",
-            toml::Value::from(o.project_name),
-            toml::Value::from(o.default_role)
-        ),
-    };
-    changes.push(Change {
-        path: link,
-        before,
-        after,
-    });
-
-    let settings = o.repo.join(".claude").join("settings.json");
-    let before = read_opt(&settings)?;
-    let parsed = match before.as_deref().filter(|t| !t.trim().is_empty()) {
-        Some(t) => serde_json::from_str::<Json>(t).map_err(|e| {
-            anyhow::anyhow!(
-                "{} is not valid JSON ({e}); fix it first. Nothing was written",
-                settings.display()
-            )
-        })?,
-        None => Json::obj(),
-    };
-    if !matches!(parsed, Json::Obj(_)) {
-        bail!(
-            "{} is not a JSON object; nothing was written",
-            settings.display()
-        );
+    let linked = matches!(crate::git::checkout(o.repo), Some((_, true)));
+    let link = plan_link(o.repo, o.project_name, o.default_role, o.worktree_role)?;
+    if link.before.is_none() && o.default_role == "pm" && linked {
+        notes.push(format!(
+            "This is a linked git worktree: its own .kontext.toml with default_role = \"pm\" marks \
+             it as the PM's (`{}` writes only that file). Claude Code reads .claude/settings.json \
+             from the session's folder and .claude/settings.local.json from the main checkout's \
+             root (its settings docs): the hooks written here reach sessions in this worktree \
+             only; for every checkout, run `kontext install --local` in the main checkout.",
+            crate::capture::MARK_COMMAND
+        ));
     }
+    changes.push(link);
+
+    // kontext's hooks and permission live in one of the two files: in
+    // `settings.local.json` with `--local` or if they are already there.
+    let claude = o.repo.join(".claude");
+    let shared = read_settings(claude.join("settings.json"))?;
+    let local_path = claude.join("settings.local.json");
+    let local = if o.local {
+        Some(read_settings(local_path)?)
+    } else {
+        // Plain `install` only looks: a broken local file is not its business.
+        read_settings(local_path)
+            .ok()
+            .filter(|l| has_kontext_hooks(&l.json))
+    };
+    let in_shared = has_kontext_hooks(&shared.json);
+    let target = match local {
+        Some(l) => {
+            if o.local {
+                let cleaned = remove_kontext(&shared.json);
+                if cleaned != shared.json {
+                    changes.push(shared.change(&cleaned)?);
+                }
+            } else if in_shared {
+                notes.push(format!(
+                    "kontext's hooks are in both {} and {}: a copy that differs (another binary \
+                     path) runs as well. This changes only the second; `kontext install --local` \
+                     removes the copy in the first.",
+                    claude.join("settings.json").display(),
+                    l.path.display()
+                ));
+            } else {
+                notes.push(format!(
+                    "kontext's hooks and permission are in {} (`kontext install --local`): kept there.",
+                    l.path.display()
+                ));
+            }
+            l
+        }
+        None => shared,
+    };
+    let parsed = target.json.clone();
     let mut merged = merge_hooks(&parsed, &format!("{} hook session-start", o.exe))?;
     // `SessionEnd` is shared by the distill and the capture: one entry, which
     // does both jobs.
@@ -507,16 +738,11 @@ pub fn plan(o: &Options) -> Result<Plan> {
         )?;
     }
     merged = merge_permission(&merged, PERMISSION)?;
-    let after = if merged == parsed && before.is_some() {
-        before.clone().unwrap()
-    } else {
-        serde_json::to_string_pretty(&merged)? + "\n"
-    };
-    changes.push(Change {
-        path: settings,
-        before,
-        after,
-    });
+    let change = target.change(&merged)?;
+    if o.local && change.before.is_none() {
+        notes.extend(exclude_note(o.repo, ".claude/settings.local.json"));
+    }
+    changes.push(change);
 
     for (dir, text) in SKILLS {
         let skill = o
@@ -552,19 +778,73 @@ pub fn plan(o: &Options) -> Result<Plan> {
         .with_context(|| format!("could not read {}", ptoml.display()))?;
     let project: Project =
         toml::from_str(&text).with_context(|| format!("could not read {}", ptoml.display()))?;
-    let name = o
-        .repo
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "repo".into());
-    let remote = git_out(o.repo, &["remote", "get-url", "origin"]).map(|r| normalize_remote(&r));
-    let after = with_repo(&text, &project, &name, remote.as_deref())?;
-    changes.push(Change {
-        path: ptoml,
-        before: Some(text),
-        after,
-    });
-    Ok(Plan { changes, kept })
+    // `[[repos]]` names the repo: in a linked worktree, after its main
+    // checkout's folder, not the worktree's. A worktree of a bare repo has
+    // no main checkout: `[[repos]]` is left as it is.
+    let named = if linked {
+        crate::git::main_checkout(o.repo)
+    } else {
+        Some(o.repo.to_path_buf())
+    };
+    match named {
+        Some(dir) => {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "repo".into());
+            let remote =
+                git_out(o.repo, &["remote", "get-url", "origin"]).map(|r| normalize_remote(&r));
+            let after = with_repo(&text, &project, &name, remote.as_deref())?;
+            changes.push(Change {
+                path: ptoml,
+                before: Some(text),
+                after,
+            });
+        }
+        None => notes.push(format!(
+            "This is a linked worktree of a bare git repo: [[repos]] of {} is left as it is (it \
+             names repos, not worktrees); add the repo there by hand if it is missing.",
+            ptoml.display()
+        )),
+    }
+    Ok(Plan {
+        changes,
+        kept,
+        notes,
+    })
+}
+
+/// `kontext install --link-only`: only the `.kontext.toml` of `repo`, as
+/// [`plan`] writes it.
+pub fn plan_link_only(
+    repo: &Path,
+    project_name: &str,
+    default_role: &str,
+    worktree_role: Option<&str>,
+) -> Result<Plan> {
+    let link = plan_link(repo, project_name, default_role, worktree_role)?;
+    let mut notes = Vec::new();
+    if link.before.is_none() && matches!(crate::git::checkout(repo), Some((_, true))) {
+        notes.extend(exclude_note(repo, ".kontext.toml"));
+    }
+    Ok(Plan {
+        changes: vec![link],
+        kept: Vec::new(),
+        notes,
+    })
+}
+
+/// A note for a file kontext creates at `rel` under `repo` that git neither
+/// tracks nor ignores (a `git add -A` would commit it): the line for the
+/// repo's `info/exclude`, which every worktree shares.
+fn exclude_note(repo: &Path, rel: &str) -> Option<String> {
+    let exclude = crate::git::untracked_unignored(repo, rel)?;
+    let prefix = git_out(repo, &["rev-parse", "--show-prefix"]).unwrap_or_default();
+    Some(format!(
+        "git neither tracks nor ignores {rel}, so a `git add -A` would commit it: to keep it out \
+         of every checkout of this repo, add the line `/{prefix}{rel}` to {}.",
+        exclude.display()
+    ))
 }
 
 impl Plan {
@@ -627,6 +907,49 @@ mod tests {
         let text = serde_json::to_string(&moved).unwrap();
         assert_eq!(text.matches("hook session-start").count(), 1);
         assert!(text.contains("/opt/kontext"));
+    }
+
+    #[test]
+    fn worktree_role_goes_among_the_top_level_keys() {
+        let t = "project = \"billing\"\ndefault_role = \"pm\"\n";
+        assert_eq!(
+            with_worktree_role(t, "agent").unwrap(),
+            "project = \"billing\"\ndefault_role = \"pm\"\nworktree_role = \"agent\"\n"
+        );
+        // Replaced, not added twice; before a table and its blank line.
+        let t =
+            "# link\nproject = \"billing\"\nworktree_role = \"x\"\n\n[extra]\nworktree_role = 1\n";
+        assert_eq!(
+            with_worktree_role(t, "tester").unwrap(),
+            "# link\nproject = \"billing\"\nworktree_role = \"tester\"\n\n[extra]\nworktree_role = 1\n"
+        );
+        let t = "project = \"billing\"\n\n[extra]\nn = 1\n";
+        assert_eq!(
+            with_worktree_role(t, "agent").unwrap(),
+            "project = \"billing\"\nworktree_role = \"agent\"\n\n[extra]\nn = 1\n"
+        );
+    }
+
+    #[test]
+    fn remove_kontext_leaves_the_rest() {
+        let theirs: Json = serde_json::from_str(
+            r#"{"zeta": 1, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/bin/other hook stop"}]}], "Empty": []}, "permissions": {"allow": ["Bash(ls:*)"], "deny": []}}"#,
+        )
+        .unwrap();
+        assert!(!has_kontext(&theirs));
+        assert_eq!(remove_kontext(&theirs), theirs);
+        let mut ours = merge_hooks(&theirs, "/bin/kontext hook session-start").unwrap();
+        ours = merge_hook(&ours, "Stop", "stop", "'/a b/kontext' hook stop", None).unwrap();
+        ours = merge_permission(&ours, PERMISSION).unwrap();
+        assert!(has_kontext(&ours));
+        assert_eq!(remove_kontext(&ours), theirs);
+        // Only kontext's: nothing is left, not even the containers it emptied.
+        let only = merge_permission(
+            &merge_hooks(&Json::obj(), "/bin/kontext hook session-start").unwrap(),
+            PERMISSION,
+        )
+        .unwrap();
+        assert_eq!(remove_kontext(&only), Json::obj());
     }
 
     #[test]

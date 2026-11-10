@@ -803,10 +803,12 @@ fn linked_worktrees_are_skipped_unless_enabled() {
     fs::create_dir_all(&sub).unwrap();
     prompt_in(&c, &sub, "another brief", "p-2");
     assert!(!wt.join(".pm").exists());
+    assert!(!c.dumps().exists());
     let log = c.log();
     assert_eq!(
         log.matches(
-            "capture: a linked git worktree, nothing written ([capture] worktrees is not true)"
+            "capture: a linked git worktree not marked as the PM's, nothing written (if the PM \
+             works here, run `kontext install --link-only` in it)"
         )
         .count(),
         2,

@@ -49,7 +49,7 @@ Ask **only once, all together**, only what you cannot work out:
 - **Where the kontext-home lives** (propose `~/kontext-home/<name>`) and **whether it has a git remote** (to share it with other people or machines; without a remote it also works).
 - **The cutover day**, only if another system is in use (for example `ctx.py`): until that day it keeps being used and is imported again; from that day on, you only write to kontext.
 
-In the same message, lay out the plan: the commands you are going to run and **the paths each one writes to** (`~/.config/kontext/projects.toml`, the kontext-home, `.kontext.toml`, `.claude/settings.json`, `.claude/skills/`, `.claude/agents/`). Wait for the answer.
+In the same message, lay out the plan: the commands you are going to run and **the paths each one writes to** (`~/.config/kontext/projects.toml`, the kontext-home, `.kontext.toml`, `.claude/settings.json` or, with `--local` (step 5), `.claude/settings.local.json`, `.claude/skills/`, `.claude/agents/`). Wait for the answer.
 
 Everything else you decide yourself with the default values, without asking: the project name (the name of the repo folder), the context mode (`inject` for everyone, which `kontext init` leaves), the distill on as `init` leaves it, `default_role = "pm"`, and the agent files from `kontext install`.
 
@@ -98,6 +98,13 @@ kontext install --role pm
 ```
 
 It leaves `.kontext.toml` with `default_role = "pm"`, the `SessionStart` hook (and `PreCompact` and `SessionEnd` with the distill on), the `Bash(kontext:*)` permission, the skills, and the agent files, without touching the rest of `.claude/settings.json`. If it warns that it kept an agent file that was changed by hand, tell the human.
+
+If the repo is public, or the sessions run in linked git worktrees (`git worktree list` shows more than one; the first is the main checkout; some tools put every conversation in its own), do it in two steps, in this order (each first with `--dry-run`):
+
+1. In the worktree where the human talks to the PM: `kontext --project <name> install --link-only`. It writes only that worktree's `.kontext.toml`, which marks it as the PM's, so its messages are captured into the main checkout's `.pm/`. Skip it if the PM works in the main checkout.
+2. In the main checkout: `kontext --project <name> install --role pm --local --worktree-role agent`. The hooks and the permission go in `.claude/settings.local.json`, which is not committed and which Claude Code reads from the main checkout's root in every worktree (its settings docs); the skills and agent files there reach worktrees that have no `.claude/skills` or `.claude/agents` of their own (its worktrees docs). Delegated agents in the other worktrees start as `agent`, not as the PM.
+
+The other way round, the PM's worktree starts as `agent` until it is marked. A full `kontext install` in a worktree that has no `.kontext.toml` is refused once the main checkout has one. If `kontext install` prints a line for `.git/info/exclude`, offer to add it, so a `git add -A` does not commit the file. Say every path first, as with any write.
 
 ## 6. Checking
 

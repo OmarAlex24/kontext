@@ -55,7 +55,7 @@ All of them accept `--project <name>`.
 
 ### Which project is used
 
-In this order: `--project`, the `KONTEXT_PROJECT` variable, the nearest `.kontext.toml` going up from the current folder (`project = "<name>"`), and if only one project is registered, that one.
+In this order: `--project`, the `KONTEXT_PROJECT` variable, the nearest `.kontext.toml` going up from the current folder (`project = "<name>"`; in a linked git worktree, up to its root, and then the main checkout's: see "Working in git worktrees"), and if only one project is registered, that one.
 
 ### Machine configuration
 
@@ -98,7 +98,8 @@ kontext verify
 | `kontext show <id>` | A full entry with its history. Accepts prefixes (`D-7f3`) |
 | `kontext recall <words> [--limit N] [--since YYYY-MM-DD]` | Searches the ledger and Claude Code's transcripts |
 | `kontext hook session-start` | Called by Claude Code when a session starts. Never fails and doesn't advance cursors |
-| `kontext install [--dry-run] [--force] [--role <role>]` | In a code repo: `.kontext.toml`, the start hook and the `Bash(kontext:*)` permission in `.claude/settings.json`, the skills `kontext`, `kontext-orchestrate`, `kontext-show`, `kontext-migrate` and `kontext-pm` in `.claude/skills/`, the agent files (phase 3, and the `.pm/` reader), and the repo in `[[repos]]` of `project.toml`. Shows the diff before writing |
+| `kontext install [--dry-run] [--force] [--role <role>] [--local] [--worktree-role <role>]` | In a code repo: `.kontext.toml`, the start hook and the `Bash(kontext:*)` permission in `.claude/settings.json` (with `--local`, in `.claude/settings.local.json`), the skills `kontext`, `kontext-orchestrate`, `kontext-show`, `kontext-migrate` and `kontext-pm` in `.claude/skills/`, the agent files (phase 3, and the `.pm/` reader), and the repo in `[[repos]]` of `project.toml`. `--worktree-role` sets `worktree_role` in `.kontext.toml`. Shows the diff before writing |
+| `kontext install --link-only [--role <role>] [--worktree-role <role>] [--dry-run]` | Only `.kontext.toml`, in the current checkout: nothing under `.claude/`, no skills, no agent files, no `[[repos]]` change. In a linked git worktree it marks it as the PM's (see "Working in git worktrees") |
 | `kontext install --skills-only [--global] [--dry-run]` | Only the skills, in the repo's `.claude/skills/` or, with `--global`, in `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`). Not the agent files. Doesn't need a project |
 
 All of them accept `--json` (the ones that write print the new entry; the views print their data), `--actor`, `--role` and `--model` (in `install`, `--role` is the `default_role` of `.kontext.toml`).
@@ -148,7 +149,7 @@ kontext show D-f99
 
 ### Hooks and modes
 
-`kontext install` adds to `.claude/settings.json` a `SessionStart` hook (`startup|resume|clear|compact`) that runs `<kontext path> hook session-start`, and the `Bash(kontext:*)` permission in `permissions.allow`. The role comes from `KONTEXT_ROLE`, then from `default_role` in `.kontext.toml`, and if neither is set, `pm`. What it puts in depends on `[context]` in `project.toml` (the role, then `default`, then `inject`; `kontext init` sets `inject` for everyone):
+`kontext install` adds to `.claude/settings.json` a `SessionStart` hook (`startup|resume|clear|compact`) that runs `<kontext path> hook session-start`, and the `Bash(kontext:*)` permission in `permissions.allow`. With `--local` they go in `.claude/settings.local.json` instead, which is the place for them in a public repo (the hook holds an absolute path of your machine) and when sessions run in linked git worktrees (next section). kontext's entries live in one of the two files: `--local` removes kontext's own entries from `settings.json` (nothing else in it), and a later `kontext install` without the flag keeps them in `settings.local.json` and says so. The role comes from `KONTEXT_ROLE`, then from `default_role` in `.kontext.toml`, then, in a linked worktree without a `.kontext.toml` of its own, from `worktree_role` (or `default_role`) in the repo's (the main checkout's, or a tracked one), and if none is set, `pm`. What it puts in depends on `[context]` in `project.toml` (the role, then `default`, then `inject`; `kontext init` sets `inject` for everyone):
 
 - `inject`: the `resume` for the role, trimmed to 9,000 characters (never more than 9,900). With many decisions in force, it lists the newest and says how many more there are and how to search them.
 - `pointer`: two lines with how many new items and questions there are and what to run.
@@ -157,6 +158,32 @@ kontext show D-f99
 Hook errors are logged to `<kontext-home>/.kontext/hooks.log`; the hook always exits with 0.
 
 With `[capture] enabled = true` in `project.toml` (off by default), `kontext install` also adds `UserPromptSubmit` → `<kontext path> hook user-prompt-submit`, `Stop` → `<kontext path> hook stop` and `SessionEnd` → `<kontext path> hook session-end` (one `SessionEnd` entry, shared with the distill: it does both jobs, each only if it is on). They write your messages into `.pm/dumps/` (see "The PM's memory of your ideas") and print nothing, so nothing goes into the conversation. Turning the setting off later does not remove them, as with the distill's hooks: each run checks it and does nothing.
+
+### Working in git worktrees
+
+Some tools run every agent conversation, the one you talk to (the PM) included, in its own linked git worktree (`git worktree add`), and in a public repo `.kontext.toml` and `.claude/` are not committed, so they exist only in the main checkout. Four rules cover that:
+
+1. **The project is found through the main checkout.** In a linked worktree, `.kontext.toml` is looked for up to the worktree's root; if there is none, the one at the root of the main checkout is used (none for a bare repository), and only then the folders above the worktree, as before. A `.kontext.toml` that git tracks is the repo's file, in every worktree, not one worktree's own. `--project` and `KONTEXT_PROJECT` still win, and "the only project registered" is still the last fallback.
+2. **`worktree_role`.** A session in a worktree without a `.kontext.toml` of its own (an untracked one at its root) gets `worktree_role` from the repo's file (the main checkout's, or the tracked one), or else its `default_role`; the main checkout gets `default_role`. Set it with `kontext install --worktree-role agent` in the main checkout (later `install` runs keep it). `agent` is the value for delegated agents whose role you do not know: no line about your pending items, no capture, and the project's view with the facts of every epic; its questions list only shows questions addressed `--to agent` (none, normally), and its cursor is shared by every session with that role.
+3. **Mark the PM's worktree.** `kontext install --link-only` in the worktree where you talk to the PM writes only its own `.kontext.toml` (`default_role = "pm"`, untracked by git): that worktree is the PM's. Its own file wins over `worktree_role`. With a tracked `.kontext.toml` the PM's worktree cannot be marked (the file is already there, and it is the repo's): untrack it to mark one.
+4. **One `.pm/`.** `.pm/` belongs to the main checkout: `kontext ideas`, the report and the capture use the main checkout's from any linked worktree (with `[capture] worktrees = true`, each worktree's own, as before). The capture writes only from the main checkout and from the PM's worktree; in any other worktree it writes nothing and `hooks.log` says how to mark it. `kontext doctor` prints the `.pm/` path in use under Capture.
+
+The steps, in this order:
+
+1. In the worktree where you talk to the PM: `kontext --project <name> install --link-only` (it marks it as the PM's; `--project`, because the main checkout has no `.kontext.toml` yet).
+2. In the main checkout: `kontext install --local --worktree-role agent`.
+
+The other way round, every worktree, the PM's included, starts as `agent` until the first step is done, and nothing you type there is captured.
+
+What Claude Code reads from `.claude/` in a worktree is in its documentation, not in kontext:
+
+- **Settings** page, "Where Claude Code keeps the local file in a git repository": since v2.1.211, `.claude/settings.local.json` is read at the repo root, and in a worktree, the file at the main checkout's root. Not outside a git repo, when the repo root is your home directory, on Windows, or when the repo root or its `.git` or `.claude` entry is not owned by you. The shared `.claude/settings.json` is read from the session's own folder: a worktree session gets one only if the worktree has it, that is, if git tracks it.
+- **Worktrees** page, "What worktrees share with the main checkout": since v2.1.277, a worktree with no `.claude/skills` at its root loads the main checkout's project skills; one with its own loads only that copy. The same goes for `.claude/agents` and `.claude/commands`, also in worktrees made with `git worktree add`.
+- **Hooks reference:** the same handler defined in more than one settings file runs once.
+
+So, with `.claude/` not committed, `--local` in the main checkout puts the hooks where every worktree session reads them, and the skills and agent files installed there reach worktrees without a `.claude/skills` or `.claude/agents` of their own. `kontext install --local` in a linked worktree is refused (its own `settings.local.json` is not read). In the exceptions above, or with an older Claude Code, worktree sessions do not get the hooks of an untracked file; committing `.claude/settings.json` puts them in every worktree. A full `kontext install` in a linked worktree without a `.kontext.toml` of its own, when the main checkout has one, is refused: it names the main checkout, and `--link-only` and `--skills-only` still work there. Where it proceeds, `[[repos]]` names the repo after the main checkout's folder, not the worktree's (a worktree of a bare repo leaves `[[repos]]` as it is and says so). When `--local` creates `.claude/settings.local.json`, or `--link-only` creates `.kontext.toml` in a linked worktree, and git neither tracks nor ignores it, `install` prints the line to add to the repo's `.git/info/exclude`, which every worktree shares.
+
+`kontext doctor`, run in a worktree, counts the main checkout's `settings.local.json`, skills and agent files as this session's, and notes hooks that are only in an untracked `settings.json` of the main checkout. While the hooks are in both files, a copy that differs (another binary path, after a reinstall) runs as well; the capture writes a prompt delivered twice once (the same `prompt_id` and question-tool answer are written once, from either checkout), the start context would go in twice, so keep one copy (`--local`).
 
 ### Environment variables
 
@@ -297,7 +324,7 @@ Without help, the dumps depend on the PM remembering to save each message. With 
 [capture]
 enabled = true                          # off by default; run `kontext install` again after turning it on
 # skip_prefixes = ["<my-tool-output>"]  # prompts that start like this are machine text
-# worktrees = false                     # true: also in linked git worktrees (their own .pm/)
+# worktrees = false                     # true: in every linked git worktree (its own .pm/)
 ```
 
 - Each message you type to the PM session goes into today's dump (`.pm/dumps/<YYYY-MM-DD>.md`, local date, `-2`, `-3`… past 60 KB) the moment you send it, in the skill's format, with the lines of the coordinator's last message that ask something (those with `?`, the last 20 within 2,000 characters) under `**Coordinator asked:**`. If that message asked nothing with a question mark ("Say go and I merge it"), its last paragraph goes there instead (code blocks, a trailing heading or rule skipped; at most 600 characters, whole lines from the end), so a "go" still says what it approved. `kontext ideas` and the report never show those quoted lines as your words. Answers you give through the question tool (`AskUserQuestion`) are added at the end of the turn, numbered with their questions.
@@ -305,7 +332,7 @@ enabled = true                          # off by default; run `kontext install` 
 - Nothing said before capture was on is written. Secrets become `[secret removed]`: those the distill removes, plus, for the capture only, vendor-prefixed tokens (`abc_` and 20 or more letters and digits with a digit) and UUIDs (`abc_<uuid>`), 32-character hex strings with a letter and a digit (not a 40-character git SHA or a 64-character hash) and Slack tokens (`xoxb-…`). When it creates `.pm/dumps/` it also writes `.pm/.gitignore` with `dumps/`, if there is none; it never touches the repo's `.gitignore`.
 - The PM no longer appends what the hook wrote: it checks today's dump with one Grep and appends a message only if it is not there.
 - It prints nothing and always exits with 0; each run is one line in `<kontext-home>/.kontext/hooks.log`. Its marks live in `<kontext-home>/.kontext/capture/` (local).
-- Linked git worktrees (`git worktree add`) are skipped by default: agents delegated into their own worktree have no `KONTEXT_ROLE` and would otherwise count as the PM, and dumps there go when the worktree is removed. With `worktrees = true` a linked worktree writes into its own `.pm/`.
+- Linked git worktrees (`git worktree add`) are skipped by default: agents delegated into their own worktree have no `KONTEXT_ROLE` and would otherwise count as the PM, and dumps there go when the worktree is removed. The exception is the worktree marked as the PM's (`kontext install --link-only` in it), which writes into the main checkout's `.pm/` (see "Working in git worktrees"). With `worktrees = true` every linked worktree writes into its own `.pm/`.
 
 `kontext install` installs the skill and the reader. `kontext install --skills-only` brings only the skill; in a repo that must not get the start hook, copy the two files by hand:
 
@@ -442,11 +469,11 @@ PRs come from `gh pr list --repo <owner/repo> --state merged --search "merged:>=
 
 - **This binary**: its real path. In a cargo build directory (`target/debug`, `target/release`) it is a note, and a problem if a hook runs it.
 - **`kontext` on `PATH`**: agents run `kontext` by name, hooks by absolute path. A problem if there is none, or if it is a different file from the one the hooks run.
-- **Config and project**: `projects.toml`, the writer, and which project the current folder resolves to and how (`--project`, `KONTEXT_PROJECT`, `.kontext.toml`, or the only one). Without a project, the project checks are skipped and it exits with 1.
+- **Config and project**: `projects.toml`, the writer, which project the current folder resolves to and how (`--project`, `KONTEXT_PROJECT`, `.kontext.toml`, the main checkout's `.kontext.toml` from a linked worktree, a tracked one, or the only one), and the role sessions here start with, and from where. In a linked worktree not marked as the PM's whose role comes out `pm` (not from `KONTEXT_ROLE`), that line is a note: every worktree session starts as the PM; the fix is `kontext install --link-only` in the PM's worktree, then `kontext install --worktree-role agent` in the main checkout. Without a project, the project checks are skipped and it exits with 1.
 - **kontext-home**: it exists and is a git repo, `project.toml` parses, the ledger and this writer's file, the remote, the chains (as `kontext verify`), and own entries not committed or not pushed (a note: `kontext sync`).
-- **Hooks**: every `kontext hook <event>` in the repo's `.claude/settings.json` and `settings.local.json` and in your user's settings, with the file it is in and the binary's full path: it must exist, be executable and be the same file everywhere. A problem without a `SessionStart` hook or without the `Bash(kontext:*)` permission.
-- **Capture**: `[capture] enabled = true` without its hooks is a problem; its hooks with the capture off, a note; in a linked git worktree with `worktrees` off, a note that your messages here are not captured.
-- **Skills and agent files**: missing or from another version (as `kontext install --dry-run` would see them), a note.
+- **Hooks**: every `kontext hook <event>` in the repo's `.claude/settings.json` and `settings.local.json` and in your user's settings (in a linked worktree, also the main checkout's `settings.local.json`), with the file it is in and the binary's full path: it must exist, be executable and be the same file everywhere. A problem without a `SessionStart` hook or without the `Bash(kontext:*)` permission. Notes: kontext's hooks in both settings files of a checkout (a copy that differs runs as well); in a linked worktree, or in a main checkout that has linked worktrees, hooks only in the main checkout's `settings.json` when git does not track it (worktree sessions read `settings.json` from their own folder; the fix is `kontext install --local` there).
+- **Capture**: `[capture] enabled = true` without its hooks is a problem; its hooks with the capture off, a note. It says whether this checkout captures and why (a main checkout; a worktree marked as the PM's; `worktrees = true`; another role), with a note for an unmarked worktree, and prints the `.pm/` path in use (`.pm/ here: …`).
+- **Skills and agent files**: missing or from another version (as `kontext install --dry-run` would see them), a note. In a linked worktree with no `.claude/skills` (or `.claude/agents`) of its own, the main checkout's count, as Claude Code loads them there; then your user's (`~/.claude/skills`, `~/.claude/agents`, or under `$CLAUDE_CONFIG_DIR`).
 - **Hook log**: in `.kontext/hooks.log`, how many lines carry an error and when the last one was (a note).
 
 ## Phase 6 commands

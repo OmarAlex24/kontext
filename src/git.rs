@@ -67,6 +67,57 @@ pub fn checkout(dir: &Path) -> Option<(PathBuf, bool)> {
     Some((root, git_dir != common))
 }
 
+/// A checkout of `git worktree list --porcelain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// The main entry of a bare repository: no files checked out.
+    pub bare: bool,
+    /// Its folder is gone (`git worktree prune` would drop it).
+    pub prunable: bool,
+}
+
+/// The checkouts of the repo that contains `dir`, the main one first (as git
+/// lists them). Reads only.
+pub fn worktrees(dir: &Path) -> Option<Vec<Worktree>> {
+    let out = run(dir, &["worktree", "list", "--porcelain"])
+        .ok()
+        .flatten()?;
+    let mut v: Vec<Worktree> = Vec::new();
+    for line in out.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            v.push(Worktree {
+                path: PathBuf::from(p),
+                bare: false,
+                prunable: false,
+            });
+        } else if let Some(w) = v.last_mut() {
+            if line == "bare" {
+                w.bare = true;
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                w.prunable = true;
+            }
+        }
+    }
+    (!v.is_empty()).then_some(v)
+}
+
+/// The root of the main checkout of the repo that contains `dir` (the folder
+/// that holds the common git dir), or `None` for a bare repository or when
+/// it is not there.
+pub fn main_checkout(dir: &Path) -> Option<PathBuf> {
+    let main = worktrees(dir)?.into_iter().next()?;
+    (!main.bare && main.path.is_dir()).then_some(main.path)
+}
+
+/// `true` if git tracks `path` (relative to `root`) in that checkout's index.
+pub fn tracked(root: &Path, path: &str) -> bool {
+    run(root, &["ls-files", "--error-unmatch", "--", path])
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 /// The sha of `HEAD`.
 pub fn head(root: &Path) -> Option<String> {
     line(root, &["rev-parse", "--verify", "-q", "HEAD"])
@@ -87,6 +138,33 @@ pub fn remote_url(root: &Path) -> Option<String> {
         let name = first.lines().next()?.trim().to_string();
         line(root, &["remote", "get-url", &name])
     })
+}
+
+/// If git neither tracks nor ignores `path` (relative to `dir`), the
+/// repo's exclude file (`<common git dir>/info/exclude`, shared by every
+/// worktree); `None` otherwise, or if git cannot tell.
+pub fn untracked_unignored(dir: &Path, path: &str) -> Option<PathBuf> {
+    if tracked(dir, path) {
+        return None;
+    }
+    let status = Command::new("git")
+        .args(["check-ignore", "-q", "--", path])
+        .current_dir(dir)
+        .status()
+        .ok()?;
+    // 0: ignored; 1: not ignored; anything else: an error.
+    if status.code() != Some(1) {
+        return None;
+    }
+    let common = PathBuf::from(line(dir, &["rev-parse", "--git-common-dir"])?);
+    let common = dir.join(common);
+    Some(
+        common
+            .canonicalize()
+            .unwrap_or(common)
+            .join("info")
+            .join("exclude"),
+    )
 }
 
 /// The files git tracks (`git ls-files`), relative to the root.

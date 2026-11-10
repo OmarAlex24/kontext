@@ -84,8 +84,13 @@ impl Setup {
 
     /// `kontext doctor --json` with `exe`, from the repo, with this PATH.
     fn doctor(&self, exe: &Path, path: &str) -> (Output, Value) {
+        self.doctor_in(exe, path, &self.repo())
+    }
+
+    /// `kontext doctor --json` from `cwd`.
+    fn doctor_in(&self, exe: &Path, path: &str, cwd: &Path) -> (Output, Value) {
         let out = self
-            .cmd(exe, &["doctor", "--json"], &self.repo(), path)
+            .cmd(exe, &["doctor", "--json"], cwd, path)
             .output()
             .unwrap();
         let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
@@ -459,4 +464,382 @@ fn hook_log_errors_are_counted() {
     fs::write(&log, "something else\n").unwrap();
     let (_, v) = s.doctor(&s.bin(), &s.path_with(&[&s.root().join("bin")]));
     assert!(has(&v, "note", "format not recognized"), "{v:#}");
+}
+
+impl Setup {
+    fn git(&self, dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .env("HOME", self.root().join("h"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    /// A linked worktree of the repo, `<root>/<name>`.
+    fn worktree(&self, name: &str) -> PathBuf {
+        let p = self.root().join(name);
+        self.git(
+            &self.repo(),
+            &["worktree", "add", "-q", "-b", name, p.to_str().unwrap()],
+        );
+        p
+    }
+
+    fn path(&self) -> String {
+        self.path_with(&[&self.root().join("bin")])
+    }
+}
+
+/// Project `demo` with the capture on, installed in the main checkout with
+/// `install_args` (`.kontext.toml` and `.claude/` untracked, as in a public
+/// repo), one commit, and two linked worktrees: `pm-desk`, marked as the
+/// PM's, and `agent-1`.
+fn with_worktrees(install_args: &[&str]) -> (Setup, PathBuf, PathBuf) {
+    let s = bare();
+    fs::write(s.config().join("projects.toml"), "writer = \"omar@test\"\n").unwrap();
+    let home = s.khome();
+    s.run_ok(
+        &s.bin(),
+        &["init", "demo", "--home", home.to_str().unwrap()],
+        &s.root(),
+    );
+    let toml = home.join("project.toml");
+    let t = fs::read_to_string(&toml).unwrap();
+    fs::write(
+        &toml,
+        t.replacen("\n[claims]", "\n[capture]\nenabled = true\n\n[claims]", 1),
+    )
+    .unwrap();
+    let mut args = vec!["install"];
+    args.extend_from_slice(install_args);
+    s.run_ok(&s.bin(), &args, &s.repo());
+    s.git(&s.repo(), &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let pm = s.worktree("pm-desk");
+    s.run_ok(&s.bin(), &["install", "--link-only"], &pm);
+    let agent = s.worktree("agent-1");
+    (s, pm, agent)
+}
+
+/// `kontext doctor --json` from `cwd` with `KONTEXT_ROLE` set.
+fn doctor_as(s: &Setup, cwd: &Path, role: &str) -> Value {
+    let out = s
+        .cmd(&s.bin(), &["doctor", "--json"], cwd, &s.path())
+        .env("KONTEXT_ROLE", role)
+        .output()
+        .unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn a_worktree_of_a_local_install_has_no_problems() {
+    let (s, pm, agent) = with_worktrees(&["--local"]);
+    assert!(!s.repo().join(".claude/settings.json").exists());
+    let mut dirs = all_dirs(&s);
+    dirs.extend([pm.clone(), agent.clone()]);
+    let before = snapshot(&dirs);
+
+    let (out, v) = s.doctor_in(&s.bin(), &s.path(), &pm);
+    assert!(out.status.success(), "{:?}", findings(&v, "problem"));
+    let main = s.repo();
+    let local = main
+        .join(".claude/settings.local.json")
+        .display()
+        .to_string();
+    for (level, needle) in [
+        (
+            "ok",
+            format!("project demo (from {}/.kontext.toml)", pm.display()),
+        ),
+        (
+            "ok",
+            "sessions here start with role pm (default_role in".to_string(),
+        ),
+        (
+            "ok",
+            format!(
+                "SessionStart, Stop, UserPromptSubmit → {}",
+                s.bin().display()
+            ),
+        ),
+        ("ok", format!("(in {local}), this binary")),
+        ("ok", "permission Bash(kontext:*)".into()),
+        ("ok", "on, with its hooks".into()),
+        ("ok", "a linked git worktree marked as the PM's".into()),
+        ("ok", format!(".pm/ here: {}", main.join(".pm").display())),
+        // No .claude/skills or .claude/agents in the worktree: Claude Code
+        // loads the main checkout's.
+        (
+            "ok",
+            format!(
+                "skills current in {}",
+                main.join(".claude/skills").display()
+            ),
+        ),
+        (
+            "ok",
+            format!(
+                "agent files current in {}",
+                main.join(".claude/agents").display()
+            ),
+        ),
+    ] {
+        assert!(has(&v, level, &needle), "{needle}: {v:#}");
+    }
+    assert!(!has(&v, "note", "hooks are only in"), "{v:#}");
+
+    // An agent's worktree, with no worktree_role: every session there starts
+    // as the PM, a note with both steps.
+    let (out, v) = s.doctor_in(&s.bin(), &s.path(), &agent);
+    assert!(out.status.success(), "{:?}", findings(&v, "problem"));
+    assert!(
+        has(
+            &v,
+            "ok",
+            &format!(
+                "project demo (from {}/.kontext.toml, the main checkout's: this linked git \
+                 worktree has none of its own)",
+                main.display()
+            )
+        ),
+        "{v:#}"
+    );
+    assert!(
+        !has(&v, "ok", "sessions here start with role pm")
+            && has(
+                &v,
+                "note",
+                "sessions here start with role pm (default_role in"
+            )
+            && has(
+                &v,
+                "note",
+                &format!(
+                    "`kontext install --link-only` in the worktree where the PM works, then \
+                     `kontext install --worktree-role agent` in {}",
+                    main.display()
+                )
+            ),
+        "{v:#}"
+    );
+    assert!(
+        has(&v, "note", "not marked as the PM's") && has(&v, "note", "kontext install --link-only"),
+        "{v:#}"
+    );
+    assert!(
+        has(
+            &v,
+            "ok",
+            &format!(".pm/ here: {}", main.join(".pm").display())
+        ),
+        "{v:#}"
+    );
+    // A role from $KONTEXT_ROLE stays ok, even pm.
+    let v = doctor_as(&s, &agent, "pm");
+    assert!(
+        has(&v, "ok", "sessions here start with role pm ($KONTEXT_ROLE)"),
+        "{v:#}"
+    );
+
+    // The main checkout itself.
+    let (out, v) = s.doctor(&s.bin(), &s.path());
+    assert!(out.status.success(), "{:?}", findings(&v, "problem"));
+    assert!(has(&v, "ok", "a main checkout, into its own .pm/"), "{v:#}");
+    assert!(
+        has(
+            &v,
+            "ok",
+            "sessions here start with role pm (default_role in"
+        ),
+        "{v:#}"
+    );
+    assert_eq!(snapshot(&dirs), before, "doctor wrote something");
+
+    // With worktree_role = "agent", the agent's worktree is ok.
+    s.run_ok(&s.bin(), &["install", "--worktree-role", "agent"], &main);
+    let (_, v) = s.doctor_in(&s.bin(), &s.path(), &agent);
+    assert!(
+        has(
+            &v,
+            "ok",
+            "sessions here start with role agent (worktree_role in"
+        ),
+        "{v:#}"
+    );
+
+    // A worktree with a .claude/skills of its own loads only that one.
+    fs::create_dir_all(agent.join(".claude/skills")).unwrap();
+    let (_, v) = s.doctor_in(&s.bin(), &s.path(), &agent);
+    assert!(
+        has(&v, "note", "skills not current (missing: .claude/skills/"),
+        "{v:#}"
+    );
+    assert!(
+        has(
+            &v,
+            "note",
+            "`kontext install --skills-only` (this linked worktree has a .claude/skills of its own"
+        ),
+        "{v:#}"
+    );
+    // Agent files still come from the main checkout.
+    assert!(
+        has(
+            &v,
+            "ok",
+            &format!(
+                "agent files current in {}",
+                main.join(".claude/agents").display()
+            )
+        ),
+        "{v:#}"
+    );
+}
+
+#[test]
+fn hooks_only_in_settings_json_are_a_note_for_worktrees() {
+    let (s, pm, _) = with_worktrees(&[]);
+    let main = s.repo();
+    let fix = format!("`kontext install --local` (in {})", main.display());
+    let only = "which git does not track: a session in a linked git worktree reads \
+                .claude/settings.json from the worktree";
+    let (out, v) = s.doctor_in(&s.bin(), &s.path(), &pm);
+    assert!(!out.status.success());
+    // A worktree session does not read the main checkout's settings.json: the
+    // problems are real, and their fix is --local in the main checkout.
+    assert!(
+        has(&v, "problem", "no `SessionStart` hook") && has(&v, "problem", &fix),
+        "{v:#}"
+    );
+    assert!(has(&v, "note", only) && has(&v, "note", &fix), "{v:#}");
+    // From the main checkout, which has linked worktrees: the same note.
+    let (out, v) = s.doctor(&s.bin(), &s.path());
+    assert!(out.status.success(), "{:?}", findings(&v, "problem"));
+    assert!(has(&v, "note", only), "{v:#}");
+
+    // Only the permission in settings.local.json: the hooks are still only
+    // in settings.json.
+    fs::write(
+        main.join(".claude/settings.local.json"),
+        "{\"permissions\": {\"allow\": [\"Bash(kontext:*)\"]}}",
+    )
+    .unwrap();
+    let (_, v) = s.doctor(&s.bin(), &s.path());
+    assert!(has(&v, "note", only), "{v:#}");
+    assert!(!has(&v, "note", "in both"), "{v:#}");
+    fs::remove_file(main.join(".claude/settings.local.json")).unwrap();
+
+    // A settings.json that git tracks is in every worktree: no note.
+    s.git(&main, &["add", ".claude/settings.json"]);
+    s.git(&main, &["commit", "-q", "-m", "settings"]);
+    let (_, v) = s.doctor(&s.bin(), &s.path());
+    assert!(!has(&v, "note", "hooks are only in"), "{v:#}");
+    s.git(&main, &["rm", "-q", "--cached", ".claude/settings.json"]);
+    s.git(&main, &["commit", "-q", "-m", "untrack"]);
+
+    // In both files (a copy by hand).
+    let shared = fs::read_to_string(main.join(".claude/settings.json")).unwrap();
+    fs::write(main.join(".claude/settings.local.json"), shared).unwrap();
+    let (_, v) = s.doctor(&s.bin(), &s.path());
+    assert!(has(&v, "note", "a copy that differs"), "{v:#}");
+    let (out, v) = s.doctor_in(&s.bin(), &s.path(), &pm);
+    assert!(out.status.success(), "{:?}", findings(&v, "problem"));
+    // After --local, no note at all about where the hooks are.
+    s.run_ok(&s.bin(), &["install", "--local"], &main);
+    let (out, v) = s.doctor(&s.bin(), &s.path());
+    assert!(out.status.success(), "{v:#}");
+    assert!(
+        !has(&v, "note", "in both") && !has(&v, "note", "hooks are only in"),
+        "{v:#}"
+    );
+}
+
+/// A repo whose `.kontext.toml` (with `worktree_role`) and
+/// `.claude/settings.json` are committed, and a linked worktree of it.
+#[test]
+fn a_tracked_kontext_toml_gives_worktrees_their_role() {
+    let s = bare();
+    fs::write(s.config().join("projects.toml"), "writer = \"omar@test\"\n").unwrap();
+    let home = s.khome();
+    s.run_ok(
+        &s.bin(),
+        &["init", "demo", "--home", home.to_str().unwrap()],
+        &s.root(),
+    );
+    let main = s.repo();
+    s.run_ok(&s.bin(), &["install", "--worktree-role", "agent"], &main);
+    s.git(&main, &["add", ".kontext.toml", ".claude"]);
+    s.git(&main, &["commit", "-q", "-m", "kontext"]);
+    let lane = s.worktree("lane-1");
+    assert!(lane.join(".kontext.toml").exists());
+
+    let (out, v) = s.doctor_in(&s.bin(), &s.path(), &lane);
+    assert!(out.status.success(), "{:?}", findings(&v, "problem"));
+    for (level, needle) in [
+        (
+            "ok",
+            format!(
+                "project demo (from {}/.kontext.toml, which git tracks",
+                lane.display()
+            ),
+        ),
+        (
+            "ok",
+            "sessions here start with role agent (worktree_role in".into(),
+        ),
+        (
+            "ok",
+            format!(
+                "skills current in {}",
+                lane.join(".claude/skills").display()
+            ),
+        ),
+    ] {
+        assert!(has(&v, level, &needle), "{needle}: {v:#}");
+    }
+    // The settings.json is tracked: the lane has its own, and no note.
+    assert!(!has(&v, "note", "hooks are only in"), "{v:#}");
+    let (out, v) = s.doctor(&s.bin(), &s.path());
+    assert!(out.status.success(), "{:?}", findings(&v, "problem"));
+    assert!(
+        has(
+            &v,
+            "ok",
+            "sessions here start with role pm (default_role in"
+        ) && !has(&v, "note", "hooks are only in"),
+        "{v:#}"
+    );
+
+    // A tracked file without worktree_role: the lane starts as the PM, and
+    // --link-only cannot mark it, so the fix is worktree_role.
+    let lane2 = s.worktree("lane-2");
+    fs::write(
+        lane2.join(".kontext.toml"),
+        "project = \"demo\"\ndefault_role = \"pm\"\n",
+    )
+    .unwrap();
+    s.git(&lane2, &["commit", "-q", "-am", "no worktree_role"]);
+    let (_, v) = s.doctor_in(&s.bin(), &s.path(), &lane2);
+    assert!(
+        has(
+            &v,
+            "note",
+            "sessions here start with role pm (default_role in"
+        ) && has(
+            &v,
+            "note",
+            &format!(
+                "`kontext install --worktree-role agent` in {}, and commit the .kontext.toml",
+                main.display()
+            )
+        ) && !has(
+            &v,
+            "note",
+            "`kontext install --link-only` in the worktree where"
+        ),
+        "{v:#}"
+    );
 }

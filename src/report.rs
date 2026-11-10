@@ -251,13 +251,15 @@ pub fn build(st: &State, project: &Project, human: &str) -> Report {
     }
 }
 
-/// The ideas for the report, found as `kontext ideas` finds them (the git repo
-/// of `cwd`, or else the first project repo on this machine). `None` when there
-/// is no `.pm/items.md`, it has no ideas, or anything fails: the report never
-/// fails because of them.
+/// The ideas for the report, found as `kontext ideas` finds them (the `.pm/` of
+/// the git repo of `cwd`, which in a linked worktree is the main checkout's,
+/// or else the first project repo on this machine). `None` when there is no
+/// `.pm/items.md`, it has no ideas, or anything fails: the report never fails
+/// because of them.
 pub fn ideas_for(st: &State, project: &Project, cwd: &Path) -> Option<Ideas> {
     let repos = crate::repos::Repos::load(project, cwd).ok()?;
-    let pm = crate::ideas::locate(&repos)?;
+    let own = crate::capture::Settings::of(project).worktrees;
+    let pm = crate::ideas::locate(&repos, own)?;
     let people: Vec<String> = project.people.keys().cloned().collect();
     crate::ideas::load(st, &project.name, &people, &pm)
         .ok()

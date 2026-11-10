@@ -598,6 +598,21 @@ pub enum Cmd {
         /// instead of the repo's
         #[arg(long, requires = "skills_only")]
         global: bool,
+        /// Only .kontext.toml, in this checkout: nothing under .claude/, no skills, no agent
+        /// files, no [[repos]] change. In a linked git worktree, with --role pm (the default), it
+        /// marks the worktree as the PM's (an untracked file)
+        #[arg(long, conflicts_with_all = ["skills_only", "force", "local"])]
+        link_only: bool,
+        /// The hooks and the Bash(kontext:*) permission go in .claude/settings.local.json instead
+        /// of .claude/settings.json, and kontext's own entries leave settings.json. Run it in the
+        /// main checkout: Claude Code reads that file from the main checkout's root in every
+        /// worktree
+        #[arg(long, conflicts_with = "skills_only")]
+        local: bool,
+        /// Sets worktree_role in .kontext.toml: the role of sessions in linked git worktrees that
+        /// have no .kontext.toml of their own
+        #[arg(long, value_name = "ROLE", conflicts_with = "skills_only")]
+        worktree_role: Option<String>,
     },
     /// Checks this installation: the binary, PATH, config and project, kontext-home, hooks,
     /// capture, skills and the hook log. Writes nothing; exits with 1 if anything is a problem
@@ -694,6 +709,15 @@ fn install_skills(dry_run: bool, global: bool) -> Result<ExitCode> {
         println!("Wrote {}", p.display());
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The options of `kontext install` (besides `--skills-only`).
+struct InstallHow<'a> {
+    dry_run: bool,
+    force: bool,
+    link_only: bool,
+    local: bool,
+    worktree_role: Option<&'a str>,
 }
 
 /// The path of this binary, quoted if needed (for the hooks).
@@ -1155,7 +1179,23 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             global,
             ..
         } => install_skills(dry_run, global),
-        Cmd::Install { dry_run, force, .. } => cx.install(dry_run, force, cx.role.unwrap_or("pm")),
+        Cmd::Install {
+            dry_run,
+            force,
+            link_only,
+            local,
+            worktree_role,
+            ..
+        } => cx.install(
+            InstallHow {
+                dry_run,
+                force,
+                link_only,
+                local,
+                worktree_role: worktree_role.as_deref(),
+            },
+            cx.role.unwrap_or("pm"),
+        ),
         Cmd::Init { name, home, remote } => init(&name, home, remote.as_deref()),
         Cmd::Clone { url, home, name } => {
             let c = crate::sync::clone(&url, home, name.as_deref())?;
@@ -1784,7 +1824,8 @@ impl Ctx<'_> {
         let (mut store, project) = self.open()?;
         let cwd = std::env::current_dir()?;
         let repos = Repos::load(&project, &cwd)?;
-        let Some(pm) = crate::ideas::locate(&repos) else {
+        let own = crate::capture::Settings::of(&project).worktrees;
+        let Some(pm) = crate::ideas::locate(&repos, own) else {
             if self.json {
                 print_json(&json!({"project": project.name, "path": null, "total": 0,
                     "counts": crate::ideas::IdeaState::ALL.iter()
@@ -2025,51 +2066,108 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn install(&self, dry_run: bool, force: bool, role: &str) -> Result<ExitCode> {
-        let code = self.install_inner(dry_run, force, role)?;
-        if let Some(note) = build_dir_note() {
+    fn install(&self, how: InstallHow, role: &str) -> Result<ExitCode> {
+        let code = self.install_inner(&how, role)?;
+        if !how.link_only
+            && let Some(note) = build_dir_note()
+        {
             println!("{note}");
         }
         Ok(code)
     }
 
-    fn install_inner(&self, dry_run: bool, force: bool, role: &str) -> Result<ExitCode> {
+    fn install_inner(&self, how: &InstallHow, role: &str) -> Result<ExitCode> {
+        if let Some(r) = how.worktree_role
+            && (r.trim().is_empty() || r.trim() != r)
+        {
+            bail!("invalid --worktree-role {r:?}: give a role name, such as agent");
+        }
         let resolved = config::resolve_project(self.project)?;
-        let repo = install::repo_root(&std::env::current_dir()?);
+        let cwd = std::env::current_dir()?;
+        let repo = install::repo_root(&cwd);
         if repo == resolved.home {
             bail!(
                 "{} is the kontext-home; run `kontext install` in the code repo",
                 repo.display()
             );
         }
-        let project = Project::load(&resolved.home)?;
-        let opts = install::Options {
-            repo: &repo,
-            project_name: &resolved.name,
-            home: &resolved.home,
-            default_role: role,
-            exe: exe_quoted()?,
-            distill: distill::Settings::of(&project)?.enabled,
-            capture: crate::capture::Settings::of(&project).enabled,
-            force,
+        let linked = matches!(crate::git::checkout(&repo), Some((_, true)));
+        if linked && how.worktree_role.is_some() {
+            bail!(
+                "{} is a linked git worktree: worktree_role is read from the main checkout's \
+                 .kontext.toml; run this there",
+                repo.display()
+            );
+        }
+        if linked && how.local {
+            let main = crate::git::main_checkout(&repo)
+                .map(|m| format!(" ({})", m.display()))
+                .unwrap_or_default();
+            bail!(
+                "{} is a linked git worktree: Claude Code reads .claude/settings.local.json from \
+                 the main checkout's root in a worktree, not from the worktree; run `kontext \
+                 install --local` in the main checkout{main}",
+                repo.display()
+            );
+        }
+        if linked
+            && !how.link_only
+            && let Some(f) = config::find_repo_link(&repo)?
+            && f.kind == config::LinkKind::MainCheckout
+        {
+            bail!(
+                "{} is a linked git worktree without a .kontext.toml of its own: kontext is \
+                 installed in the main checkout ({}); run `kontext install` there. `{}` marks this \
+                 worktree as the PM's (it writes only its .kontext.toml); `kontext install \
+                 --skills-only` also works here.",
+                repo.display(),
+                f.path.parent().unwrap_or(&f.path).display(),
+                crate::capture::MARK_COMMAND
+            );
+        }
+        let plan = if how.link_only {
+            install::plan_link_only(&repo, &resolved.name, role, how.worktree_role)?
+        } else {
+            let project = Project::load(&resolved.home)?;
+            install::plan(&install::Options {
+                repo: &repo,
+                project_name: &resolved.name,
+                home: &resolved.home,
+                default_role: role,
+                exe: exe_quoted()?,
+                distill: distill::Settings::of(&project)?.enabled,
+                capture: crate::capture::Settings::of(&project).enabled,
+                force: how.force,
+                local: how.local,
+                worktree_role: how.worktree_role,
+            })?
         };
-        let plan = install::plan(&opts)?;
         for k in &plan.kept {
             println!(
                 "Kept {}: it already exists with different content (did you change it?). `kontext install --force` replaces it.",
                 k.display()
             );
         }
+        for n in &plan.notes {
+            println!("{n}");
+        }
         if plan.is_noop() {
-            println!(
-                "Everything is installed in {} for project {}; nothing to change.",
-                repo.display(),
-                resolved.name
-            );
+            if how.link_only {
+                println!(
+                    "{} is already there; nothing to change.",
+                    repo.join(".kontext.toml").display()
+                );
+            } else {
+                println!(
+                    "Everything is installed in {} for project {}; nothing to change.",
+                    repo.display(),
+                    resolved.name
+                );
+            }
             return Ok(ExitCode::SUCCESS);
         }
         print!("{}", plan.diffs());
-        if dry_run {
+        if how.dry_run {
             println!("Dry run (--dry-run): nothing was written.");
             return Ok(ExitCode::SUCCESS);
         }

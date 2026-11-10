@@ -45,6 +45,8 @@ Append each user message that carries ideas, decisions or answers to today's dum
 
 One writer per message. When kontext's capture hook is on, kontext appends each user message to today's dump by itself, in this same format, before you see it: do not append it again. Check with one Grep of today's dump for a piece of the message, and append it yourself only if it is not there (the hook is off, or it skipped the message). Answers given through a question tool reach the dump at the end of the turn; if you need to cite one before that, append it yourself in this format.
 
+In a linked git worktree, `.pm/` is the main checkout's, not the worktree's: run `kontext doctor` once and use the path on its `.pm/ here:` line (under Capture) wherever this skill says `.pm/`, and put it in one line before the task text you give `kontext-pm-reader`. If doctor says this checkout captures, the hook saves each message: do not save the dumps by hand. If it says the worktree is not marked as the PM's, tell the user its fix.
+
 ## 3. Confirm
 
 After saving, list back the ideas you took from the message, with the ids you gave them in items.md (section 4), and ask whether you missed anything. Their answer is a user message like any other: it goes to the dump too (section 2, with your question under `**Coordinator asked:**`).
