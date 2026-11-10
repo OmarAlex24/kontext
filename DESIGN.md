@@ -668,6 +668,7 @@ In a separate repo, `kontext-bench`.
   - unit tests of the state calculation;
   - views compared against saved outputs;
   - concurrency: N processes writing and claiming tasks at once; at the end the chain verifies and each task has a single owner.
+- **CI:** GitHub Actions on `ubuntu-latest` (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy` with `-D warnings` and `cargo test` on each pull request and each push to `main`; development is on macOS, so CI is where Linux gets tested.
 - **Installation:** `cargo install --git`, and later binaries in releases.
 - **Pending:** the `t3-machine` server doesn't have Rust. Phase 1 installs `rustup` for the user.
 

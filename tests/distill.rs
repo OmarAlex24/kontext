@@ -379,12 +379,17 @@ fn hooks_spawn_distill_in_the_background() {
     assert!(took < Duration::from_millis(1500), "el hook tardó {took:?}");
     let log = fs::read_to_string(p.home.join(".kontext/hooks.log")).unwrap();
     assert!(log.contains("in the background (pid"), "{log}");
+    // The entries reach the ledger before the chunk's line reaches distill.log:
+    // wait for both.
+    let dlog_path = p.home.join(".kontext/distill.log");
+    let chunk_logged =
+        || fs::read_to_string(&dlog_path).is_ok_and(|s| s.contains("chunk 1/1: +4 entries"));
     let deadline = Instant::now() + Duration::from_secs(20);
-    while entries_by(&p, "distill").len() < 4 && Instant::now() < deadline {
+    while (entries_by(&p, "distill").len() < 4 || !chunk_logged()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(entries_by(&p, "distill").len(), 4);
-    let dlog = fs::read_to_string(p.home.join(".kontext/distill.log")).unwrap();
+    let dlog = fs::read_to_string(&dlog_path).unwrap();
     assert!(dlog.contains("starting the distill"), "{dlog}");
     assert!(dlog.contains("chunk 1/1: +4 entries"), "{dlog}");
 

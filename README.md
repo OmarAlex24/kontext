@@ -561,6 +561,8 @@ cargo test
 python3 -m unittest discover bench/tests   # the dry-run harness; needs target/debug/kontext (cargo build)
 ```
 
+CI: `.github/workflows/ci.yml` runs the first three (fmt, clippy with warnings as errors, and the tests) on Linux with Rust 1.98.1, on every pull request whatever its base branch and on every push to `main`. The harness is not part of it.
+
 The `kontext ui` tests start the server on a free port against the project from `examples/demo.sh` (they need `bash` and `git`). The harness tests don't run from `cargo test`: they are skipped if they can't find the `kontext` binary.
 
 The golden-query test for `find` copies the docs of a fictitious web shop (`tests/fixtures/find-docs`) into a temporary git repo, configures it with `examples/find-repo.toml` and `examples/find-synonyms.toml`, and checks the top results and their status (in force, proposed or historical) for a handful of queries, plus `--check`. The distill tests use a fake model (a shell script); they never call a real model.
