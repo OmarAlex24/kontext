@@ -15,6 +15,7 @@ pub mod find;
 pub mod git;
 pub mod hlc;
 pub mod hook;
+pub mod ideas;
 pub mod import_v0;
 pub mod inbox;
 pub mod index;

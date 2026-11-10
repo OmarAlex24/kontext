@@ -525,6 +525,9 @@ pub struct State {
     /// Question → the `confirm`s from people who asked the same thing later
     /// (`kontext ask` joins the open question instead of repeating it).
     pub joined: BTreeMap<String, Vec<String>>,
+    /// The old id of each entry imported from v0 (`fields.v0_id`, `D-0030`) →
+    /// its id here. [`State::resolve`] looks them up.
+    pub v0_ids: BTreeMap<String, String>,
     /// Charters in the order they were signed.
     sign_order: Vec<String>,
 }
@@ -553,6 +556,11 @@ impl State {
                 continue;
             }
             st.apply(&e);
+            if let Some(v0) = e.fields.get("v0_id").and_then(Value::as_str) {
+                st.v0_ids
+                    .entry(v0.trim().to_uppercase())
+                    .or_insert_with(|| e.id.clone());
+            }
             st.order.push(e.id.clone());
             st.entries.insert(e.id.clone(), e);
         }
@@ -634,7 +642,9 @@ impl State {
         !self.not_counting.contains_key(id)
     }
 
-    /// A full `id` from a unique prefix (`D-7f3`, `d-7f3a9c`).
+    /// A full `id` from a unique prefix (`D-7f3`, `d-7f3a9c`), or from the id
+    /// an entry had in v0 (`D-0030`, kept in `fields.v0_id`). The v0 id wins
+    /// over a prefix: `D-0030` is also a prefix of `D-0030a1`.
     pub fn resolve(&self, s: &str) -> Result<String> {
         let s = s.trim();
         if s.is_empty() {
@@ -642,6 +652,9 @@ impl State {
         }
         if self.entries.contains_key(s) {
             return Ok(s.to_string());
+        }
+        if let Some(id) = self.v0_ids.get(&s.to_uppercase()) {
+            return Ok(id.clone());
         }
         let up = match s.split_once('-') {
             Some((p, rest)) => format!("{}-{}", p.to_uppercase(), rest.to_lowercase()),
@@ -1806,6 +1819,23 @@ mod tests {
                 .contains("ambiguous")
         );
         assert!(st.resolve("Q-1").is_err());
+    }
+
+    #[test]
+    fn resolve_v0_ids() {
+        // `D-0015` is also a prefix of `D-0015ab`: the v0 id wins.
+        let st = build(vec![
+            with(
+                e("D-a1b2c3", "001", "decision", &[]),
+                "v0_id",
+                json!("D-0015"),
+            ),
+            e("D-0015ab", "002", "decision", &[]),
+        ]);
+        assert_eq!(st.resolve("D-0015").unwrap(), "D-a1b2c3");
+        assert_eq!(st.resolve("d-0015").unwrap(), "D-a1b2c3");
+        assert_eq!(st.resolve("D-0015a").unwrap(), "D-0015ab");
+        assert!(st.resolve("D-0016").is_err());
     }
 
     // ------------------------------------------------------------ tasks

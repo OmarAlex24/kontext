@@ -378,6 +378,9 @@ pub enum Cmd {
         #[arg(long = "as", value_name = "HUMAN")]
         reader: Option<String>,
     },
+    /// The user's ideas in `.pm/items.md` (skill kontext-pm) and where each one went: its state
+    /// comes from the ledger through the ids in `where`. Doesn't write anything
+    Ideas,
     /// Epics
     Epic {
         #[command(subcommand)]
@@ -959,6 +962,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             output,
             reader,
         } => cx.report(html, output, reader),
+        Cmd::Ideas => cx.ideas(),
         Cmd::Standup { peek, reader } => cx.standup(peek, reader),
         Cmd::Resume {
             role,
@@ -1705,6 +1709,32 @@ impl Ctx<'_> {
                 );
             }
             None => print!("{text}"),
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn ideas(&self) -> Result<ExitCode> {
+        let (mut store, project) = self.open()?;
+        let cwd = std::env::current_dir()?;
+        let repos = Repos::load(&project, &cwd)?;
+        let Some(pm) = crate::ideas::locate(&repos) else {
+            if self.json {
+                print_json(&json!({"project": project.name, "path": null, "total": 0,
+                    "counts": crate::ideas::IdeaState::ALL.iter()
+                        .map(|s| json!({"state": s, "count": 0})).collect::<Vec<_>>(),
+                    "ideas": []}))?;
+            } else {
+                println!("{}", crate::ideas::NONE_TEXT);
+            }
+            return Ok(ExitCode::SUCCESS);
+        };
+        let st = app::state(&mut store, &project)?;
+        let people: Vec<String> = project.people.keys().cloned().collect();
+        let ideas = crate::ideas::load(&st, &project.name, &people, &pm)?;
+        if self.json {
+            print_json(&ideas)?;
+        } else {
+            print!("{}", crate::ideas::text(&ideas));
         }
         Ok(ExitCode::SUCCESS)
     }
