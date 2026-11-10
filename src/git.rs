@@ -42,6 +42,31 @@ pub fn root(dir: &Path) -> Option<PathBuf> {
     line(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
+/// The root of the git repo that contains `dir`, and whether it is a linked
+/// worktree (`git worktree add`): its git dir is not the common one. One git
+/// call. A submodule is not a linked worktree.
+pub fn checkout(dir: &Path) -> Option<(PathBuf, bool)> {
+    let out = line(
+        dir,
+        &[
+            "rev-parse",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+    )?;
+    let mut lines = out.lines();
+    let root = PathBuf::from(lines.next()?.trim());
+    // Both may come relative to `dir`.
+    let abs = |p: &str| {
+        let p = dir.join(p.trim());
+        p.canonicalize().unwrap_or(p)
+    };
+    let git_dir = abs(lines.next()?);
+    let common = abs(lines.next()?);
+    Some((root, git_dir != common))
+}
+
 /// The sha of `HEAD`.
 pub fn head(root: &Path) -> Option<String> {
     line(root, &["rev-parse", "--verify", "-q", "HEAD"])

@@ -8,6 +8,10 @@
 //! with the transcript Claude Code sends (unless `KONTEXT_DISTILL_DISABLE` or
 //! `[distill] enabled = false` is set), and return right away.
 //!
+//! `user-prompt-submit`, `stop` and `session-end` run the capture
+//! ([`crate::capture`]) if `[capture] enabled = true`: the user's messages go
+//! into `.pm/dumps/` of the code repo. They never print anything.
+//!
 //! The start hook does not advance any cursor. What it puts in the context may
 //! not be read carefully (the session starts with another task in mind), so
 //! new items still count as new until someone runs `kontext resume` or
@@ -28,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::app;
+use crate::capture;
 use crate::config::{self, Project};
 use crate::cursor::Frontier;
 use crate::distill;
@@ -169,10 +174,15 @@ fn save_given(home: &Path, session_id: &str, g: &Given) -> Result<()> {
 
 /// Deletes the records of sessions older than [`GIVEN_DAYS`] days.
 fn prune_given(home: &Path) {
-    let Ok(rd) = fs::read_dir(sessions_dir(home)) else {
+    prune_older(&sessions_dir(home), GIVEN_DAYS);
+}
+
+/// Deletes the files in `dir` not changed for more than `days` days.
+pub fn prune_older(dir: &Path, days: u64) {
+    let Ok(rd) = fs::read_dir(dir) else {
         return;
     };
-    let max = std::time::Duration::from_secs(GIVEN_DAYS * 24 * 3600);
+    let max = std::time::Duration::from_secs(days * 24 * 3600);
     for ent in rd.flatten() {
         let old = ent
             .metadata()
@@ -323,9 +333,24 @@ fn run_inner(
                 .unwrap_or("-"),
             data.get("source").and_then(Value::as_str).unwrap_or("-"),
         );
-        if matches!(event, "pre-compact" | "session-end") {
+        if event == "pre-compact" {
             note.push_str(": ");
             note.push_str(&distill_hook(&home, &resolved.name, &dir, data)?);
+            return Ok(note);
+        }
+        // `session-end` does both jobs, each only if it is on, and an error
+        // in one does not stop the other.
+        if event == "session-end" {
+            let d = distill_hook(&home, &resolved.name, &dir, data)
+                .unwrap_or_else(|e| format!("distill error: {e:#}"));
+            let c = capture::hook(&home, &dir, event, data)
+                .unwrap_or_else(|e| format!("capture error: {e:#}"));
+            note.push_str(&format!(": {d}; {c}"));
+            return Ok(note);
+        }
+        if matches!(event, "user-prompt-submit" | "stop") {
+            note.push_str(": ");
+            note.push_str(&capture::hook(&home, &dir, event, data)?);
             return Ok(note);
         }
         if event != "session-start" {

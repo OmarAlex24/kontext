@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod board;
+pub mod capture;
 pub mod changelog;
 pub mod cli;
 pub mod config;

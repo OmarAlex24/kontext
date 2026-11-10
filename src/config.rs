@@ -226,6 +226,9 @@ pub struct Project {
     pub budgets: BTreeMap<String, u64>,
     #[serde(default)]
     pub distill: Option<Distill>,
+    /// The capture hook (DESIGN §12.3): off unless `enabled = true`.
+    #[serde(default)]
+    pub capture: Option<CaptureCfg>,
     #[serde(default)]
     pub claims: Option<Claims>,
     /// Phase 5: who is who. `omar = { emails = ["…"], keys = ["ssh-ed25519 AAAA… omar@mac"] }`.
@@ -336,6 +339,22 @@ fn yes() -> bool {
     true
 }
 
+/// `[capture]` of `project.toml`: the model-free hook that writes each of the
+/// user's messages into `.pm/dumps/` of the code repo.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CaptureCfg {
+    /// Off unless it says `true`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Prompts that start with one of these (after leading whitespace) are
+    /// machine text and are not written, on top of the built-in ones.
+    #[serde(default)]
+    pub skip_prefixes: Vec<String>,
+    /// Also capture in a linked git worktree (off by default).
+    #[serde(default)]
+    pub worktrees: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Claims {
     pub lease: Option<String>,
@@ -384,6 +403,14 @@ coordinator = 9000
 [distill]
 command = "claude -p --model haiku --output-format json"   # receives the prompt on stdin
 enabled = true
+
+# Capture: kontext writes each message you send to the pm session, verbatim,
+# into .pm/dumps/<date>.md of the code repo (no model). Off by default; run
+# `kontext install` again after turning it on.
+# [capture]
+# enabled = true
+# skip_prefixes = ["<my-tool-output>"]   # prompts that start like this are machine text
+# worktrees = false                      # true: also in linked git worktrees (their own .pm/)
 
 [claims]
 lease = "2h"

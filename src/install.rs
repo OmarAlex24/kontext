@@ -5,7 +5,10 @@
 //!   touching the rest (like `merge_hooks` in v0). If a `kontext` start hook
 //!   already exists with another path, its path is changed instead of adding
 //!   another one. With the distill on, also `PreCompact` and `SessionEnd`
-//!   (phase 4).
+//!   (phase 4); with the capture on (`[capture] enabled = true`), also
+//!   `UserPromptSubmit`, `Stop` and `SessionEnd` (one `SessionEnd` entry for
+//!   both). Turning either off later does not remove its hooks: they check
+//!   the setting each time and do nothing.
 //! - The skill `.claude/skills/kontext/SKILL.md` (from `templates/skill-kontext.md`)
 //!   and the orchestrate skill, `.claude/skills/kontext-orchestrate/SKILL.md`
 //!   (from `templates/skill-kontext-orchestrate.md`), the skill that shows the
@@ -361,6 +364,9 @@ pub struct Options<'a> {
     pub exe: String,
     /// Also installs `PreCompact` and `SessionEnd` (the distill is on).
     pub distill: bool,
+    /// Also installs `UserPromptSubmit`, `Stop` and `SessionEnd` (the capture
+    /// is on).
+    pub capture: bool,
     /// Replaces the agent files even if they have changes.
     pub force: bool,
 }
@@ -421,18 +427,26 @@ pub fn plan(o: &Options) -> Result<Plan> {
         );
     }
     let mut merged = merge_hooks(&parsed, &format!("{} hook session-start", o.exe))?;
+    // `SessionEnd` is shared by the distill and the capture: one entry, which
+    // does both jobs.
+    let mut events: Vec<(&str, &str)> = Vec::new();
     if o.distill {
-        for (hook_event, kontext_event) in
-            [("PreCompact", "pre-compact"), ("SessionEnd", "session-end")]
-        {
-            merged = merge_hook(
-                &merged,
-                hook_event,
-                kontext_event,
-                &format!("{} hook {kontext_event}", o.exe),
-                None,
-            )?;
+        events.extend([("PreCompact", "pre-compact"), ("SessionEnd", "session-end")]);
+    }
+    if o.capture {
+        events.extend([("UserPromptSubmit", "user-prompt-submit"), ("Stop", "stop")]);
+        if !o.distill {
+            events.push(("SessionEnd", "session-end"));
         }
+    }
+    for (hook_event, kontext_event) in events {
+        merged = merge_hook(
+            &merged,
+            hook_event,
+            kontext_event,
+            &format!("{} hook {kontext_event}", o.exe),
+            None,
+        )?;
     }
     merged = merge_permission(&merged, PERMISSION)?;
     let after = if merged == parsed && before.is_some() {

@@ -156,6 +156,8 @@ kontext show D-f99
 
 Hook errors are logged to `<kontext-home>/.kontext/hooks.log`; the hook always exits with 0.
 
+With `[capture] enabled = true` in `project.toml` (off by default), `kontext install` also adds `UserPromptSubmit` → `<kontext path> hook user-prompt-submit`, `Stop` → `<kontext path> hook stop` and `SessionEnd` → `<kontext path> hook session-end` (one `SessionEnd` entry, shared with the distill: it does both jobs, each only if it is on). They write your messages into `.pm/dumps/` (see "The PM's memory of your ideas") and print nothing, so nothing goes into the conversation. Turning the setting off later does not remove them, as with the distill's hooks: each run checks it and does nothing.
+
 ### Environment variables
 
 | Variable | What for |
@@ -168,6 +170,7 @@ Hook errors are logged to `<kontext-home>/.kontext/hooks.log`; the hook always e
 | `KONTEXT_NOW` | For tests: the time (ISO-8601) that `kontext` uses for the `hlc` of what it writes and to tell whether a claim has expired |
 | `KONTEXT_EPIC` | With `KONTEXT_ROLE=coordinator`, the start hook adds the `brief` of that epic (phase 4) |
 | `KONTEXT_DISTILL_DISABLE` | If set to anything, the `pre-compact` and `session-end` hooks don't run the distill |
+| `KONTEXT_CAPTURE_DISABLE` | If set to anything, the capture hooks (`user-prompt-submit`, `stop`, `session-end`) write nothing |
 | `KONTEXT_GH_BIN` | Another binary instead of `gh` for `changelog` (tests) |
 
 ## Phase 3 commands
@@ -281,7 +284,26 @@ Over days of work you say many things to the session that coordinates (the PM), 
 - `items.md`: one row per idea, with where it went (the kontext task, decision, PR or doc) and its evidence. It points at the work; the plans and tasks stay in kontext.
 - `status.md`: where things stand, short. `shots/`: screenshots used as evidence.
 
-Only the PM writes it, and after each message it lists back the ideas it took and asks whether it missed one. When you come back, or ask where things stand, it runs a coverage audit without reading the dumps itself: the `kontext-pm-reader` subagent (Haiku, read-only) lists every idea in the dumps and reports those missing from `items.md`; the PM checks each one before adding it, and shows you what is done, in progress, waiting for you, pending and newly found. In a public repo it asks before committing `.pm/` (or gitignores it).
+Only the PM writes it (and the capture hook below, if it is on), and after each message it lists back the ideas it took and asks whether it missed one. When you come back, or ask where things stand, it runs a coverage audit without reading the dumps itself: the `kontext-pm-reader` subagent (Haiku, read-only) lists every idea in the dumps and reports those missing from `items.md`; the PM checks each one before adding it, and shows you what is done, in progress, waiting for you, pending and newly found. In a public repo it asks before committing `.pm/` (or gitignores it).
+
+### Capture: your messages without the agent remembering them
+
+Without help, the dumps depend on the PM remembering to save each message. With the capture hook, kontext writes them itself, without a model:
+
+```toml
+# project.toml
+[capture]
+enabled = true                          # off by default; run `kontext install` again after turning it on
+# skip_prefixes = ["<my-tool-output>"]  # prompts that start like this are machine text
+# worktrees = false                     # true: also in linked git worktrees (their own .pm/)
+```
+
+- Each message you type to the PM session goes into today's dump (`.pm/dumps/<YYYY-MM-DD>.md`, local date, `-2`, `-3`… past 60 KB) the moment you send it, in the skill's format, with the lines of the coordinator's last message that ask something (those with `?`, the last 20 within 2,000 characters) under `**Coordinator asked:**`. Answers you give through the question tool (`AskUserQuestion`) are added at the end of the turn, numbered with their questions.
+- Only the `pm` role, never a subagent. Machine text is skipped: task notifications, system reminders, cross-session and agent messages, local command output and its caveat, `[Request interrupted by user`, delegate reports (`Delegated task node:`) and pull-request updates (`Update on pull request #`) that a harness posts as user turns, a bare slash command, an empty prompt, and whatever starts with a prefix in `skip_prefixes`. When in doubt it is written; `hooks.log` says which rule skipped a prompt, never its text.
+- Nothing said before capture was on is written. Secrets become `[secret removed]`: those the distill removes, plus, for the capture only, vendor-prefixed tokens (`abc_` and 20 or more letters and digits with a digit) and UUIDs (`abc_<uuid>`), 32-character hex strings with a letter and a digit (not a 40-character git SHA or a 64-character hash) and Slack tokens (`xoxb-…`). When it creates `.pm/dumps/` it also writes `.pm/.gitignore` with `dumps/`, if there is none; it never touches the repo's `.gitignore`.
+- The PM no longer appends what the hook wrote: it checks today's dump with one Grep and appends a message only if it is not there.
+- It prints nothing and always exits with 0; each run is one line in `<kontext-home>/.kontext/hooks.log`. Its marks live in `<kontext-home>/.kontext/capture/` (local).
+- Linked git worktrees (`git worktree add`) are skipped by default: agents delegated into their own worktree have no `KONTEXT_ROLE` and would otherwise count as the PM, and dumps there go when the worktree is removed. With `worktrees = true` a linked worktree writes into its own `.pm/`.
 
 `kontext install` installs the skill and the reader. `kontext install --skills-only` brings only the skill; in a repo that must not get the start hook, copy the two files by hand:
 
@@ -304,7 +326,8 @@ Why a Haiku reader: in the [reader benchmark](./bench/reports/2026-11-06-reader.
 | `kontext distill --transcript <path> [--dry-run] [--max-chunks N] [--chunk-chars N]` | Distills a Claude Code transcript: only what's new since last time, without secrets, in chunks, with the model from `[distill] command`. It notes what the human said, decided or asked (not pasted documents or tool output), with its origin and date, as proposals, questions for the owner, facts without a fingerprint, and journal entries from `agent:distill`; if something updates a fact or a proposal in force, it replaces it. At most `[distill] max_entries` (8) per run |
 | `kontext changelog [--since <date\|ref>] [--until <date\|ref>] [--format md\|json]` | Technical changelog: the tasks closed in the range by epic, with their evidence (PRs first), and the merged PRs of each GitHub repo in `[[repos]]` (with `gh`), grouped by type (`feat`, `fix`, `perf`, `refactor`, `docs`…; the rest under "other"). The same input gives the same bytes |
 | `kontext distill --wait [--timeout 600s]` | Doesn't distill: waits for the distills started by the hooks to finish (each leaves a mark in `.kontext/distill-pending/` while it runs). Exits with 1 if it times out. Useful for scripts that need to know the ledger already has the previous session's content, like the benchmark |
-| `kontext hook pre-compact` / `kontext hook session-end` | Called by Claude Code: they start `kontext distill` in the background with the transcript and return right away |
+| `kontext hook pre-compact` / `kontext hook session-end` | Called by Claude Code: they start `kontext distill` in the background with the transcript and return right away (`session-end` also runs the capture, if it is on) |
+| `kontext hook user-prompt-submit` / `kontext hook stop` | Called by Claude Code with `[capture] enabled = true`: they write your messages into `.pm/dumps/` and print nothing |
 
 ### Facts that expire
 

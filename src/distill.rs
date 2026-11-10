@@ -163,6 +163,19 @@ pub fn redact(text: &str) -> (String, BTreeMap<String, usize>) {
     (text, counts)
 }
 
+static REDACTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[REDACTED:[a-z_]+\]").unwrap());
+
+/// Like [`redact`], with every secret replaced by `marker` instead of
+/// `[REDACTED:<kind>]` (the capture hook writes the `kontext-pm` skill's
+/// `[secret removed]`). A `[REDACTED:<kind>]` already in the text (left by
+/// another pass) becomes `marker` too. The distill's own text does not change.
+pub fn redact_marked(text: &str, marker: &str) -> String {
+    let (text, _) = redact(text);
+    REDACTED
+        .replace_all(&text, regex::NoExpand(marker))
+        .into_owned()
+}
+
 // ---------------------------------------------------------------------------
 // Transcript
 
@@ -281,18 +294,8 @@ pub struct Record {
 pub fn read_transcript_from(path: &Path, offset: u64) -> Result<(Vec<Record>, u64)> {
     let size = fs::metadata(path)?.len();
     let offset = if offset > size { 0 } else { offset };
-    let mut f = File::open(path)?;
-    f.seek(SeekFrom::Start(offset))?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
     let mut out = Vec::new();
-    let mut pos = offset;
-    let mut rest = &buf[..];
-    while let Some(i) = rest.iter().position(|b| *b == b'\n') {
-        let line = &rest[..=i];
-        rest = &rest[i + 1..];
-        pos += line.len() as u64;
-        let rec: Option<Value> = serde_json::from_str(&String::from_utf8_lossy(line)).ok();
+    for (pos, rec) in read_lines_from(path, offset)? {
         let message = rec
             .filter(Value::is_object)
             .filter(|r| {
@@ -311,6 +314,50 @@ pub fn read_transcript_from(path: &Path, offset: u64) -> Result<(Vec<Record>, u6
         out.push(Record { end: pos, message });
     }
     Ok((out, offset))
+}
+
+/// The complete lines of a JSONL file from byte `offset`, each with the byte
+/// where it ends and its JSON (`None` if the line is not JSON). A half-written
+/// last line is left out.
+pub fn read_lines_from(path: &Path, offset: u64) -> Result<Vec<(u64, Option<Value>)>> {
+    let mut f = File::open(path)?;
+    f.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    let mut out = Vec::new();
+    let mut pos = offset;
+    let mut rest = &buf[..];
+    while let Some(i) = rest.iter().position(|b| *b == b'\n') {
+        let line = &rest[..=i];
+        rest = &rest[i + 1..];
+        pos += line.len() as u64;
+        out.push((
+            pos,
+            serde_json::from_str(&String::from_utf8_lossy(line)).ok(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Only the `text` blocks of a record's message (or its string content),
+/// without `<system-reminder>`: no tools, no reasoning. Empty if it has none.
+pub fn text_blocks(rec: &Value) -> String {
+    let parts: Vec<String> = match rec.get("message").and_then(|m| m.get("content")) {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .map(|b| b.get("text").map(text_of).unwrap_or_default())
+            .filter(|t| !t.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    };
+    SYSREM.replace_all(&parts.join("\n"), "").trim().to_string()
+}
+
+/// Is a record's flag (`isSidechain`, `isMeta`…) set?
+pub fn flag(rec: &Value, key: &str) -> bool {
+    truthy(rec.get(key))
 }
 
 fn short_ts(ts: &str) -> String {

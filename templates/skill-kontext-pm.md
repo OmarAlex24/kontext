@@ -43,9 +43,11 @@ Append each user message that carries ideas, decisions or answers to today's dum
 - The markers (`## <date> <HH:MM>`, `**Coordinator asked:**`, `**User:**`) are always these, in English; the content stays in the user's language.
 - The only change you may make to the user's text: a secret (token, password, key) becomes `[secret removed]`. Pasted material stays as pasted.
 
+One writer per message. When kontext's capture hook is on, kontext appends each user message to today's dump by itself, in this same format, before you see it: do not append it again. Check with one Grep of today's dump for a piece of the message, and append it yourself only if it is not there (the hook is off, or it skipped the message). Answers given through a question tool reach the dump at the end of the turn; if you need to cite one before that, append it yourself in this format.
+
 ## 3. Confirm
 
-After saving, list back the ideas you took from the message, with the ids you gave them in items.md (section 4), and ask whether you missed anything. Their answer is a user message like any other: save it to the dump too (section 2, with your question under `**Coordinator asked:**`).
+After saving, list back the ideas you took from the message, with the ids you gave them in items.md (section 4), and ask whether you missed anything. Their answer is a user message like any other: it goes to the dump too (section 2, with your question under `**Coordinator asked:**`).
 
 ## 4. items.md is a pointer table, not a second roadmap
 
@@ -83,7 +85,7 @@ Rewrite it at the end of each block of work: ~40 lines at most. Where things are
 
 ## 8. Public repos
 
-If the repo is public (check its remote, or ask), ask the user before committing `.pm/`: the dumps are their words, verbatim. Offer to add `.pm/` to `.gitignore` instead.
+If the repo is public (check its remote, or ask), ask the user before committing `.pm/`: the dumps are their words, verbatim. Offer to add `.pm/` to `.gitignore` instead. The capture hook gitignores `dumps/` inside `.pm/` by default (`.pm/.gitignore`).
 
 ## Audit task
 
