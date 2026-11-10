@@ -35,9 +35,9 @@ Report in a short list: what there is, where it is, and how much (for example "C
 cargo install --git https://github.com/OmarAlex24/kontext --locked
 ```
 
-The repo is private: it needs `gh auth status` to be green (or git credentials for github.com). If there is a local checkout, `cargo install --path <checkout> --locked`. It needs Rust 1.89 or newer (`rustup`). Check with `kontext --version`.
+The repo is public: it needs network access to github.com, not `gh` or git credentials. If there is a local checkout, `cargo install --path <checkout> --locked`. It needs Rust 1.89 or newer (`rustup`). Check with `kontext --version`.
 
-If there is no way to install it (no network, no credentials), stop here and tell the human: the rest needs the binary.
+If there is no way to install it (no network, no Rust), stop here and tell the human: the rest needs the binary.
 
 With the binary, leave this skill and the others where any session on this machine can see them: `kontext install --skills-only --global --dry-run` and then without `--dry-run` (they are written to `~/.claude/skills/`).
 
