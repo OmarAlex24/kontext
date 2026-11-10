@@ -9,10 +9,11 @@
 # sign, three questions, one of them not urgent because of the brake, and what
 # the distill recorded), 2 problems (a reopened task and an expired claim),
 # 4 screenshots (the payment screen before and after, the receipt email, and the
-# approved refunds mockup), and the status paragraph.
+# approved refunds mockup), the status paragraph, and the code repo
+# <folder>/app with omar's ideas in `.pm/` (skill kontext-pm) for "Your ideas".
 #
-# At the end it writes <folder>/report.html with `kontext report --html` and
-# prints `kontext inbox`. It does not touch ~/.config/kontext: everything uses
+# At the end it writes <folder>/report.html with `kontext report --html` (run
+# from <folder>/app, where it finds `.pm/`) and prints `kontext inbox`. It does not touch ~/.config/kontext: everything uses
 # KONTEXT_CONFIG_DIR inside <folder>. It uses $KONTEXT_BIN, or target/debug/kontext
 # of this repo, or the kontext on the PATH.
 set -euo pipefail
@@ -91,7 +92,7 @@ G1=$(idj $((3 * D)) $OMAR goal add "Card payments" --done-when "3 charges in a r
 G2=$(idj $((3 * D)) $OMAR goal add "Payment notices to customers")
 a $((3 * D)) $OMAR sign "$G1" >/dev/null
 a $((3 * D)) $OMAR sign "$G2" >/dev/null
-a $((3 * D)) $OMAR decide "Charge with Stripe, not Conekta" --why "3D Secure and recurring charges" --tags payments >/dev/null
+DSTRIPE=$(idj $((3 * D)) $OMAR decide "Charge with Stripe, not Conekta" --why "3D Secure and recurring charges" --tags payments)
 # The pm proposed the refunds goal and omar has not signed it.
 G3=$(KONTEXT_ROLE=pm idj $((3 * D - H)) agent:pm goal add "Refunds from the dashboard")
 a $((3 * D - H)) agent:pm epic add "Card payments" --goal "$G1" --name payments >/dev/null
@@ -133,7 +134,7 @@ coord $((D + 3 * H)) notices task add "Schedule reminders" --epic notices --depe
 m=$(mark $((D + 2 * H)) agent:notices-impl-1 notices)
 KONTEXT_ROLE=implementer a $((D + H)) agent:notices-impl-1 done "$T5" --since "$m" \
   --evidence 'cmd:"pnpm test email"=0' --evidence "$shots/email.png" --screen email >/dev/null
-coord $((D)) notices ask "Should we send SMS in addition to email?" --to owner --task "$T6" --blocking >/dev/null
+QSMS=$(coord $((D)) notices --json ask "Should we send SMS in addition to email?" --to owner --task "$T6" --blocking | tid)
 KONTEXT_ROLE=implementer a $((20 * H)) agent:notices-impl-2 ask "Which SMS provider do we use?" --to owner --epic notices >/dev/null
 # An agent claimed the preferences and never wrote again: the claim expires.
 mark $((7 * H)) agent:notices-impl-3 notices >/dev/null
@@ -150,10 +151,51 @@ KONTEXT_ROLE=pm a $((2 * H)) agent:pm log --status \
 # The brake: omar already has many pending items, so this one is marked not urgent.
 KONTEXT_ROLE=pm a $H agent:pm ask "Should we publish the app to the Play Store this week?" --to owner || true
 
+# --- omar's ideas, as the pm keeps them in the code repo (.pm/) ---------------
+app="$dir/app"
+mkdir -p "$app/.pm/dumps" "$app/.pm/shots"
+git -C "$app" init -q
+day3="$(iso $((3 * D)) | cut -c1-10)"
+day1="$(iso $((D + 2 * H)) | cut -c1-10)"
+cat >"$app/.pm/dumps/$day3.md" <<EOF
+## $day3 10:12
+
+**User:**
+
+customers should pay their invoice by card straight from the link in the email
+let's go with Stripe, it does 3D Secure and we will want recurring charges later
+after paying they get the receipt by email, with the invoice attached
+and I want refunds from the dashboard, without calling support
+some customers asked to pay cash at an OXXO store
+EOF
+cat >"$app/.pm/dumps/$day1.md" <<EOF
+## $day1 18:40
+
+**User:**
+
+text them a reminder the day before the invoice is due
+what about faxing the invoices to the old customers? no, forget it
+EOF
+cp "$shots/payment-v2.png" "$app/.pm/shots/payment.png"
+cat >"$app/.pm/items.md" <<EOF
+# Ideas
+
+| id | idea | source | state | where | evidence |
+|---|---|---|---|---|---|
+| P1 | Pay the invoice by card from the email link | dumps/$day3.md:5 | in progress | $T1, $T4 | PR #14, shots/payment.png |
+| P2 | Charge with Stripe | dumps/$day3.md:6 | decided | $DSTRIPE | |
+| P3 | Receipt by email after paying | dumps/$day3.md:7 | pending | $T3 | |
+| P4 | Refunds from the dashboard | dumps/$day3.md:8 | pending | Refunds epic, after payments | |
+| P5 | Pay cash at an OXXO store | dumps/$day3.md:9 | pending | | |
+| P6 | SMS reminder the day before it is due | dumps/$day1.md:5 | pending | $QSMS | |
+| P7 | Fax the invoices to old customers | dumps/$day1.md:6 | discarded | | |
+EOF
+
+cd "$app"
 a 0 $OMAR report --html -o "$dir/report.html"
 echo
 a 0 $OMAR inbox
 echo
 echo "Project in $home"
 echo "Report: $dir/report.html"
-echo "To see it live: KONTEXT_CONFIG_DIR=$cfg KONTEXT_ACTOR=human:omar $kontext_bin --project card-payments ui --open   (and open /report)"
+echo "To see it live: cd $app && KONTEXT_CONFIG_DIR=$cfg KONTEXT_ACTOR=human:omar $kontext_bin --project card-payments ui --open   (and open /report)"

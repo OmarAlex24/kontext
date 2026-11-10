@@ -542,3 +542,309 @@ fn report_has_a_sidebar_and_marks_each_card_with_its_epics() {
         "{full}"
     );
 }
+
+// ------------------------------------------------------------ your ideas
+
+const IDEAS_HEADER: &str =
+    "| id | idea | source | state | where | evidence |\n|---|---|---|---|---|---|\n";
+
+/// `kontext <args>` run from `dir`, at a fixed instant (so two runs compare).
+fn report_in(p: &Project, dir: &std::path::Path, args: &[&str]) -> String {
+    let out = p
+        .cmd(args)
+        .current_dir(dir)
+        .env("KONTEXT_NOW", "2030-01-01T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "kontext {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A git repo `<tmp>/<name>`, with `.pm/items.md` if `items` is given.
+fn repo_with_pm(p: &Project, name: &str, items: Option<&str>) -> PathBuf {
+    let repo = p.dir.path().join(name);
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    if let Some(items) = items {
+        fs::create_dir_all(repo.join(".pm/shots")).unwrap();
+        fs::write(repo.join(".pm/items.md"), items).unwrap();
+    }
+    repo
+}
+
+/// The "Your ideas" section of a page.
+fn ideas_section(html: &str) -> &str {
+    let at = html
+        .find("<section class=\"block ideas-block\"")
+        .expect("the section is there");
+    &html[at..at + html[at..].find("</section>").unwrap()]
+}
+
+#[test]
+fn without_ideas_the_report_does_not_change() {
+    let (p, _, _) = with_epic();
+    p.kontext_ok(&["log", "--status", "Payments work in test."]);
+    let bare = repo_with_pm(&p, "bare", None);
+    let empty = repo_with_pm(&p, "empty", Some(&format!("# Ideas\n\n{IDEAS_HEADER}")));
+    let one = repo_with_pm(
+        &p,
+        "one",
+        Some(&format!(
+            "{IDEAS_HEADER}| P1 | CSV export | | pending | | |\n"
+        )),
+    );
+    for args in [&["report", "--html"][..], &["report"][..]] {
+        let base = report_in(&p, &bare, args);
+        // A .pm/items.md with no ideas, and a folder that is not a repo: the same page.
+        assert_eq!(report_in(&p, &empty, args), base, "{args:?}");
+        assert_eq!(report_in(&p, p.dir.path(), args), base, "{args:?}");
+        // (The shared script names the section id; the markup does not have it.)
+        assert!(!base.contains("id=\"your-ideas\"") && !base.contains("Your ideas"));
+        // With one idea, the section comes.
+        let with = report_in(&p, &one, args);
+        assert_ne!(with, base);
+        assert!(with.contains("Your ideas"), "{with}");
+    }
+    let base = report_in(&p, &bare, &["report", "--html"]);
+    assert_eq!(base.matches("<style>").count(), 1);
+    assert_eq!(base.matches("<script>").count(), 1);
+    assert!(!base.contains(kontext::report::ideas_style()));
+    assert!(!base.contains(kontext::report::ideas_script()));
+    assert!(!base.contains("nav-ideas"));
+}
+
+#[test]
+fn report_shows_your_ideas_where_they_went_and_their_evidence() {
+    let (p, _, _) = with_epic();
+    let q = p.id_of(&[], &["ask", "Which CSV columns?", "--to", "owner"]);
+    let d = p.id_of(&[], &["decide", "Invoices export as CSV", "--why", "asked"]);
+    let csv = fs::read(capture("email.png")).unwrap();
+    let secret = fs::read(capture("payment-v1.png")).unwrap();
+    let repo = repo_with_pm(
+        &p,
+        "app",
+        Some(&format!(
+            "# Ideas\n\n{IDEAS_HEADER}\
+             | P1 | Know <b>\"what\"</b> is done | dumps/2026-11-07.md:3 | pending | | |\n\
+             | P2 | CSV columns | dumps/2026-11-07.md:4 | pending | {q} | |\n\
+             | P3 | CSV export | dumps/2026-11-02.md:1 | done | {d} | PR #12, shots/csv.png |\n\
+             | P4 | Yearly numbering | | decided | {d} | shots/../secret.png, shots/missing.png, shots/notes.txt |\n\
+             | P5 | Fax the invoices | dumps/2026-11-07.md:4 | discarded | | |\n"
+        )),
+    );
+    let pm = repo.join(".pm");
+    fs::create_dir_all(pm.join("dumps")).unwrap();
+    fs::write(
+        pm.join("dumps/2026-11-07.md"),
+        "## 2026-11-07 10:42\n\n<script>alert(\"x\")</script> I need to know what is done\nwhich columns go in the CSV\n",
+    )
+    .unwrap();
+    fs::write(
+        pm.join("dumps/2026-11-02.md"),
+        "export the invoices as CSV\n",
+    )
+    .unwrap();
+    fs::write(pm.join("shots/csv.png"), &csv).unwrap();
+    // A real image outside shots/: it never goes in the page.
+    fs::write(pm.join("secret.png"), &secret).unwrap();
+    fs::write(pm.join("shots/notes.txt"), "not an image").unwrap();
+
+    let html = report_in(&p, &repo, &["report", "--html"]);
+    // The section goes after "Problems" and before "What it looks like"; its
+    // link, right after "Your turn".
+    let ideas_at = html.find("id=\"your-ideas\"").unwrap();
+    assert!(html.find("id=\"problems\"").unwrap() < ideas_at);
+    assert!(ideas_at < html.find("id=\"what-it-looks-like\"").unwrap());
+    let turn = html.find("data-nav=\"your-turn\"").unwrap();
+    let next = &html[turn..];
+    let next = &next[next.find("</li>\n").unwrap() + 6..];
+    assert!(
+        next.starts_with(
+            "<li class=\"nav-ideas\"><a href=\"#your-ideas\" data-nav=\"your-ideas\"><span>Your ideas</span><span class=\"n\">5</span></a></li>"
+        ),
+        "{next}"
+    );
+    // Its own style and script, in their own blocks.
+    assert_eq!(html.matches("<style>").count(), 2);
+    assert_eq!(html.matches("<script>").count(), 2);
+    assert!(html.contains(kontext::report::ideas_script()));
+
+    let sec = ideas_section(&html);
+    assert!(sec.contains("<span class=\"count\">5</span>"), "{sec}");
+    // A filter per state that has ideas, and "All"; the groups in order, the
+    // discarded last; the proof strip in the same order.
+    let states: Vec<&str> = sec
+        .split("class=\"st-btn\" data-state=\"")
+        .skip(1)
+        .map(|s| &s[..s.find('"').unwrap()])
+        .collect();
+    assert_eq!(
+        states,
+        ["", "nowhere", "waiting", "decided", "done", "discarded"]
+    );
+    let groups: Vec<&str> = sec
+        .split("<div class=\"idea-group\" data-state=\"")
+        .skip(1)
+        .map(|s| &s[..s.find('"').unwrap()])
+        .collect();
+    assert_eq!(
+        groups,
+        ["nowhere", "waiting", "decided", "done", "discarded"]
+    );
+    let cells: Vec<&str> = sec
+        .split("<a class=\"cell st-")
+        .skip(1)
+        .map(|s| &s[..s.find('"').unwrap()])
+        .collect();
+    assert_eq!(
+        cells,
+        ["nowhere", "waiting", "decided", "done", "discarded"]
+    );
+    assert!(sec.contains("href=\"#idea-P1\"") && sec.contains("id=\"idea-P1\""));
+    assert!(sec.contains("You dropped it."));
+    assert!(
+        sec.contains("<time datetime=\"2026-11-07\">7 Nov</time>"),
+        "{sec}"
+    );
+    assert!(
+        sec.contains(&format!("<p class=\"went\">{q} · Which CSV columns?</p>")),
+        "{sec}"
+    );
+
+    // User text is escaped: the title, the quote.
+    assert!(!html.contains("<script>alert"), "the quote runs nothing");
+    assert!(
+        sec.contains("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"),
+        "{sec}"
+    );
+    assert!(
+        sec.contains("<h4>Know &lt;b&gt;&quot;what&quot;&lt;/b&gt; is done</h4>"),
+        "{sec}"
+    );
+
+    // The screenshot in shots/ is embedded; the one that leaves shots/ with
+    // `..`, the missing one and what is not an image stay as text.
+    assert_eq!(sec.matches("data:image/png;base64,").count(), 1);
+    assert!(sec.contains(&kontext::media::base64(&csv)));
+    assert!(!html.contains(&kontext::media::base64(&secret)));
+    for chip in [
+        "PR #12",
+        "shots/../secret.png",
+        "shots/missing.png",
+        "shots/notes.txt",
+    ] {
+        assert!(
+            sec.contains(&format!("<span class=\"ev\">{chip}</span>")),
+            "{chip}: {sec}"
+        );
+    }
+
+    // In text: the summary, the open ones, and only how many are settled.
+    let md = report_in(&p, &repo, &["report"]);
+    let at = md.find("## Your ideas").expect("the section");
+    assert!(md.find("## Problems").unwrap() < at);
+    assert!(at < md.find("## What it looks like").unwrap());
+    let part = &md[at..md.find("## What it looks like").unwrap()];
+    assert!(
+        part.contains(
+            "5 ideas · no destination 1 · waiting for you 1 · decided 1 · done 1 · discarded 1."
+        ),
+        "{part}"
+    );
+    assert!(
+        part.contains("- No destination: P1 · Know <b>\"what\"</b> is done\n"),
+        "{part}"
+    );
+    assert!(
+        part.contains(&format!(
+            "- Waiting for you: P2 · CSV columns → {q} · Which CSV columns?\n"
+        )),
+        "{part}"
+    );
+    assert!(
+        !part.contains("P3") && !part.contains("P4") && !part.contains("P5"),
+        "{part}"
+    );
+    assert!(
+        part.contains("Decided 1 · done 1 · discarded 1: `kontext ideas` lists them all"),
+        "{part}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_screenshot_that_links_out_of_shots_is_not_embedded() {
+    let (p, _, _) = with_epic();
+    let repo = repo_with_pm(
+        &p,
+        "app",
+        Some(&format!(
+            "{IDEAS_HEADER}| P1 | a | | pending | | shots/link.png |\n"
+        )),
+    );
+    let outside = p.dir.path().join("outside.png");
+    fs::copy(capture("email.png"), &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join(".pm/shots/link.png")).unwrap();
+    let html = report_in(&p, &repo, &["report", "--html"]);
+    let sec = ideas_section(&html);
+    assert!(!sec.contains("data:image/"), "{sec}");
+    assert!(sec.contains("<span class=\"ev\">shots/link.png</span>"));
+    // Nor does a `shots/` that is itself a link out of `.pm/`.
+    let elsewhere = p.dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::copy(capture("email.png"), elsewhere.join("a.png")).unwrap();
+    fs::remove_dir_all(repo.join(".pm/shots")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, repo.join(".pm/shots")).unwrap();
+    fs::write(
+        repo.join(".pm/items.md"),
+        format!("{IDEAS_HEADER}| P1 | a | | pending | | shots/a.png |\n"),
+    )
+    .unwrap();
+    let html = report_in(&p, &repo, &["report", "--html"]);
+    let sec = ideas_section(&html);
+    assert!(!sec.contains("data:image/"), "{sec}");
+    assert!(sec.contains("<span class=\"ev\">shots/a.png</span>"));
+}
+
+#[test]
+fn a_screenshot_over_the_media_cap_is_not_embedded() {
+    let (p, _, _) = with_epic();
+    p.add_repo_toml("[media]\nmax_size = \"4KB\"\n");
+    let repo = repo_with_pm(
+        &p,
+        "app",
+        Some(&format!(
+            "{IDEAS_HEADER}| P1 | a | | pending | | shots/big.png |\n"
+        )),
+    );
+    fs::copy(capture("payment-v2.png"), repo.join(".pm/shots/big.png")).unwrap();
+    let html = report_in(&p, &repo, &["report", "--html"]);
+    assert!(!ideas_section(&html).contains("data:image/"));
+}
+
+#[test]
+fn a_table_without_where_warns_in_the_report() {
+    let (p, _, _) = with_epic();
+    let repo = repo_with_pm(
+        &p,
+        "app",
+        Some("| id | idea | state |\n|---|---|---|\n| P1 | CSV export | done |\n"),
+    );
+    let warn = "items.md has no `where` column: every idea shows as no destination.";
+    let html = report_in(&p, &repo, &["report", "--html"]);
+    let sec = ideas_section(&html);
+    assert!(
+        sec.contains("<p class=\"ideas-warn\">items.md has no `where` column: every idea shows as no destination.</p>"),
+        "{sec}"
+    );
+    let md = report_in(&p, &repo, &["report"]);
+    assert!(md.contains(&format!("Warning: {warn}")), "{md}");
+    let json: Value = serde_json::from_str(&report_in(&p, &repo, &["--json", "ideas"])).unwrap();
+    assert_eq!(json["warnings"][0], warn);
+    assert_eq!(json["ideas"][0]["state"], "no destination");
+    assert!(report_in(&p, &repo, &["ideas"]).contains(&format!("warning: {warn}")));
+}

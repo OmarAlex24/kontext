@@ -60,6 +60,9 @@ pub struct Source {
     pub writer: String,
     /// Who looks at the page: "Signed by you" and the "For you" card.
     pub you: String,
+    /// Where `kontext ui` was started: `/report` looks for `.pm/` from here
+    /// on every request, as `kontext report` does.
+    pub cwd: Option<PathBuf>,
 }
 
 impl Source {
@@ -735,12 +738,19 @@ pub fn entry_json(src: &Source, id: &str) -> Result<Option<Value>> {
 }
 
 /// `/report`: the same report as `kontext report --html`, with the screenshots
-/// through `/media/` instead of embedded.
-pub fn report_html(src: &Source) -> Result<String> {
+/// through `/media/` instead of embedded (those of the ideas, embedded). The
+/// ideas are read on each request, so an edited `items.md` shows on reload.
+/// The second value says whether it carries "Your ideas" (for its CSP).
+pub fn report_html(src: &Source) -> Result<(String, bool)> {
     let (mut store, project) = src.open()?;
     let st = app::state(&mut store, &project)?;
-    let r = crate::report::build(&st, &project, &src.you);
-    crate::report::html(&r, &crate::report::Images::url("/media/"))
+    let mut r = crate::report::build(&st, &project, &src.you);
+    r.ideas = src
+        .cwd
+        .as_deref()
+        .and_then(|cwd| crate::report::ideas_for(&st, &project, cwd));
+    let html = crate::report::html(&r, &crate::report::Images::url("/media/"))?;
+    Ok((html, r.has_ideas()))
 }
 
 // ------------------------------------------------------------ HTTP
@@ -1036,13 +1046,13 @@ impl Server {
             "/report" => {
                 let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
                 match report_html(&self.src) {
-                    Ok(body) => Response {
+                    Ok((body, with_ideas)) => Response {
                         status: 200,
                         content_type: "text/html; charset=utf-8",
                         body: body.into_bytes(),
                         // Tighter than the page's: only its style and its script
                         // (by hash) and the embedded font run.
-                        csp: Some(crate::report::csp()),
+                        csp: Some(crate::report::csp_for(with_ideas)),
                     },
                     Err(e) => Response::text(500, &format!("{e:#}\n")),
                 }

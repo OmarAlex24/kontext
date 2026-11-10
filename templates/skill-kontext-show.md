@@ -14,7 +14,7 @@ The human also loses the thread. Rule: **if they have not answered, they have no
 - When they come back after days: the start hook tells you ("omar has 4 pending items…"). Tell them in your first reply.
 - When a problem or a question of theirs is blocking work (`kontext inbox` puts it at the top with "blocks …").
 
-**When not to:** after every task. Finished work is not listed to them.
+**When not to:** after every task. Finished tasks are not listed to them; the report's "Your ideas" section shows where each of their ideas went, done ones included.
 
 ## How, depending on where you run
 

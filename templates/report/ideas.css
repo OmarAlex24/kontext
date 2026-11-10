@@ -1,0 +1,78 @@
+/* kontext report, "Your ideas": the user's ideas from `.pm/items.md` and where
+   each one went. It only goes in the page when there is at least one idea, so
+   a report without `.pm/` stays as it was. Same two inks and dither masks as
+   the rest of the page. */
+.ideas-block { grid-column: 1 / -1; }
+/* The ideas do not belong to an epic: while an epic filter is on, the section
+   and its link step aside. */
+.filtering .ideas-block, .filtering .nav-ideas { display: none; }
+.chip, .cell, .idea::before { -webkit-mask: var(--m) 0 0 / var(--tile) var(--tile) repeat; mask: var(--m) 0 0 / var(--tile) var(--tile) repeat; }
+/* The ink of each state: the more settled, the denser. What has no place, and
+   what waits for you, are printed in the signal ink; what you dropped is
+   hollow. */
+.st-nowhere { --st: var(--sig); --m: none; }
+.st-waiting { --st: var(--sig); --m: var(--d8); }
+.st-pending { --st: var(--ink-2); --m: var(--d3); }
+.st-progress { --st: var(--ink); --m: var(--d8); }
+.st-decided { --st: var(--ink); --m: var(--d12); }
+.st-done { --st: var(--ink); --m: none; }
+.st-discarded { --st: transparent; --m: none; }
+.chip.st-nowhere, .cell.st-nowhere, .idea.st-nowhere::before, .chip.st-done, .cell.st-done, .idea.st-done::before,
+.chip.st-discarded, .cell.st-discarded, .idea.st-discarded::before { -webkit-mask: none; mask: none; }
+.chip.st-discarded, .cell.st-discarded, .idea.st-discarded::before { box-shadow: inset 0 0 0 1px var(--ink-2); }
+.chip { flex: none; display: inline-block; width: 16px; height: 16px; background: var(--st); }
+/* The proof strip: the whole list at a glance, one cell per idea. */
+.proof { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.proof li { flex: 1 1 16px; max-width: 32px; min-width: 16px; }
+.cell { display: block; height: 48px; background: var(--st); }
+.cell:hover, .cell:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.ideas-warn { margin-bottom: 1rem; padding: 0.7rem 0.9rem; background: var(--sheet); border-left: 4px solid var(--sig); color: var(--sig-t); font-size: 0.9rem; font-weight: 650; }
+/* The state filter only works with the script. */
+.idea-filter { display: none; flex-wrap: wrap; gap: 6px; margin-top: 1rem; }
+.js .idea-filter { display: flex; }
+.st-btn {
+  appearance: none; margin: 0; display: inline-flex; align-items: center; gap: 0.5rem; border: 1px solid var(--rule); border-radius: 0;
+  background: var(--sheet); color: var(--ink); font: 650 0.85rem/1 var(--body); padding: 0.5rem 0.7rem; cursor: pointer;
+}
+.st-btn b { font: 800 0.9rem/1 var(--display); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.st-btn:hover { border-color: var(--ink); }
+.st-btn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+.st-btn[aria-pressed="true"] b { color: var(--sheet); }
+.st-btn[aria-pressed="true"] .chip { outline: 1px solid var(--sheet); }
+.idea-group { margin-top: 2.25rem; }
+.idea-group[hidden] { display: none; }
+.group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.6rem; margin: 0 0 0.75rem; font: 800 1.15rem/1.2 var(--display); letter-spacing: -0.01em; }
+.group-head b { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.idea-group[data-state="nowhere"] .group-head b, .idea-group[data-state="waiting"] .group-head b { color: var(--sig-t); }
+.group-head .about { flex: 1 1 14rem; font: 400 0.9rem/1.4 var(--body); letter-spacing: 0; color: var(--ink-2); }
+.ideas { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+/* What is settled takes less room: two columns when they fit. */
+@container (min-width: 68rem) {
+  .idea-group[data-state="decided"] .ideas, .idea-group[data-state="done"] .ideas { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .idea-group[data-state="done"] .idea.has-shot { grid-template-columns: 4.25rem minmax(0, 1fr) 9rem; }
+}
+.idea {
+  position: relative; display: grid; grid-template-columns: 4.25rem minmax(0, 1fr); align-items: start; gap: 0.25rem 1rem;
+  background: var(--sheet); padding: 0.85rem 1.1rem 0.9rem 2rem; scroll-margin-top: 5rem;
+}
+.idea.has-shot { grid-template-columns: 4.25rem minmax(0, 1fr) minmax(9rem, 13rem); }
+.idea::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 12px; background: var(--st); }
+.idea:target { outline: 2px solid var(--ink); outline-offset: 2px; }
+.said { color: var(--ink-2); font-size: 0.82rem; font-weight: 700; font-variant-numeric: tabular-nums; padding-top: 0.2rem; white-space: nowrap; }
+.idea h4 { margin: 0; font-size: 1.05rem; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+.idea.st-discarded h4 { text-decoration: line-through; text-decoration-thickness: 1px; }
+.idea blockquote { margin: 0.2rem 0 0; color: var(--ink-2); font-size: 0.92rem; line-height: 1.45; overflow-wrap: anywhere; }
+.went { margin-top: 0.5rem; font-size: 0.9rem; line-height: 1.45; overflow-wrap: anywhere; }
+.idea.st-nowhere .went, .idea.st-waiting .went { color: var(--sig-t); font-weight: 650; }
+.idea-notes { margin-top: 0.35rem; color: var(--ink-2); font-size: 0.82rem; line-height: 1.4; overflow-wrap: anywhere; }
+.proofs { margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 4px; }
+.ev { max-width: 100%; border: 1px solid var(--rule); background: var(--code-bg); padding: 0.15rem 0.45rem; font-size: 0.8rem; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.idea-shot .frame { aspect-ratio: 4 / 3; background: var(--code-bg); }
+.idea-shot .frame img { object-fit: cover; object-position: top left; }
+@media (max-width: 640px) {
+  .idea, .idea.has-shot { grid-template-columns: minmax(0, 1fr); padding-left: 1.55rem; }
+  .idea::before { width: 8px; }
+  .said { padding-top: 0; }
+  .cell { height: 32px; }
+  .idea-shot { max-width: 16rem; margin-top: 0.4rem; }
+}

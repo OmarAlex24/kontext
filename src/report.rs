@@ -13,12 +13,17 @@
 //!    impact, each with the exact command that resolves it; the first 5 in
 //!    view and the rest folded ("and N more");
 //! 3. **Problems**: the active ones, each with why it matters;
-//! 4. **What it looks like**: the most recent screenshots per epic, with the
+//! 4. **Your ideas**, only when `.pm/items.md` has ideas (the caller reads
+//!    them: [`ideas_for`]): what the user said and where each one went,
+//!    done and decided ones included, with their evidence;
+//! 5. **What it looks like**: the most recent screenshots per epic, with the
 //!    before and after of the same screen if there is one;
-//! 5. **Progress**: a bar per goal and the wave line.
+//! 6. **Progress**: a bar per goal and the wave line.
 //!
-//! There is no history of what is done. Generating it writes nothing and
-//! closes no pending items.
+//! Finished tasks are not listed. Generating it writes nothing and closes no
+//! pending items. Without ideas the page has no such section: its style and
+//! script go in their own blocks ([`ideas_style`], [`ideas_script`]) only
+//! when there are ideas.
 //!
 //! The page is read-only and asks nothing of the network: the CSS, the font
 //! (Anybody, OFL), the dither patterns and a small script are inside. The
@@ -36,6 +41,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::config::Project;
+use crate::ideas::{EvidenceKind, Idea, IdeaState, Ideas};
 use crate::inbox::{self, Class, Inbox, Item};
 use crate::model::Entry;
 use crate::plan;
@@ -46,6 +52,8 @@ use crate::write::STATUS_TAG;
 
 const STYLE_CSS: &str = include_str!("../templates/report/style.css");
 const SCRIPT_JS: &str = include_str!("../templates/report/report.js");
+const IDEAS_CSS: &str = include_str!("../templates/report/ideas.css");
+const IDEAS_JS: &str = include_str!("../templates/report/ideas.js");
 /// Anybody ExtraBold, subconjunto latino (Etcetera Type Co., SIL OFL 1.1;
 /// the full license is in `templates/report/anybody-OFL.txt`).
 const DISPLAY_WOFF2: &[u8] = include_bytes!("../templates/report/anybody-800.woff2");
@@ -166,6 +174,11 @@ pub struct Report {
     pub epics: Vec<EpicRow>,
     /// "2 days ago": the human's last write.
     pub last_action: Option<String>,
+    /// The user's ideas (`.pm/items.md`), set by the caller ([`ideas_for`]);
+    /// `None`, or no ideas, and the report has no "Your ideas".
+    pub ideas: Option<Ideas>,
+    /// `[media] max_size`: the most an idea's screenshot may weigh.
+    pub media_max: u64,
 }
 
 /// The latest status paragraph (`kontext log --status`).
@@ -198,7 +211,7 @@ pub fn build(st: &State, project: &Project, human: &str) -> Report {
         (
             Light::Red,
             format!(
-                "{} trabajo",
+                "{} work",
                 plural(blocking, "pending item stops", "pending items stop")
             ),
         )
@@ -231,6 +244,35 @@ pub fn build(st: &State, project: &Project, human: &str) -> Report {
         epics: epic_rows(st, &ib),
         last_action: ib.last_action_ago(),
         inbox: ib,
+        ideas: None,
+        media_max: project
+            .media_max_bytes()
+            .unwrap_or(crate::media::DEFAULT_MAX_BYTES),
+    }
+}
+
+/// The ideas for the report, found as `kontext ideas` finds them (the git repo
+/// of `cwd`, or else the first project repo on this machine). `None` when there
+/// is no `.pm/items.md`, it has no ideas, or anything fails: the report never
+/// fails because of them.
+pub fn ideas_for(st: &State, project: &Project, cwd: &Path) -> Option<Ideas> {
+    let repos = crate::repos::Repos::load(project, cwd).ok()?;
+    let pm = crate::ideas::locate(&repos)?;
+    let people: Vec<String> = project.people.keys().cloned().collect();
+    crate::ideas::load(st, &project.name, &people, &pm)
+        .ok()
+        .filter(|i| i.total > 0)
+}
+
+impl Report {
+    /// Whether the page carries "Your ideas" (and its style and script).
+    pub fn has_ideas(&self) -> bool {
+        self.shown_ideas().is_some()
+    }
+
+    /// The ideas to show, if there is at least one.
+    fn shown_ideas(&self) -> Option<&Ideas> {
+        self.ideas.as_ref().filter(|i| i.total > 0)
     }
 }
 
@@ -580,6 +622,16 @@ pub fn inline_script() -> &'static str {
     SCRIPT_JS
 }
 
+/// The style of "Your ideas", in a second `<style>` (only with ideas).
+pub fn ideas_style() -> &'static str {
+    IDEAS_CSS
+}
+
+/// The script of "Your ideas", in a second `<script>` (only with ideas).
+pub fn ideas_script() -> &'static str {
+    IDEAS_JS
+}
+
 fn sha256_source(s: &str) -> String {
     use sha2::{Digest, Sha256};
     format!(
@@ -592,11 +644,34 @@ fn sha256_source(s: &str) -> String {
 /// script run (by their hash), the images come from `/media/` or are embedded,
 /// the font is embedded and it connects to nothing.
 pub fn csp() -> String {
+    csp_for(false)
+}
+
+/// [`csp`], plus the hashes of the style and script of "Your ideas" when the
+/// page carries them.
+pub fn csp_for(with_ideas: bool) -> String {
+    let (script, style) = if with_ideas {
+        (
+            format!(
+                "{} {}",
+                sha256_source(inline_script()),
+                sha256_source(ideas_script())
+            ),
+            format!(
+                "{} {}",
+                sha256_source(&inline_style()),
+                sha256_source(ideas_style())
+            ),
+        )
+    } else {
+        (
+            sha256_source(inline_script()),
+            sha256_source(&inline_style()),
+        )
+    };
     format!(
-        "default-src 'none'; script-src {}; style-src {}; img-src 'self' data:; \
-         font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-        sha256_source(inline_script()),
-        sha256_source(&inline_style())
+        "default-src 'none'; script-src {script}; style-src {style}; img-src 'self' data:; \
+         font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
 }
 
@@ -792,7 +867,7 @@ fn sidebar_html(r: &Report, h: &mut String) {
     let pending = r.top.len() + r.rest.len();
     let count = |n: usize| format!("<span class=\"n\">{n}</span>");
     h.push_str("<nav class=\"side-nav\" aria-label=\"Sections\">\n<ul>\n");
-    for (id, label, n) in [
+    for (i, (id, label, n)) in [
         ("your-turn", "Your turn", Some(pending)),
         ("problems", "Problems", Some(r.problems.len())),
         (
@@ -801,11 +876,21 @@ fn sidebar_html(r: &Report, h: &mut String) {
             Some(r.shots.len()),
         ),
         ("progress", "Progress", None),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         h.push_str(&format!(
             "<li><a href=\"#{id}\" data-nav=\"{id}\"><span>{label}</span>{}</a></li>\n",
             n.map(count).unwrap_or_default()
         ));
+        // "Your ideas" goes right after "Your turn".
+        if let (0, Some(ideas)) = (i, r.shown_ideas()) {
+            h.push_str(&format!(
+                "<li class=\"nav-ideas\"><a href=\"#your-ideas\" data-nav=\"your-ideas\"><span>Your ideas</span>{}</a></li>\n",
+                count(ideas.total)
+            ));
+        }
     }
     h.push_str("</ul>\n</nav>\n");
     if !r.epics.is_empty() {
@@ -864,10 +949,14 @@ pub fn html(r: &Report, img: &Images) -> Result<String> {
     h.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     h.push_str("<meta name=\"color-scheme\" content=\"light dark\">\n");
     h.push_str(&format!(
-        "<title>{} · where we are</title>\n<style>{}</style>\n</head>\n<body class=\"s-{cls}\">\n",
+        "<title>{} · where we are</title>\n<style>{}</style>\n",
         esc(&r.project),
         inline_style()
     ));
+    if r.shown_ideas().is_some() {
+        h.push_str(&format!("<style>{}</style>\n", ideas_style()));
+    }
+    h.push_str(&format!("</head>\n<body class=\"s-{cls}\">\n"));
     h.push_str("<div class=\"shell\">\n");
     sidebar_html(r, &mut h);
     h.push_str("<main class=\"page\" id=\"contenido\">\n");
@@ -972,8 +1061,11 @@ pub fn html(r: &Report, img: &Images) -> Result<String> {
     }
     h.push_str("</section>\n");
 
-    // 4. What it looks like.
-    h.push_str(
+    // 5. What it looks like, built before "Your ideas": its screenshots are
+    // counted first against the page's budget, and the ideas' use what is left.
+    let mut look = String::new();
+    let mut used = 0u64;
+    look.push_str(
         "<section class=\"block look-block\" id=\"what-it-looks-like\" aria-labelledby=\"look-title\">\n",
     );
     block_head(
@@ -988,13 +1080,12 @@ pub fn html(r: &Report, img: &Images) -> Result<String> {
              tap it to see it in color. </span>If the screen already had a screenshot, the \
              earlier one is shown to compare."
         },
-        &mut h,
+        &mut look,
     );
     if !r.shots.is_empty() {
-        let mut used = 0u64;
-        h.push_str("<div class=\"shots\">\n");
+        look.push_str("<div class=\"shots\">\n");
         for s in &r.shots {
-            h.push_str(&format!(
+            look.push_str(&format!(
                 "<article class=\"shot{}\"{}>\n<h3><span class=\"epic\">{}</span><span class=\"screen\">{}</span></h3>\n<div class=\"pair\">\n",
                 if s.before.is_some() { " has-before" } else { "" },
                 epic_attr(s.epic_id.as_slice()),
@@ -1002,17 +1093,27 @@ pub fn html(r: &Report, img: &Images) -> Result<String> {
                 esc(&s.screen)
             ));
             if let Some(b) = &s.before {
-                figure(r, b, "Before", img, &mut used, &mut h);
+                figure(r, b, "Before", img, &mut used, &mut look);
             }
             let label = if s.before.is_some() { "Now" } else { "Latest" };
-            figure(r, &s.now, label, img, &mut used, &mut h);
-            h.push_str("</div>\n</article>\n");
+            figure(r, &s.now, label, img, &mut used, &mut look);
+            look.push_str("</div>\n</article>\n");
         }
-        h.push_str("</div>\n");
+        look.push_str("</div>\n");
     }
-    h.push_str("</section>\n");
+    look.push_str("</section>\n");
 
-    // 5. Progress.
+    // 4. Your ideas.
+    if let Some(ideas) = r.shown_ideas() {
+        let mut left = match img {
+            Images::Embed { max_total, .. } => max_total.saturating_sub(used),
+            Images::Url { .. } => EMBED_MAX,
+        };
+        ideas_html(ideas, r.media_max, &mut left, &mut h);
+    }
+    h.push_str(&look);
+
+    // 6. Progress.
     h.push_str("<section class=\"block progress-block\" id=\"progress\" aria-labelledby=\"progress-title\">\n");
     block_head(
         "progress-title",
@@ -1067,8 +1168,385 @@ pub fn html(r: &Report, img: &Images) -> Result<String> {
     }
     h.push_str("</section>\n</div>\n</main>\n</div>\n");
     h.push_str(&format!("<script>{}</script>\n", inline_script()));
+    if r.shown_ideas().is_some() {
+        h.push_str(&format!("<script>{}</script>\n", ideas_script()));
+    }
     h.push_str("</body>\n</html>\n");
     Ok(h)
+}
+
+// ------------------------------------------------------------ your ideas
+
+/// The class of a state's ink (`st-<key>`) and its `data-state`.
+fn state_key(s: IdeaState) -> &'static str {
+    match s {
+        IdeaState::NoDestination => "nowhere",
+        IdeaState::WaitingForYou => "waiting",
+        IdeaState::Pending => "pending",
+        IdeaState::InProgress => "progress",
+        IdeaState::Decided => "decided",
+        IdeaState::Done => "done",
+        IdeaState::Discarded => "discarded",
+    }
+}
+
+/// What a state means for the reader, in one line.
+fn state_about(s: IdeaState) -> &'static str {
+    match s {
+        IdeaState::NoDestination => {
+            "Nothing in the ledger covers these. Give each one a place, or drop it."
+        }
+        IdeaState::WaitingForYou => "Each one needs a yes, a no or an answer from you.",
+        IdeaState::Pending => "They have a place and nobody has started.",
+        IdeaState::InProgress => "Started and not finished yet.",
+        IdeaState::Decided => "A decision in force settles them.",
+        IdeaState::Done => "Closed, each with its evidence.",
+        IdeaState::Discarded => "You dropped it.",
+    }
+}
+
+/// `2026-11-07` → `7 Nov`.
+fn day_month(date: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut it = date.split('-');
+    let (_, m, d) = (it.next()?, it.next()?, it.next()?);
+    let m: usize = m.parse().ok()?;
+    let d: u32 = d.parse().ok()?;
+    Some(format!("{d} {}", MONTHS.get(m.checked_sub(1)?)?))
+}
+
+/// The anchors of the rows (`idea-P1`): the id with only letters, digits, `-`
+/// and `_`, and a number after it if two ideas would share one.
+fn idea_anchors(ideas: &[&Idea]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    ideas
+        .iter()
+        .map(|i| {
+            let base: String =
+                i.id.chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+            let base = format!("idea-{base}");
+            let mut a = base.clone();
+            let mut n = 2;
+            while !seen.insert(a.clone()) {
+                a = format!("{base}-{n}");
+                n += 1;
+            }
+            a
+        })
+        .collect()
+}
+
+/// An idea's screenshot (`shots/<file>`, relative to `pm`) as a data URI, or
+/// `None` if it cannot go in a page that gets shared: an absolute path or one
+/// with `..`, anything that does not resolve inside `.pm/shots/`, a file over
+/// `max` bytes, or one that is not a PNG, JPG or WebP image (by its content).
+/// `left` is what remains of the page's budget for embedded images: a file
+/// that does not fit in it is skipped too, and one that goes in is subtracted
+/// (its raw bytes, as the report's own screenshots count).
+pub fn idea_image(pm: &Path, rel: &str, max: u64, left: &mut u64) -> Option<String> {
+    let rel = rel.strip_prefix(".pm/").unwrap_or(rel);
+    if rel.is_empty()
+        || Path::new(rel).is_absolute()
+        || rel.starts_with(['/', '\\'])
+        || rel.split(['/', '\\']).any(|p| p == "..")
+        || !crate::media::is_image_path(rel)
+    {
+        return None;
+    }
+    // From the canonical `.pm/`: a `shots/` that is a link out of it fails.
+    let shots = pm.canonicalize().ok()?.join("shots");
+    let file = pm.join(rel).canonicalize().ok()?;
+    if !file.starts_with(&shots) {
+        return None;
+    }
+    let meta = fs::metadata(&file).ok()?;
+    if !meta.is_file() || meta.len() > max || meta.len() > *left {
+        return None;
+    }
+    let bytes = fs::read(&file).ok()?;
+    let n = bytes.len() as u64;
+    if n > max || n > *left {
+        return None;
+    }
+    let ext = crate::media::sniff(&bytes)?;
+    *left -= n;
+    Some(format!(
+        "data:{};base64,{}",
+        crate::media::content_type(ext),
+        crate::media::base64(&bytes)
+    ))
+}
+
+/// The ideas of each state that has any, in display order; inside a state,
+/// by the date they were said (the undated last), then as in the table.
+fn idea_groups(ideas: &Ideas) -> Vec<(IdeaState, Vec<&Idea>)> {
+    IdeaState::ALL
+        .iter()
+        .filter_map(|s| {
+            let mut g = ideas.of_state(*s);
+            if g.is_empty() {
+                return None;
+            }
+            g.sort_by(|a, b| match (&a.said, &b.said) {
+                (Some(x), Some(y)) => x.cmp(y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            });
+            Some((*s, g))
+        })
+        .collect()
+}
+
+/// "Your ideas": the proof strip (one cell per idea, from the least settled to
+/// the most), a filter per state, and a group per state with its rows.
+fn ideas_html(ideas: &Ideas, media_max: u64, left: &mut u64, h: &mut String) {
+    let pm = ideas
+        .path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let groups = idea_groups(ideas);
+    let all: Vec<&Idea> = groups.iter().flat_map(|(_, g)| g.iter().copied()).collect();
+    let anchors = idea_anchors(&all);
+    let anchor_of = |i: &Idea| -> &str {
+        let n = all.iter().position(|x| std::ptr::eq(*x, i)).unwrap_or(0);
+        &anchors[n]
+    };
+
+    h.push_str(
+        "<section class=\"block ideas-block\" id=\"your-ideas\" tabindex=\"-1\" aria-labelledby=\"ideas-title\">\n",
+    );
+    block_head(
+        "ideas-title",
+        "Your ideas",
+        Some(ideas.total),
+        "What you said, in your words, and where each one went.",
+        h,
+    );
+    for w in &ideas.warnings {
+        h.push_str(&format!("<p class=\"ideas-warn\">{}</p>\n", esc(w)));
+    }
+
+    // The proof strip.
+    let label_at = |n: Option<&(IdeaState, Vec<&Idea>)>| n.map(|(s, _)| s.label()).unwrap_or("");
+    h.push_str(&format!(
+        "<ol class=\"proof\" aria-label=\"One cell per idea, from {} to {}\">\n",
+        label_at(groups.first()),
+        label_at(groups.last())
+    ));
+    for (s, g) in &groups {
+        let label = capitalize(s.label());
+        for i in g {
+            h.push_str(&format!(
+                "<li><a class=\"cell st-{}\" href=\"#{}\" title=\"{}: {}\"><span class=\"sr\">{}, {}</span></a></li>\n",
+                state_key(*s),
+                esc(anchor_of(i)),
+                esc(&label),
+                esc(&i.idea),
+                esc(&i.idea),
+                esc(&label)
+            ));
+        }
+    }
+    h.push_str("</ol>\n");
+
+    // The filter: "All" and one button per state that has ideas.
+    h.push_str("<div class=\"idea-filter\" role=\"group\" aria-label=\"Show only one state\">\n");
+    h.push_str(&format!(
+        "<button type=\"button\" class=\"st-btn\" data-state=\"\" aria-pressed=\"true\"><span>All</span><b>{}</b></button>\n",
+        ideas.total
+    ));
+    for (s, g) in &groups {
+        h.push_str(&format!(
+            "<button type=\"button\" class=\"st-btn\" data-state=\"{k}\" aria-pressed=\"false\"><i class=\"chip st-{k}\" aria-hidden=\"true\"></i><span>{}</span><b>{}</b></button>\n",
+            esc(&capitalize(s.label())),
+            g.len(),
+            k = state_key(*s)
+        ));
+    }
+    h.push_str("</div>\n");
+
+    // The groups.
+    for (s, g) in &groups {
+        let k = state_key(*s);
+        h.push_str(&format!(
+            "<div class=\"idea-group\" data-state=\"{k}\">\n<h3 class=\"group-head\"><i class=\"chip st-{k}\" aria-hidden=\"true\"></i><span>{}</span><b>{}</b><span class=\"about\">{}</span></h3>\n<ul class=\"ideas\">\n",
+            esc(&capitalize(s.label())),
+            g.len(),
+            esc(state_about(*s))
+        ));
+        for i in g {
+            idea_row(i, k, anchor_of(i), &pm, media_max, left, h);
+        }
+        h.push_str("</ul>\n</div>\n");
+    }
+    h.push_str("</section>\n");
+}
+
+/// Where an idea went, in one line: the `where` cell as written; if it only
+/// has ids, what they are (`Q-1a2b3c · Which CSV columns?`); with nothing, a
+/// fixed sentence for an idea with no destination.
+fn went_text(i: &Idea) -> String {
+    let only_ids = crate::ideas::id_tokens(&i.where_)
+        .iter()
+        .fold(i.where_.clone(), |w, t| w.replace(t.as_str(), ""))
+        .chars()
+        .all(|c| !c.is_alphanumeric());
+    if i.where_.trim().is_empty() {
+        if i.state == IdeaState::NoDestination {
+            return "No decision, task or question covers it yet.".to_string();
+        }
+        return String::new();
+    }
+    if only_ids && !i.refs.is_empty() {
+        return i
+            .refs
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} · {}",
+                    r.cited.as_deref().unwrap_or(&r.id),
+                    one_line(&r.title, 90)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+    }
+    i.where_.clone()
+}
+
+fn idea_row(
+    i: &Idea,
+    key: &str,
+    anchor: &str,
+    pm: &Path,
+    media_max: u64,
+    left: &mut u64,
+    h: &mut String,
+) {
+    // The first screenshot that can go in the page; the rest of the evidence,
+    // and any screenshot that cannot, as chips of text.
+    let mut shot: Option<(String, String)> = None;
+    let mut chips: Vec<String> = Vec::new();
+    for e in &i.evidence {
+        if e.kind == EvidenceKind::Image
+            && shot.is_none()
+            && let Some(src) = idea_image(pm, &e.value, media_max, left)
+        {
+            let name = e.value.rsplit('/').next().unwrap_or(&e.value).to_string();
+            shot = Some((src, name));
+            continue;
+        }
+        chips.push(e.value.clone());
+    }
+    h.push_str(&format!(
+        "<li class=\"idea st-{key}{}\" id=\"{}\">\n",
+        if shot.is_some() { " has-shot" } else { "" },
+        esc(anchor)
+    ));
+    match i.said.as_deref().and_then(|d| day_month(d).map(|t| (d, t))) {
+        Some((iso, text)) => h.push_str(&format!(
+            "<p class=\"said\"><time datetime=\"{}\">{}</time></p>\n",
+            esc(iso),
+            esc(&text)
+        )),
+        None => h.push_str("<p class=\"said\"></p>\n"),
+    }
+    h.push_str(&format!(
+        "<div class=\"idea-body\"><h4>{}</h4>",
+        esc(&i.idea)
+    ));
+    if let Some(q) = &i.quote {
+        h.push_str(&format!(
+            "<blockquote>\u{201c}{}\u{201d}</blockquote>",
+            esc(q)
+        ));
+    }
+    let went = went_text(i);
+    if !went.trim().is_empty() {
+        h.push_str(&format!("<p class=\"went\">{}</p>", esc(&went)));
+    }
+    for n in &i.notes {
+        h.push_str(&format!(
+            "<p class=\"idea-notes\">{}</p>",
+            esc(&capitalize(n))
+        ));
+    }
+    if !chips.is_empty() {
+        h.push_str("<p class=\"proofs\">");
+        for c in &chips {
+            h.push_str(&format!("<span class=\"ev\">{}</span>", esc(c)));
+        }
+        h.push_str("</p>");
+    }
+    h.push_str("\n</div>\n");
+    if let Some((src, name)) = shot {
+        h.push_str(&format!(
+            "<figure class=\"idea-shot\"><div class=\"frame\"><img src=\"{}\" alt=\"{}\" loading=\"lazy\"></div><figcaption>{}</figcaption></figure>\n",
+            esc(&src),
+            esc(&format!("Screenshot of {}: {name}", i.idea)),
+            esc(&name)
+        ));
+    }
+    h.push_str("</li>\n");
+}
+
+/// "Your ideas" in text: the summary, the ideas that are not settled, and
+/// how many the settled states have.
+fn ideas_markdown(ideas: &Ideas, l: &mut Vec<String>) {
+    l.push(String::new());
+    l.push("## Your ideas".into());
+    l.push(crate::ideas::summary(ideas) + ".");
+    for w in &ideas.warnings {
+        l.push(format!("Warning: {w}"));
+    }
+    let open = [
+        IdeaState::NoDestination,
+        IdeaState::WaitingForYou,
+        IdeaState::Pending,
+        IdeaState::InProgress,
+    ];
+    for s in open {
+        for i in ideas.of_state(s) {
+            let went = if i.where_.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" → {}", one_line(&went_text(i), 120))
+            };
+            l.push(format!(
+                "- {}: {} · {}{went}",
+                capitalize(s.label()),
+                i.id,
+                one_line(&i.idea, 100)
+            ));
+        }
+    }
+    let settled: Vec<String> = [IdeaState::Decided, IdeaState::Done, IdeaState::Discarded]
+        .into_iter()
+        .filter_map(|s| {
+            let n = ideas.count(s);
+            (n > 0).then(|| format!("{} {n}", s.label()))
+        })
+        .collect();
+    if settled.is_empty() {
+        l.push("`kontext ideas` lists them all with their evidence.".into());
+    } else {
+        l.push(format!(
+            "{}: `kontext ideas` lists them all with their evidence.",
+            capitalize(&settled.join(" · "))
+        ));
+    }
 }
 
 // ------------------------------------------------------------ texto
@@ -1128,6 +1606,9 @@ pub fn markdown(r: &Report) -> String {
             p.why.as_deref().unwrap_or_default()
         ));
     }
+    if let Some(ideas) = r.shown_ideas() {
+        ideas_markdown(ideas, &mut l);
+    }
     l.push(String::new());
     l.push("## What it looks like".into());
     if r.shots.is_empty() {
@@ -1158,4 +1639,49 @@ pub fn markdown(r: &Report) -> String {
         l.push(format!("- {}", parts.join(" → ")));
     }
     l.join("\n") + "\n"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Policy;
+
+    #[test]
+    fn idea_images_share_the_page_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let pm = dir.path().join(".pm");
+        fs::create_dir_all(pm.join("shots")).unwrap();
+        let shots = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/screenshots");
+        let a = fs::read(shots.join("email.png")).unwrap();
+        let b = fs::read(shots.join("payment-v1.png")).unwrap();
+        fs::write(pm.join("shots/a.png"), &a).unwrap();
+        fs::write(pm.join("shots/b.png"), &b).unwrap();
+        let md = "| id | idea | source | state | where | evidence |\n|---|---|---|---|---|---|\n\
+                  | P1 | first | | pending | | shots/a.png |\n\
+                  | P2 | second | | pending | | shots/b.png |\n";
+        let st = State::build_at(vec![], &Policy::new(&["omar"]), 0);
+        let ideas = crate::ideas::build(&st, "demo", &[], &pm, md);
+        let render = |budget: u64| {
+            let mut left = budget;
+            let mut h = String::new();
+            ideas_html(&ideas, u64::MAX, &mut left, &mut h);
+            (h, left)
+        };
+        // Room for both: both go in, and the budget counts their raw bytes.
+        let total = (a.len() + b.len()) as u64;
+        let (h, left) = render(total + 10);
+        assert_eq!(h.matches("data:image/png;base64,").count(), 2);
+        assert_eq!(left, 10);
+        // One byte short: the first goes in, the second is a chip.
+        let (h, left) = render(total - 1);
+        assert_eq!(h.matches("data:image/png;base64,").count(), 1);
+        assert!(h.contains(&crate::media::base64(&a)));
+        assert!(!h.contains(&crate::media::base64(&b)));
+        assert!(h.contains("<span class=\"ev\">shots/b.png</span>"), "{h}");
+        assert_eq!(left, b.len() as u64 - 1);
+        // Nothing left: both are chips.
+        let (h, _) = render(0);
+        assert!(!h.contains("data:image/"));
+        assert!(h.contains("<span class=\"ev\">shots/a.png</span>"));
+    }
 }
