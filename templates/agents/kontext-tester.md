@@ -34,4 +34,4 @@ Your brief brings the task, its acceptance criteria, the decisions and facts tha
 
 ## When finishing
 
-Return a short report to whoever launched you: what you tested, what happened, and what failed (with how to reproduce it), plus the evidence you closed with.
+Put the detail in kontext (`kontext log "…" --task <T>`, the evidence of `kontext done`, the `--why` of a `kontext reopen` with how to reproduce what failed), not in your report: whoever launched you re-reads that report on every later request. Hand back about five lines at most: what you tested and what happened, the ids (the task, any reopened task or question), and what you need from your coordinator, if anything.

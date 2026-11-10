@@ -31,4 +31,4 @@ You only read. You do not edit files, and in `kontext` you only write facts.
 
 ## Report
 
-Return a report of 15 lines at most to whoever launched you: the answer, the paths that support it, the ids of the facts you saved, and what you could not confirm.
+The facts you saved carry the detail; whoever launched you re-reads your report on every later request. Hand back about five lines at most: the answer, the paths that support it, the ids of the facts you saved, and what you could not confirm. If you ran a command with long output, trim it (`head`, `tail`, `grep`) before reading it.

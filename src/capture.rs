@@ -4,9 +4,9 @@
 //! ledger: it resolves the project, reads `[capture]`, and appends.
 //!
 //! - `user-prompt-submit` writes the typed prompt at once, from the payload's
-//!   `prompt` (machine text is skipped: see [`skip_reason`]). The question it
-//!   answers is the lines with `?` of the last assistant text in the
-//!   transcript.
+//!   `prompt` (machine text is skipped: see [`skip_reason`]). What it answers
+//!   is the lines with `?` of the last assistant text in the transcript or,
+//!   when it has none, that text's last paragraph ([`quoted_lines`]).
 //! - Every trigger (`user-prompt-submit`, `stop`, `session-end`) scans what
 //!   the transcript gained since last time for answers to the `AskUserQuestion`
 //!   tool, and writes each one once.
@@ -34,7 +34,7 @@ use serde_json::Value;
 
 use crate::config::{self, Project};
 use crate::distill;
-use crate::ideas::PM_DIR;
+use crate::ideas::{ASKED_MARKER, PM_DIR, USER_MARKER};
 
 /// If set to anything, the hook writes nothing.
 pub const DISABLE_ENV: &str = "KONTEXT_CAPTURE_DISABLE";
@@ -46,6 +46,9 @@ pub const DUMP_MAX_BYTES: u64 = 60_000;
 pub const ASKED_MAX_LINES: usize = 20;
 /// …and at most this many characters.
 pub const ASKED_MAX_CHARS: usize = 2_000;
+/// The last paragraph quoted when nothing was asked with `?`: at most this
+/// many characters (95 of 96 measured replies fit).
+pub const REPLIED_MAX_CHARS: usize = 600;
 /// The tail of the transcript read first to find the last assistant text;
 /// then 4×, 16×, 64× that.
 const TAIL_FIRST: u64 = 1 << 20;
@@ -175,6 +178,92 @@ pub fn asked_lines(text: &str) -> Vec<String> {
     }
     out.reverse();
     out
+}
+
+static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s{0,3}#{1,6}(\s|$)").unwrap());
+
+/// A paragraph that says nothing on its own: only Markdown headings, or no
+/// letter or digit at all (a horizontal rule, a lone emoji).
+fn says_nothing(par: &[&str]) -> bool {
+    par.iter().all(|l| HEADING.is_match(l))
+        || !par.iter().any(|l| l.chars().any(char::is_alphanumeric))
+}
+
+/// The last line of a paragraph when it alone passes the limit: its last
+/// characters, from a word boundary, after `…`, within [`REPLIED_MAX_CHARS`].
+fn tail_of_line(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let start = chars.len() - (REPLIED_MAX_CHARS - 1);
+    let mut tail = &chars[start..];
+    // A word cut in two is dropped, unless the tail has no word boundary.
+    if !chars[start - 1].is_whitespace()
+        && let Some(sp) = tail.iter().position(|c| c.is_whitespace())
+    {
+        tail = &tail[sp..];
+    }
+    let tail: String = tail.iter().collect();
+    format!("…{}", tail.trim_start())
+}
+
+/// The last paragraph of an assistant message, verbatim, for a reply to
+/// something proposed without a question mark ("Say go and I merge"). Fenced
+/// code blocks are dropped; a paragraph that is only a heading, a rule or has
+/// no letter or digit is skipped for the one before it. At most
+/// [`REPLIED_MAX_CHARS`] characters, counted as [`asked_lines`] does (the
+/// lines, not the newlines between them): the whole lines from the end that
+/// fit, or, if the last line alone does not, its end after `…`.
+pub fn replied_lines(text: &str) -> Vec<String> {
+    let mut paragraphs: Vec<Vec<&str>> = vec![Vec::new()];
+    let mut fenced = false;
+    for line in text.lines().map(str::trim_end) {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            paragraphs.push(Vec::new());
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        if line.trim().is_empty() {
+            paragraphs.push(Vec::new());
+        } else if let Some(p) = paragraphs.last_mut() {
+            p.push(line);
+        }
+    }
+    let Some(par) = paragraphs
+        .iter()
+        .rev()
+        .find(|p| !p.is_empty() && !says_nothing(p))
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut chars = 0;
+    for l in par.iter().rev() {
+        let n = l.chars().count();
+        if chars + n > REPLIED_MAX_CHARS {
+            if out.is_empty() {
+                out.push(tail_of_line(l));
+            }
+            break;
+        }
+        chars += n;
+        out.push(l.to_string());
+    }
+    out.reverse();
+    out
+}
+
+/// What a typed message answers, from the last assistant text: its lines
+/// with `?` ([`asked_lines`]) or, if it has none, its last paragraph
+/// ([`replied_lines`]).
+pub fn quoted_lines(text: &str) -> Vec<String> {
+    let asked = asked_lines(text);
+    if asked.is_empty() {
+        replied_lines(text)
+    } else {
+        asked
+    }
 }
 
 fn kind(rec: &Value) -> Option<&str> {
@@ -491,7 +580,8 @@ impl DumpEntry {
     pub fn render(&self) -> String {
         let mut s = format!("## {} {}\n\n", self.date, self.time);
         if !self.asked.is_empty() {
-            s.push_str("**Coordinator asked:**\n\n");
+            s.push_str(ASKED_MARKER);
+            s.push_str("\n\n");
             for l in &self.asked {
                 if l.is_empty() {
                     s.push_str(">\n");
@@ -503,7 +593,8 @@ impl DumpEntry {
             }
             s.push('\n');
         }
-        s.push_str("**User:**\n\n");
+        s.push_str(USER_MARKER);
+        s.push_str("\n\n");
         s.push_str(&self.user);
         s.push('\n');
         s
@@ -757,7 +848,7 @@ pub fn hook(home: &Path, dir: &Path, event: &str, data: &Value) -> Result<String
             let asked = tp
                 .as_deref()
                 .and_then(last_assistant_text)
-                .map(|t| asked_lines(&t))
+                .map(|t| quoted_lines(&t))
                 .unwrap_or_default();
             entries.push(DumpEntry::typed(now, prompt, &asked));
             if let (Some(p), Some(m)) = (pid, mark.as_mut()) {
@@ -864,6 +955,84 @@ mod tests {
         let got = asked_lines(&huge);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].chars().count(), ASKED_MAX_CHARS);
+    }
+
+    #[test]
+    fn a_statement_gives_its_last_paragraph() {
+        let text = "The export is merged.\n\nThree follow-ups are open.\n\nSay go and I merge the PDF branch\nand apply recommendations 2 to 6.";
+        assert_eq!(
+            quoted_lines(text),
+            vec![
+                "Say go and I merge the PDF branch",
+                "and apply recommendations 2 to 6."
+            ]
+        );
+        // Questions win over the last paragraph.
+        let text = "Do we keep the old export?\n\nSay go and I drop it.";
+        assert_eq!(quoted_lines(text), vec!["Do we keep the old export?"]);
+        // Nothing to quote.
+        assert!(quoted_lines("").is_empty());
+        assert!(quoted_lines("\n\n---\n\n").is_empty());
+    }
+
+    #[test]
+    fn code_blocks_headings_and_rules_are_skipped() {
+        let text = "Here is the new config.\n\nSay go and I apply it to staging.\n\n```toml\n[export]\nformat = \"csv\"\n\n[paging]\nsize = 50\n```\n";
+        assert_eq!(
+            replied_lines(text),
+            vec!["Say go and I apply it to staging."]
+        );
+        // An unclosed fence hides what follows it, too.
+        let text = "Say go and I ship it.\n\n```\nlog line one\n\nlog line two";
+        assert_eq!(replied_lines(text), vec!["Say go and I ship it."]);
+        // A trailing heading, rule or line with no letters or digits.
+        for tail in ["## Next steps", "---", "***", "## Next\n### Later", "→ ✓"] {
+            let text = format!("I will drop the old export next.\n\n{tail}\n");
+            assert_eq!(
+                replied_lines(&text),
+                vec!["I will drop the old export next."],
+                "{tail}"
+            );
+        }
+        // A heading with text under it, in the same paragraph, stays whole.
+        assert_eq!(
+            replied_lines("Done.\n\n## Next\nMerge the PDF branch."),
+            vec!["## Next", "Merge the PDF branch."]
+        );
+    }
+
+    #[test]
+    fn the_last_paragraph_is_cut_to_whole_lines() {
+        let lines: Vec<String> = (0..10).map(|i| format!("{i}{}", "x".repeat(99))).collect();
+        let text = format!("Intro.\n\n{}", lines.join("\n"));
+        let got = replied_lines(&text);
+        // 100 characters each: the last 6 fit in 600.
+        assert_eq!(got, lines[4..].to_vec());
+        assert!(got.iter().map(|l| l.chars().count()).sum::<usize>() <= REPLIED_MAX_CHARS);
+        // Exactly 600 characters fit.
+        let exact = "y".repeat(REPLIED_MAX_CHARS);
+        assert_eq!(replied_lines(&exact), vec![exact.clone()]);
+    }
+
+    #[test]
+    fn an_over_long_last_line_keeps_its_end_from_a_word() {
+        let words: Vec<String> = (0..200).map(|i| format!("w{i:03}")).collect();
+        let line = words.join(" ");
+        assert!(line.chars().count() > REPLIED_MAX_CHARS);
+        let got = replied_lines(&format!("A short line before.\n{line}"));
+        assert_eq!(got.len(), 1, "the line before does not fit either");
+        let q = &got[0];
+        assert!(q.chars().count() <= REPLIED_MAX_CHARS, "{}", q.len());
+        assert!(q.starts_with("…w"), "{q}");
+        assert!(q.ends_with("w199"), "{q}");
+        // It starts at a whole word of the line.
+        let first = q.trim_start_matches('…').split(' ').next().unwrap();
+        assert!(words.iter().any(|w| w == first), "{first}");
+        // No space at all: the last 599 characters.
+        let blob = "z".repeat(900);
+        let got = replied_lines(&blob);
+        assert_eq!(got[0].chars().count(), REPLIED_MAX_CHARS);
+        assert!(got[0].starts_with('…'));
     }
 
     #[test]
