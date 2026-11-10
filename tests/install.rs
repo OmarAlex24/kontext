@@ -458,6 +458,61 @@ fn installs_agent_files_and_keeps_edited_ones() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to change"));
 }
 
+/// Installed from a cargo build directory, `install` still works and exits
+/// with 0 (dry run, real run and nothing to change), with a note that the
+/// hooks point at a file `cargo clean` deletes. From anywhere else, no note.
+#[test]
+fn notes_a_binary_in_a_cargo_build_directory() {
+    let p = Project::new();
+    let r = repo(&p);
+    let root = fs::canonicalize(p.dir.path()).unwrap();
+    let copy = |rel: &str| {
+        let b = root.join(rel);
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::copy(common::BIN, &b).unwrap();
+        b
+    };
+    let dev = copy("checkout/target/debug/kontext");
+    let installed = copy("cargo-bin/kontext");
+    let run = |exe: &Path, args: &[&str]| {
+        let mut a = vec!["install"];
+        a.extend_from_slice(args);
+        let out = Command::new(exe)
+            .args(&a)
+            .current_dir(&r)
+            .env("KONTEXT_CONFIG_DIR", &p.config)
+            .env("KONTEXT_PROJECT", "demo")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let note = "in a cargo build directory: the hooks point at a file that `cargo clean` deletes";
+    let fix = format!(
+        "cargo install --path {} --locked",
+        root.join("checkout").display()
+    );
+    for args in [&["--dry-run"][..], &[], &[]] {
+        let out = run(&dev, args);
+        assert!(out.contains(note) && out.contains(&fix), "{args:?}: {out}");
+    }
+    // The last run had nothing to change, and said so before the note.
+    let out = run(&dev, &[]);
+    assert!(out.contains("nothing to change"), "{out}");
+    // From the installed binary: the hooks move to it, and no note.
+    let out = run(&installed, &[]);
+    assert!(!out.contains("cargo build directory"), "{out}");
+    let cmds = hook_commands(&r, "SessionStart");
+    assert_eq!(
+        cmds,
+        vec![format!("{} hook session-start", installed.display())]
+    );
+}
+
 /// `install --skills-only --global`: only the skills, in your user's folder,
 /// without a project. `--dry-run` writes nothing, and the second time there is nothing to do.
 #[test]

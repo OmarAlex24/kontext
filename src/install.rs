@@ -30,6 +30,10 @@
 //! Before writing, the diff of each file is shown. With `--dry-run` nothing
 //! is written. Running it twice changes nothing the second time.
 //!
+//! The hooks record the absolute path of the running binary: run from a
+//! cargo build directory ([`cargo_build_checkout`]), `install` prints a note
+//! that a `cargo clean` deletes what they point at (`kontext doctor` checks it).
+//!
 //! `settings.json` is read and written preserving the order of its keys
 //! (serde_json's `Value` sorts them, and that would change lines that are not
 //! ours).
@@ -128,6 +132,60 @@ pub fn hook_binary<'a>(cmd: &'a str, event: &str) -> Option<&'a str> {
     let rest = cmd.trim().strip_suffix(&format!("hook {event}"))?;
     let bin = rest.trim().trim_matches(['\'', '"']);
     Path::new(bin).file_name()?.to_str()
+}
+
+/// The binary's full path and the kontext event of a `<binary> hook <event>`
+/// command, the path unquoted ([`shell_unquote`]): what `kontext doctor`
+/// checks. [`hook_binary`] only needs the file name.
+pub fn hook_parts(cmd: &str) -> Option<(String, String)> {
+    let cmd = cmd.trim();
+    let (rest, event) = cmd.rsplit_once(char::is_whitespace)?;
+    let bin = rest.trim_end().strip_suffix("hook")?;
+    if !bin.ends_with(char::is_whitespace) || event.is_empty() {
+        return None;
+    }
+    let bin = shell_unquote(bin.trim())?;
+    (!bin.is_empty()).then(|| (bin, event.to_string()))
+}
+
+/// The inverse of [`shell_quote`] (and plain double quotes): `None` if a
+/// quote is left open or the text is more than one word.
+pub fn shell_unquote(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    q => out.push(q),
+                }
+            },
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    '\\' => out.push(chars.next()?),
+                    q => out.push(q),
+                }
+            },
+            '\\' => out.push(chars.next()?),
+            c if c.is_whitespace() => return None,
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// If `exe` is inside a cargo build directory (a `target/debug` or
+/// `target/release` component), the folder that holds `target`: a
+/// `cargo clean` there deletes the binary.
+pub fn cargo_build_checkout(exe: &Path) -> Option<PathBuf> {
+    let comps: Vec<_> = exe.components().collect();
+    let i = comps.windows(2).rposition(|w| {
+        w[0].as_os_str() == "target"
+            && (w[1].as_os_str() == "debug" || w[1].as_os_str() == "release")
+    })?;
+    Some(comps[..i].iter().collect())
 }
 
 /// `true` if the command is `kontext hook <event>` from any `kontext`:
@@ -593,5 +651,49 @@ mod tests {
             "'/tmp/a b/kontext' hook session-start"
         ));
         assert!(!is_kontext_session_start("/bin/other hook session-start"));
+    }
+
+    #[test]
+    fn hook_paths_round_trip() {
+        for path in [
+            "/home/x/.cargo/bin/kontext",
+            "/tmp/a b/kontext",
+            "/tmp/it's here/kontext",
+            "/opt/o'neil/kontext",
+        ] {
+            let cmd = format!("{} hook session-start", shell_quote(path));
+            assert_eq!(
+                hook_parts(&cmd),
+                Some((path.to_string(), "session-start".to_string())),
+                "{cmd}"
+            );
+            assert_eq!(shell_unquote(&shell_quote(path)).as_deref(), Some(path));
+        }
+        assert_eq!(
+            hook_parts("\"/x y/kontext\"  hook  stop "),
+            Some(("/x y/kontext".into(), "stop".into()))
+        );
+        assert_eq!(hook_parts("echo hola"), None);
+        assert_eq!(hook_parts("/bin/xhook stop"), None);
+        assert_eq!(hook_parts("hook stop"), None);
+        assert_eq!(hook_parts("/tmp/a b/kontext hook stop"), None);
+        assert_eq!(hook_parts("'/tmp/open hook stop"), None);
+    }
+
+    #[test]
+    fn build_dirs() {
+        assert_eq!(
+            cargo_build_checkout(Path::new("/src/kontext/target/debug/kontext")),
+            Some(PathBuf::from("/src/kontext"))
+        );
+        assert_eq!(
+            cargo_build_checkout(Path::new("/w/target/release/deps/kontext")),
+            Some(PathBuf::from("/w"))
+        );
+        assert_eq!(
+            cargo_build_checkout(Path::new("/home/x/.cargo/bin/kontext")),
+            None
+        );
+        assert_eq!(cargo_build_checkout(Path::new("/srv/target/kontext")), None);
     }
 }

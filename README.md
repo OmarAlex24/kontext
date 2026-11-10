@@ -11,10 +11,10 @@ Status: phases 1 (base), 2 (charter, decisions, views, hooks), 3 (epics, tasks a
 You need Rust 1.89 or newer (`rustup`) and `git`.
 
 ```sh
-cargo install --path .
+cargo install --path . --locked
 ```
 
-That leaves the `kontext` binary in `~/.cargo/bin`.
+That leaves the `kontext` binary in `~/.cargo/bin`. Do this before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
 
 ### Have an agent install it and migrate the memory
 
@@ -330,6 +330,7 @@ Why a Haiku reader: in the [reader benchmark](./bench/reports/2026-11-06-reader.
 | `kontext distill --wait [--timeout 600s]` | Doesn't distill: waits for the distills started by the hooks to finish (each leaves a mark in `.kontext/distill-pending/` while it runs). Exits with 1 if it times out. Useful for scripts that need to know the ledger already has the previous session's content, like the benchmark |
 | `kontext hook pre-compact` / `kontext hook session-end` | Called by Claude Code: they start `kontext distill` in the background with the transcript and return right away (`session-end` also runs the capture, if it is on) |
 | `kontext hook user-prompt-submit` / `kontext hook stop` | Called by Claude Code with `[capture] enabled = true`: they write your messages into `.pm/dumps/` and print nothing |
+| `kontext measure <transcript>… [--since <RFC3339>] [--until <RFC3339>]` | Numbers about Claude Code conversations, from their transcripts: requests, tokens, the history each request re-reads, compactions, models, what fills the history, tools, and which `kontext` commands the agents ran. Prints numbers and names only, never text. Needs no project and no kontext configuration |
 
 ### Facts that expire
 
@@ -407,6 +408,18 @@ timeout = "240s"        # per call; if exceeded, the command's process group is 
 
 PRs come from `gh pr list --repo <owner/repo> --state merged --search "merged:>=<date>" --json number,title,url,mergedAt,author` for each repo in `[[repos]]` with a GitHub remote. `--since` and `--until` accept a date (`2026-11-01`; for `--until` it covers the whole day), an ISO-8601 date or a git ref (`v1.2`, `main~20`: its commit date in the repo of the current folder). If `gh` is missing or fails, the changelog comes out with the tasks and a note.
 
+### Measuring conversations
+
+`kontext measure` reads each transcript a line at a time (they reach hundreds of MB) and gives one combined report, plus one line per file with several. With `--json`, the same data as one object. The rules:
+
+- Lines of subagents (`isSidechain`) are skipped everywhere. A malformed line is counted and skipped.
+- A request is one distinct `message.id` among the `assistant` lines with `message.usage`: Claude Code writes one line per content block with the same usage, so the id counts once and the usage of its last line wins. Ids are distinct per file.
+- Tokens are summed over the requests (`input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`). The history re-read by a request is its `cache_read_input_tokens`: the report gives the average (integer division) and the maximum. No prices: tokens only.
+- What fills the history, in characters: tool results (a string content by its length; a list by the lengths of its `text` blocks, its other blocks, such as images and tool references, count 0 and are reported apart), tool calls (the compact JSON of each `tool_use` input), assistant text, and the text of the `user` lines, split with the capture hook's rule into typed by the human, reports handed back by delegated agents (`Delegated task node:`), pull-request updates (`Update on pull request #`) and other machine text (the other machine prefixes, a bare slash command, and `isMeta` lines); compaction summaries are the `isCompactSummary` lines. Reasoning blocks are not counted.
+- Tools: calls per tool name, and result characters per tool name (each result matched to its call by `tool_use_id`); the top 10 of each, all of them with `--json`.
+- `kontext` commands: for each `Bash` call, each simple command (split on `&&`, `||`, `;`, `|`, `&` and newlines outside quotes) that runs `kontext`, after any `VAR=value` and the global options (`--actor`, `--project`, `--json`…), counts under its subcommand, or `other` if the next word is not one; the list comes from the CLI itself. The characters of the call's result go to the last `kontext` command in it.
+- `--since` and `--until` (inclusive) go by each line's `timestamp`; a line without one takes the previous line's. A request belongs to the time of the first line with its id. The report says the first and last time it actually covered.
+
 ### More on hooks
 
 - A coordinator with `KONTEXT_ROLE=coordinator` and `KONTEXT_EPIC=<epic>` gets its epic's `brief` at startup (without advancing its cursor). Without `KONTEXT_EPIC`, it gets the usual output.
@@ -419,8 +432,22 @@ PRs come from `gh pr list --repo <owner/repo> --state merged --search "merged:>=
 | `kontext clone <git-url> [--home <path>] [--name <name>]` | Brings in an existing `kontext-home` (default `~/kontext-home/<repo name>`), registers it in `projects.toml`, sets this machine's writer if none was set, builds the index and prints the charter and the owners |
 | `kontext sync [--include-config]` | Commits your own changes (`ledger/` and `cursors/`, with the message `kontext: <writer> <N> entries`), fetches the others' changes (`fetch` and `rebase`) and pushes (`push -u`). Then it says how many entries arrived from each writer, which new alerts they caused, and whether the chain of what arrived verifies. Without a remote, it only commits |
 | `kontext status` | Project, writer, remote, last sync, own entries not committed and not pushed, index, chains, alerts and signatures. `--json` for the UI |
+| `kontext doctor` | Checks the installation and says what is wrong and which command fixes it: this binary, the `kontext` on `PATH`, the config and the project, the kontext-home, the hooks in every settings file, the capture, the skills and agent files, and the hook log. Each line is `ok`, a `note` or a `problem` with its fix; exits with 1 if there is any problem. Writes nothing, and works on a broken setup (no `projects.toml`, no project, a missing binary) |
 | `kontext verify` | Besides the chains, checks any signatures there are (and, with `require_signatures`, that the required ones are present). Exits with 1 if any doesn't verify |
 | `--sign` | Global option: signs even if `projects.toml` has no `[signing] key` (uses `~/.ssh/id_ed25519.pub`) |
+
+### Doctor
+
+`kontext doctor` runs every check on its own, so one failure does not hide the rest, and it never opens the project the usual way (that creates the index). What it looks at:
+
+- **This binary**: its real path. In a cargo build directory (`target/debug`, `target/release`) it is a note, and a problem if a hook runs it.
+- **`kontext` on `PATH`**: agents run `kontext` by name, hooks by absolute path. A problem if there is none, or if it is a different file from the one the hooks run.
+- **Config and project**: `projects.toml`, the writer, and which project the current folder resolves to and how (`--project`, `KONTEXT_PROJECT`, `.kontext.toml`, or the only one). Without a project, the project checks are skipped and it exits with 1.
+- **kontext-home**: it exists and is a git repo, `project.toml` parses, the ledger and this writer's file, the remote, the chains (as `kontext verify`), and own entries not committed or not pushed (a note: `kontext sync`).
+- **Hooks**: every `kontext hook <event>` in the repo's `.claude/settings.json` and `settings.local.json` and in your user's settings, with the file it is in and the binary's full path: it must exist, be executable and be the same file everywhere. A problem without a `SessionStart` hook or without the `Bash(kontext:*)` permission.
+- **Capture**: `[capture] enabled = true` without its hooks is a problem; its hooks with the capture off, a note; in a linked git worktree with `worktrees` off, a note that your messages here are not captured.
+- **Skills and agent files**: missing or from another version (as `kontext install --dry-run` would see them), a note.
+- **Hook log**: in `.kontext/hooks.log`, how many lines carry an error and when the last one was (a note).
 
 ## Phase 6 commands
 
