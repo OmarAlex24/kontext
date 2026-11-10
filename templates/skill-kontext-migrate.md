@@ -106,6 +106,8 @@ If the repo is public, or the sessions run in linked git worktrees (`git worktre
 
 The other way round, the PM's worktree starts as `agent` until it is marked. A full `kontext install` in a worktree that has no `.kontext.toml` is refused once the main checkout has one. If `kontext install` prints a line for `.git/info/exclude`, offer to add it, so a `git add -A` does not commit the file. Say every path first, as with any write.
 
+The capture hook (it writes what the human types to the PM into `.pm/dumps/`) stays off unless the human asks for it. To turn it on, in this order: in the conversation where the human talks to the PM, run `kontext capture here` (it names that conversation, so only it is captured, not a coordinator that shares its folder); run `kontext doctor` there and check that its Capture section says this conversation is named; then set `[capture] enabled = true` in `project.toml` and run `kontext install` again (with the same flags as above).
+
 ## 6. Checking
 
 ```sh

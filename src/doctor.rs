@@ -370,8 +370,8 @@ pub fn run(flag: Option<&str>) -> Report {
     let loaded = project
         .as_ref()
         .and_then(|(name, home, _)| Project::load(home).ok().map(|p| (name, home, p)));
-    if let Some((_, _, p)) = &loaded {
-        check_capture(&mut r, p, &settings, cwd.as_deref(), &install_fix);
+    if let Some((_, home, p)) = &loaded {
+        check_capture(&mut r, home, p, &settings, cwd.as_deref(), &install_fix);
     }
     if let Some(repo) = &repo {
         let exe_q = hook_bins
@@ -922,12 +922,99 @@ fn check_settings_place(r: &mut Report, repo: &Path, main: Option<&Path>) {
 
 fn check_capture(
     r: &mut Report,
+    home: &Path,
     project: &Project,
     s: &Settings,
     cwd: Option<&Path>,
     install_fix: &str,
 ) {
     let settings = capture::Settings::of(project);
+    let captures_here = check_capture_here(r, &settings, s, cwd, install_fix);
+    check_named(r, home, settings.enabled, captures_here);
+}
+
+/// The conversations named for capture on this machine, and whether this one
+/// (`$CLAUDE_CODE_SESSION_ID`) is. `captures_here`: the capture is on, this
+/// checkout captures and its role is `pm`.
+fn check_named(r: &mut Report, home: &Path, enabled: bool, captures_here: bool) {
+    let path = capture::named_path(home);
+    let list = match capture::named(home) {
+        Ok(l) => l,
+        Err(e) => {
+            let msg = format!("{e:#}: the capture writes nothing while it cannot be read");
+            let fix = format!(
+                "`kontext capture forget --all` empties it; then `{}` in the conversation where \
+                 the human talks to the PM",
+                capture::NAME_COMMAND
+            );
+            if enabled {
+                r.problem("capture", msg, fix);
+            } else {
+                r.note("capture", msg, Some(fix));
+            }
+            return;
+        }
+    };
+    if list.is_empty() {
+        r.ok(
+            "capture",
+            "no conversation is named on this machine: every pm conversation in a capturing \
+             checkout is captured"
+                .into(),
+        );
+    } else {
+        r.ok(
+            "capture",
+            format!(
+                "{} named on this machine ({}): only those are captured",
+                plural(list.len(), "conversation", "conversations"),
+                path.display()
+            ),
+        );
+    }
+    let Some(id) = capture::session_from_env() else {
+        return;
+    };
+    if list.iter().any(|n| n.id == id) {
+        r.ok(
+            "capture",
+            format!(
+                "this conversation ({id}, from ${}) is named",
+                capture::SESSION_ENV
+            ),
+        );
+    } else if list.is_empty() {
+        r.ok(
+            "capture",
+            format!("this conversation ({id}) is not named; none is"),
+        );
+    } else if enabled && captures_here {
+        r.note(
+            "capture",
+            format!(
+                "this conversation ({id}, from ${}) is not named: nothing typed in it is captured",
+                capture::SESSION_ENV
+            ),
+            Some(format!(
+                "if this is the conversation where the human talks to the PM, `{}`; one that \
+                 gets its messages from other agents stays unnamed",
+                capture::NAME_COMMAND
+            )),
+        );
+    } else {
+        r.ok("capture", format!("this conversation ({id}) is not named"));
+    }
+}
+
+/// The capture's hooks and whether this checkout captures. Returns `true`
+/// when the capture is on and a `pm` session here would be captured.
+fn check_capture_here(
+    r: &mut Report,
+    settings: &capture::Settings,
+    s: &Settings,
+    cwd: Option<&Path>,
+    install_fix: &str,
+) -> bool {
     let has = |ev: &str| s.hooks.iter().any(|h| h.kontext_event == ev);
     let missing: Vec<&str> = [
         ("UserPromptSubmit", "user-prompt-submit"),
@@ -956,7 +1043,7 @@ fn check_capture(
         ),
         (false, _) => r.ok("capture", "off".into()),
     }
-    let Some(cwd) = cwd else { return };
+    let Some(cwd) = cwd else { return false };
     let target = capture::target(cwd, settings.worktrees);
     let pm = match &target {
         capture::Target::Unmarked { pm, .. } => pm.as_deref(),
@@ -966,7 +1053,7 @@ fn check_capture(
         r.ok("capture", format!(".pm/ here: {}", pm.display()));
     }
     if !settings.enabled {
-        return;
+        return false;
     }
     let (role, _) = config::role_in(cwd);
     if role != "pm" {
@@ -974,8 +1061,9 @@ fn check_capture(
             "capture",
             format!("sessions here have role {role}: only the pm's messages are captured"),
         );
-        return;
+        return false;
     }
+    let captures = target.pm().is_some();
     match target {
         capture::Target::NotGit => r.note(
             "capture",
@@ -1013,6 +1101,7 @@ fn check_capture(
             None,
         ),
     }
+    captures
 }
 
 fn check_skills(

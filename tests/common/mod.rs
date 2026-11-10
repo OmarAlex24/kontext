@@ -101,6 +101,7 @@ impl Project {
             .env("KONTEXT_CONFIG_DIR", config)
             .env("KONTEXT_PROJECT", "demo")
             .env("KONTEXT_ACTOR", "human:omar")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
             .current_dir(self.dir.path());
         c
     }

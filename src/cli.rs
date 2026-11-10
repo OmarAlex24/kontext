@@ -200,6 +200,28 @@ pub enum InboxCmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum CaptureCmd {
+    /// Names this conversation ($CLAUDE_CODE_SESSION_ID) for the capture hook: once at least one is
+    /// named, only named conversations are captured, for this project on this machine
+    Here {
+        /// The conversation's session id, outside Claude Code (default: $CLAUDE_CODE_SESSION_ID)
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+    /// The conversations named for capture on this machine
+    List,
+    /// Forgets a named conversation, or all of them; with none named, every pm conversation in a
+    /// capturing checkout is captured again
+    Forget {
+        /// Its session id
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum Cmd {
     /// Creates a kontext-home and registers it in ~/.config/kontext/projects.toml
     Init {
@@ -382,6 +404,12 @@ pub enum Cmd {
     /// The user's ideas in `.pm/items.md` (skill kontext-pm) and where each one went: its state
     /// comes from the ledger through the ids in `where`. Doesn't write anything
     Ideas,
+    /// Which conversations the capture hook writes from, on this machine: `here`, `list`, `forget`.
+    /// Works with the capture off
+    Capture {
+        #[command(subcommand)]
+        cmd: CaptureCmd,
+    },
     /// Epics
     Epic {
         #[command(subcommand)]
@@ -707,6 +735,147 @@ fn install_skills(dry_run: bool, global: bool) -> Result<ExitCode> {
     }
     for p in plan.apply()? {
         println!("Wrote {}", p.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Why the capture writes nothing for a session in `dir` with these settings
+/// (the hook's own rules: [`config::role_in`] and [`crate::capture::target`]),
+/// or none if it captures there.
+fn capture_blocked_here(dir: &Path, settings: &crate::capture::Settings) -> Vec<String> {
+    use crate::capture::Target;
+    let mut why = Vec::new();
+    let (role, from) = config::role_in(dir);
+    if role != "pm" {
+        why.push(format!(
+            "sessions here have role {role} ({from}), and only pm conversations are captured"
+        ));
+    }
+    match crate::capture::target(dir, settings.worktrees) {
+        Target::NotGit => why.push("this folder is not in a git repo".into()),
+        Target::Unmarked { fix, .. } => why.push(format!(
+            "this is a linked git worktree not marked as the PM's (if the PM works here, {fix})"
+        )),
+        Target::NoMain => why.push(
+            "this is a worktree of a bare repository, which has no main checkout's .pm/".into(),
+        ),
+        Target::Main(_) | Target::OwnWorktree(_) | Target::Marked(_) => {}
+    }
+    why
+}
+
+/// `kontext capture here|list|forget`: the conversations named for the
+/// capture hook, in the kontext-home's `.kontext/` (local). It works with the
+/// capture off, so a conversation can be named before turning it on.
+fn capture_cmd(project: Option<&str>, json_out: bool, cmd: CaptureCmd) -> Result<ExitCode> {
+    use crate::capture;
+    let p = config::resolve_project(project)?;
+    let settings = capture::Settings::of(&Project::load(&p.home)?);
+    let file = capture::named_path(&p.home);
+    let current = capture::session_from_env();
+    let cwd = std::env::current_dir()?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut out = json!({
+        "project": p.name,
+        "home": p.home,
+        "file": file,
+        "capture_enabled": settings.enabled,
+        "current": current,
+    });
+    let list = match cmd {
+        CaptureCmd::Here { session } => {
+            let (id, source) = match session.map(|s| s.trim().to_string()) {
+                Some(s) if !s.is_empty() => (s, "--session"),
+                Some(_) => bail!("--session needs a session id"),
+                None => match &current {
+                    Some(s) => (s.clone(), "$CLAUDE_CODE_SESSION_ID"),
+                    None => bail!(
+                        "{} is not set, so this is not a Claude Code session (Claude Code sets \
+                         it in Bash tool and hook subprocesses): pass the conversation's id \
+                         with --session <id> (the session= of its lines in {})",
+                        capture::SESSION_ENV,
+                        config::internal_dir(&p.home).join("hooks.log").display()
+                    ),
+                },
+            };
+            let (added, list) = capture::name(&p.home, &id, &cwd)?;
+            lines.push(if added {
+                format!("Named conversation {id} (from {source}) for the capture.")
+            } else {
+                format!("Conversation {id} (from {source}) was already named.")
+            });
+            let why = capture_blocked_here(&cwd, &settings);
+            for w in &why {
+                lines.push(format!("Nothing is captured from it here yet: {w}."));
+            }
+            out["session"] = json!(id);
+            out["added"] = json!(added);
+            out["not_captured_here"] = json!(why);
+            list
+        }
+        CaptureCmd::List => capture::named(&p.home)?,
+        CaptureCmd::Forget { id, all } => {
+            let (gone, list) = capture::forget(&p.home, if all { None } else { id.as_deref() })?;
+            if let (Some(id), false) = (&id, all)
+                && gone.is_empty()
+            {
+                return Err(Refused(format!(
+                    "{id} is not a named conversation (`kontext capture list` shows them)"
+                ))
+                .into());
+            }
+            lines.push(match gone.len() {
+                0 => "No conversation was named; nothing to forget.".to_string(),
+                1 => format!("Forgot {}.", gone[0]),
+                n => format!("Forgot {n} named conversations."),
+            });
+            out["forgotten"] = json!(gone);
+            list
+        }
+    };
+    out["named"] = json!(list);
+    if json_out {
+        print_json(&out)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    lines.push(format!(
+        "Project {}, kontext-home {}; the list is {} (this machine only).",
+        p.name,
+        p.home.display(),
+        file.display()
+    ));
+    if list.is_empty() {
+        lines.push(
+            "No conversation is named: every pm conversation in a capturing checkout is captured."
+                .into(),
+        );
+    } else {
+        lines.push(format!(
+            "Named ({}): only these conversations are captured.",
+            list.len()
+        ));
+        for n in &list {
+            let this = if current.as_deref() == Some(n.id.as_str()) {
+                "  (this conversation)"
+            } else {
+                ""
+            };
+            lines.push(format!("  {}  named {} in {}{this}", n.id, n.at, n.dir));
+        }
+        lines.push(format!(
+            "A conversation's id changes on /clear: run `{}` in it again.",
+            capture::NAME_COMMAND
+        ));
+    }
+    if !settings.enabled {
+        lines.push(
+            "Capture is off ([capture] enabled is not true in project.toml): nothing is captured \
+             until it is on."
+                .into(),
+        );
+    }
+    for l in lines {
+        println!("{l}");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1048,6 +1217,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             reader,
         } => cx.report(html, output, reader),
         Cmd::Ideas => cx.ideas(),
+        Cmd::Capture { cmd } => capture_cmd(project, cx.json, cmd),
         Cmd::Standup { peek, reader } => cx.standup(peek, reader),
         Cmd::Resume {
             role,
