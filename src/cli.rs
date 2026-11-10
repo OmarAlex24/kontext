@@ -1973,13 +1973,15 @@ impl Ctx<'_> {
                 repo.display()
             );
         }
+        let project = Project::load(&resolved.home)?;
         let opts = install::Options {
             repo: &repo,
             project_name: &resolved.name,
             home: &resolved.home,
             default_role: role,
             exe: exe_quoted()?,
-            distill: distill::Settings::of(&Project::load(&resolved.home)?)?.enabled,
+            distill: distill::Settings::of(&project)?.enabled,
+            capture: crate::capture::Settings::of(&project).enabled,
             force,
         };
         let plan = install::plan(&opts)?;

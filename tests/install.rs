@@ -231,6 +231,84 @@ fn refuses_invalid_settings_json() {
     assert_eq!(snapshot(&p, &r), before);
 }
 
+/// The kontext commands in `hooks.<event>` of the repo's settings.json.
+fn hook_commands(r: &Path, event: &str) -> Vec<String> {
+    let s = fs::read_to_string(r.join(".claude/settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    v["hooks"][event]
+        .as_array()
+        .map(|groups| {
+            groups
+                .iter()
+                .flat_map(|g| g["hooks"].as_array().cloned().unwrap_or_default())
+                .filter_map(|h| h["command"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn set_section(p: &Project, from: &str, to: &str) {
+    let toml = p.home.join("project.toml");
+    let t = fs::read_to_string(&toml).unwrap();
+    assert!(t.contains(from), "{t}");
+    fs::write(&toml, t.replacen(from, to, 1)).unwrap();
+}
+
+#[test]
+fn capture_hooks_only_when_enabled_and_one_session_end() {
+    // Off by default: no UserPromptSubmit or Stop.
+    let p = Project::new();
+    let r = repo(&p);
+    assert!(install(&p, &r, &[]).status.success());
+    assert!(hook_commands(&r, "UserPromptSubmit").is_empty());
+    assert!(hook_commands(&r, "Stop").is_empty());
+    assert_eq!(hook_commands(&r, "SessionEnd").len(), 1, "the distill's");
+
+    // On, with the distill on: the two new ones, and SessionEnd still once.
+    set_section(&p, "\n[claims]", "\n[capture]\nenabled = true\n\n[claims]");
+    let out = install(&p, &r, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for (event, sub) in [
+        ("UserPromptSubmit", "user-prompt-submit"),
+        ("Stop", "stop"),
+        ("SessionEnd", "session-end"),
+        ("PreCompact", "pre-compact"),
+    ] {
+        let cmds = hook_commands(&r, event);
+        assert_eq!(cmds.len(), 1, "{event}: {cmds:?}");
+        assert!(
+            cmds[0].ends_with(&format!("kontext hook {sub}")) && cmds[0].starts_with('/'),
+            "{cmds:?}"
+        );
+    }
+    let out = install(&p, &r, &[]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to change"));
+
+    // Capture on, distill off, in a new repo: SessionEnd for the capture alone.
+    let p = Project::new();
+    let r = repo(&p);
+    set_section(&p, "enabled = true", "enabled = false");
+    set_section(&p, "\n[claims]", "\n[capture]\nenabled = true\n\n[claims]");
+    assert!(install(&p, &r, &[]).status.success());
+    assert!(hook_commands(&r, "PreCompact").is_empty());
+    for event in ["UserPromptSubmit", "Stop", "SessionEnd"] {
+        assert_eq!(hook_commands(&r, event).len(), 1, "{event}");
+    }
+    // Turning it off again does not remove them (as with the distill): the
+    // hooks check the setting each time.
+    set_section(
+        &p,
+        "[capture]\nenabled = true",
+        "[capture]\nenabled = false",
+    );
+    let out = install(&p, &r, &[]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to change"));
+}
+
 #[test]
 fn keeps_existing_kontext_toml() {
     let p = Project::new();
