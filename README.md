@@ -94,7 +94,7 @@ kontext verify
 | `kontext answer <Q-id> <text>` | Answers a question |
 | `kontext log <text> [--next <text>] [--task <id>] [--tags a,b]` | Journal entry |
 | `kontext standup [--peek] [--as <reader>]` | What happened since your last visit and what is waiting for your answer. Advances your cursor (with `--peek`, it doesn't) |
-| `kontext resume --as <role> [--max-chars N] [--peek]` | The context for a role (`pm`, `owner`…): charter, goals, decisions in force, what the user said (the distill notes it, with a date), questions, proposals, facts, journal and what's new, trimmed to the budget by priority. Advances the role's cursor |
+| `kontext resume --as <role> [--max-chars N] [--peek]` | The context for a role (`pm`, `owner`…): charter, goals, decisions in force, what the user said (the distill notes it, with a date), questions, proposals, facts, journal and what's new, trimmed to the budget by priority (the list of decisions last: then it shows the newest and how many are not shown). Advances the role's cursor |
 | `kontext show <id>` | A full entry with its history. Accepts prefixes (`D-7f3`) |
 | `kontext recall <words> [--limit N] [--since YYYY-MM-DD]` | Searches the ledger and Claude Code's transcripts |
 | `kontext hook session-start` | Called by Claude Code when a session starts. Never fails and doesn't advance cursors |
@@ -150,7 +150,7 @@ kontext show D-f99
 
 `kontext install` adds to `.claude/settings.json` a `SessionStart` hook (`startup|resume|clear|compact`) that runs `<kontext path> hook session-start`, and the `Bash(kontext:*)` permission in `permissions.allow`. The role comes from `KONTEXT_ROLE`, then from `default_role` in `.kontext.toml`, and if neither is set, `pm`. What it puts in depends on `[context]` in `project.toml` (the role, then `default`, then `inject`; `kontext init` sets `inject` for everyone):
 
-- `inject`: the full `resume` for the role, up to 9,000 characters (never more than 9,900).
+- `inject`: the `resume` for the role, trimmed to 9,000 characters (never more than 9,900). With many decisions in force, it lists the newest and says how many more there are and how to search them.
 - `pointer`: two lines with how many new items and questions there are and what to run.
 - `off`: nothing; the skill remains.
 

@@ -185,17 +185,156 @@ fn inject_pointer_and_off() {
 
 #[test]
 fn inject_respects_the_hard_cap() {
+    // What the view never cuts (here, a huge charter objective) is still cut
+    // by the hook.
     let p = Project::new();
-    let mut lines = String::new();
-    for i in 0..300 {
-        lines.push_str(&format!(
-            "{{\"kind\":\"decision\",\"title\":\"Decision {i} with a long title to fill the budget\",\"actor\":{{\"type\":\"human\",\"name\":\"omar\"}}}}\n"
-        ));
-    }
-    p.append(&lines);
+    let objective = "Send every invoice by email the same day. ".repeat(300);
+    let a = p.id_of(&[], &["charter", "--objective", &objective]);
+    p.kontext_ok(&["sign", &a]);
     let text = context(&hook(&p, &[("KONTEXT_ROLE", "pm")], INPUT));
     assert!(text.chars().count() <= 9900, "{}", text.chars().count());
     assert!(text.contains("cut for the hook"), "{text}");
+}
+
+/// 320 decisions in force under several tags, written as the owner.
+fn many_decisions(p: &Project, tags: &[&str]) {
+    let mut lines = String::new();
+    for i in 0..320 {
+        lines.push_str(&format!(
+            "{{\"kind\":\"decision\",\"title\":\"Invoice rule {i}: round totals to cents before the tax\",\"tags\":[\"{}\"],\"actor\":{{\"type\":\"human\",\"name\":\"omar\"}}}}\n",
+            tags[i % tags.len()]
+        ));
+    }
+    p.append(&lines);
+}
+
+/// The text of a section up to the next `## `.
+fn section<'a>(text: &'a str, heading: &str) -> &'a str {
+    let start = text
+        .find(heading)
+        .unwrap_or_else(|| panic!("missing {heading}:\n{text}"));
+    let rest = &text[start + heading.len()..];
+    &rest[..rest.find("\n## ").unwrap_or(rest.len())]
+}
+
+/// How many decision ids (`D-…`) a text lists.
+fn decision_ids(text: &str) -> usize {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|w| w.starts_with("D-"))
+        .count()
+}
+
+#[test]
+fn a_large_ledger_of_decisions_is_cut_by_the_view_not_the_hook() {
+    let p = Project::new();
+    let a = p.id_of(&[], &["charter", "--objective", "Send invoices by email"]);
+    p.kontext_ok(&["sign", &a]);
+    many_decisions(&p, &["billing", "invoices", "taxes", "email", "pdf"]);
+    // A conflict: two decisions supersede the same one.
+    // (`kontext decide` refuses the second one; the ledger can still have it.)
+    let old = p.id_of(&[], &["decide", "Export invoices as CSV"]);
+    let mut lines = String::new();
+    for f in ["XLSX", "JSON"] {
+        lines.push_str(&format!(
+            "{{\"kind\":\"decision\",\"title\":\"Export invoices as {f}\",\"fields\":{{\"supersedes\":[\"{old}\"]}},\"actor\":{{\"type\":\"human\",\"name\":\"omar\"}}}}\n"
+        ));
+    }
+    p.append(&lines);
+    let q1 = p.id_of(
+        &[("KONTEXT_ACTOR", "agent:coder")],
+        &["ask", "Which tax rate applies to refunds?", "--to", "pm"],
+    );
+    let q2 = p.id_of(
+        &[("KONTEXT_ACTOR", "agent:coder")],
+        &["ask", "Do credit notes get their own series?", "--to", "pm"],
+    );
+    // Something that waits for the owner: the inbox line on top.
+    p.agent_ok("coder", &["ask", "May we email the PDF?", "--to", "owner"]);
+    let mut proposals = Vec::new();
+    for i in 0..3 {
+        proposals.push(p.id_of(
+            &[("KONTEXT_ACTOR", "agent:coder")],
+            &["propose", &format!("Number invoices per year, variant {i}")],
+        ));
+    }
+    let law = 322;
+
+    let text = context(&hook(&p, &[("KONTEXT_ROLE", "pm")], INPUT));
+    assert!(text.chars().count() <= 9000, "{}", text.chars().count());
+    assert!(!text.contains("cut for the hook"), "{text}");
+    assert!(!text.contains("(kontext: this is over"), "{text}");
+    assert!(text.contains("pending item"), "{text}");
+    let qs = section(&text, "## Questions for pm (2)");
+    assert!(qs.contains(&q1) && qs.contains(&q2), "{text}");
+    let ps = section(&text, "## Pending proposals (3)");
+    for (i, id) in proposals.iter().enumerate() {
+        assert!(
+            ps.contains(&format!("- {id} Number invoices per year, variant {i}")),
+            "{text}"
+        );
+    }
+    let alerts = section(&text, "## Alerts (1)");
+    assert!(alerts.contains(&format!("conflict: {old}")), "{text}");
+    assert!(
+        text.contains("## What's new since your last time ("),
+        "{text}"
+    );
+    // The newest decisions, and how many are not shown.
+    let ds = section(&text, &format!("## Decisions in force ({law})"));
+    let shown = decision_ids(ds);
+    assert!(shown > 10 && shown < law, "{shown}\n{ds}");
+    assert!(
+        ds.contains(&format!(
+            "- … {} older decisions in force not shown (by first tag: ",
+            law - shown
+        )),
+        "{ds}"
+    );
+    assert!(ds.contains("Export invoices as JSON"), "{ds}");
+    assert!(!ds.contains("Invoice rule 0:"), "{ds}");
+    // The last line is whole.
+    assert!(
+        text.ends_with("more, see `kontext standup --peek`\n"),
+        "{text}"
+    );
+
+    // `resume --json` still lists every decision in force.
+    let v: Value =
+        serde_json::from_str(&p.kontext_ok(&["--json", "resume", "--as", "pm", "--peek"])).unwrap();
+    assert_eq!(v["decisions"].as_array().unwrap().len(), law);
+}
+
+#[test]
+fn a_coordinator_brief_with_many_decisions_keeps_its_mark() {
+    let (p, _g, _e) = common::with_epic();
+    many_decisions(&p, &["billing", "invoices", "payments"]);
+    p.kontext_env_ok(
+        &[
+            ("KONTEXT_ACTOR", "agent:epic:payments"),
+            ("KONTEXT_ROLE", "coordinator"),
+        ],
+        &["task", "add", "Integrate Stripe", "--epic", "payments"],
+    );
+    let text = context(&hook(
+        &p,
+        &[
+            ("KONTEXT_ROLE", "coordinator"),
+            ("KONTEXT_EPIC", "payments"),
+        ],
+        INPUT,
+    ));
+    assert!(text.chars().count() <= 9000, "{}", text.chars().count());
+    assert!(!text.contains("cut for the hook"), "{text}");
+    assert!(text.contains("Integrate Stripe"), "{text}");
+    assert!(text.contains("## Assignment mark\n`"), "{text}");
+    assert!(
+        text.contains("older decisions in force not shown"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("whether anything arrived that changes the task.\n"),
+        "{text}"
+    );
 }
 
 #[test]

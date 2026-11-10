@@ -501,7 +501,22 @@ struct Level {
     list_cap: Option<usize>,
     /// How many of "What the user said" (the most recent).
     user_cap: Option<usize>,
+    /// The last cut, only when everything above is not enough: how many of
+    /// the decisions in force are listed (`None`: all of them).
+    decisions: Option<DecisionCut>,
 }
+
+/// How many titles of the decisions in force are listed: the `shown` newest,
+/// with a notice of how many are not and, with `by_tag`, how many of each
+/// first tag.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DecisionCut {
+    pub shown: usize,
+    pub by_tag: bool,
+}
+
+/// At most this many tags in the count of what is not shown.
+const HIDDEN_TAGS_N: usize = 10;
 
 const JOURNAL_N: usize = 10;
 const FACTS_N: usize = 15;
@@ -663,19 +678,85 @@ pub(crate) fn goal_lines(st: &State) -> Vec<String> {
     l
 }
 
-pub(crate) fn decision_lines(st: &State, detail: bool) -> Vec<String> {
-    let law = st.law();
+/// The first tag of a decision, which groups it in `resume`.
+fn first_tag(d: &Entry) -> (bool, String) {
+    let tag = d.tags.first().cloned();
+    (tag.is_none(), tag.unwrap_or_else(|| "no tag".into()))
+}
+
+/// The line that says a list of decisions in force is partial (`detail` goes
+/// after "not shown", e.g. the count by tag), with how to reach the rest.
+pub(crate) fn partial_notice(hidden: usize, detail: &str) -> String {
+    format!(
+        "- … {} in force not shown{detail}. This list is partial: before you propose or decide \
+         something, search whether it is already decided with `kontext recall <words>`; read one \
+         with `kontext show <id>`.",
+        plural(hidden, "older decision", "older decisions")
+    )
+}
+
+/// The largest `n` in `0..=total` whose text fits in `max` characters, and
+/// that text; `None` if not even `n = 0` fits. It searches by halves, so a
+/// text that is not shorter with a smaller `n` may leave a few out; what it
+/// returns always fits.
+pub(crate) fn largest_fitting(
+    total: usize,
+    max: usize,
+    mut build: impl FnMut(usize) -> String,
+) -> Option<String> {
+    let fits = |t: &str| t.chars().count() <= max;
+    let mut best = Some(build(0)).filter(|t| fits(t))?;
+    let (mut lo, mut hi) = (0, total);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let t = build(mid);
+        if fits(&t) {
+            lo = mid;
+            best = t;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(best)
+}
+
+pub(crate) fn decision_lines(st: &State, detail: bool, cut: Option<DecisionCut>) -> Vec<String> {
+    let mut law = st.law();
     let mut l = vec![format!("## Decisions in force ({})", law.len())];
     if law.is_empty() {
         l.push("- (none)".into());
     }
+    // The newest stay: `law` is in ledger order.
+    if let Some(cut) = cut {
+        let hidden: Vec<&Entry> = law.drain(..law.len().saturating_sub(cut.shown)).collect();
+        if !hidden.is_empty() {
+            let mut detail = String::new();
+            if cut.by_tag {
+                let mut n: BTreeMap<(bool, String), usize> = BTreeMap::new();
+                for d in &hidden {
+                    *n.entry(first_tag(d)).or_default() += 1;
+                }
+                let mut n: Vec<((bool, String), usize)> = n.into_iter().collect();
+                n.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let mut parts: Vec<String> = n
+                    .iter()
+                    .take(HIDDEN_TAGS_N)
+                    .map(|((_, tag), k)| format!("{tag} {k}"))
+                    .collect();
+                if n.len() > HIDDEN_TAGS_N {
+                    parts.push(format!(
+                        "{} more",
+                        plural(n.len() - HIDDEN_TAGS_N, "tag", "tags")
+                    ));
+                }
+                detail = format!(" (by first tag: {})", parts.join(", "));
+            }
+            l.push(partial_notice(hidden.len(), &detail));
+        }
+    }
     let mut groups: BTreeMap<(bool, String), Vec<&Entry>> = BTreeMap::new();
     for d in law {
-        let tag = d.tags.first().cloned();
-        groups
-            .entry((tag.is_none(), tag.unwrap_or_else(|| "no tag".into())))
-            .or_default()
-            .push(d);
+        groups.entry(first_tag(d)).or_default().push(d);
     }
     for ((_, tag), ds) in groups {
         if !detail {
@@ -733,7 +814,7 @@ fn build_resume(st: &State, new: &[Entry], o: &ResumeOpts, lv: Level) -> String 
     l.push(String::new());
     l.extend(goal_lines(st));
     l.push(String::new());
-    l.extend(decision_lines(st, lv.decision_detail));
+    l.extend(decision_lines(st, lv.decision_detail, lv.decisions));
     l.push(String::new());
     l.extend(crate::board::epic_lines(st));
     // The pm sees one line per epic, not the tasks or facts of the epics
@@ -930,9 +1011,10 @@ fn build_resume(st: &State, new: &[Entry], o: &ResumeOpts, lv: Level) -> String 
 /// `kontext resume --as <role>`, cut to the budget by priority (DESIGN §8):
 /// first the journal goes, then what was superseded and what is new, the facts,
 /// the reasons of the decisions, the lists of what is open and at the end the
-/// oldest of what the user said. The charter, the goals and the titles of the
-/// decisions in force are never cut; if it still does not fit, that is said at
-/// the end.
+/// oldest of what the user said. If that is not enough, the list of decisions
+/// in force gets what is left: its newest titles, with a line that says how
+/// many older ones are not shown and how to search them. The charter and the
+/// goals are never cut; if it still does not fit, that is said at the end.
 pub fn resume(st: &State, new: &[Entry], o: &ResumeOpts) -> String {
     let mut lv = Level {
         journal: JOURNAL_N,
@@ -942,6 +1024,7 @@ pub fn resume(st: &State, new: &[Entry], o: &ResumeOpts) -> String {
         facts: None,
         list_cap: None,
         user_cap: None,
+        decisions: None,
     };
     let fits = |t: &str| t.chars().count() <= o.max_chars;
     let mut text = build_resume(st, new, o, lv);
@@ -967,12 +1050,37 @@ pub fn resume(st: &State, new: &[Entry], o: &ResumeOpts) -> String {
         step(&mut lv);
         text = build_resume(st, new, o, lv);
     }
-    if !fits(&text) {
-        text.push_str(&format!(
-            "\n(kontext: this is over {} characters; the charter, the goals and the titles of the decisions in force are never cut)\n",
-            o.max_chars
-        ));
+    if fits(&text) {
+        return text;
     }
+    // A long ledger of decisions: the rest keeps its room, the decisions get
+    // what is left. The count by tag goes first, if it fits.
+    let total = st.law().len();
+    for by_tag in [true, false] {
+        let found = largest_fitting(total, o.max_chars, |shown| {
+            lv.decisions = Some(DecisionCut { shown, by_tag });
+            build_resume(st, new, o, lv)
+        });
+        if let Some(t) = found {
+            return t;
+        }
+    }
+    // Not even the rest fits: the shorter of all the titles and none.
+    lv.decisions = Some(DecisionCut {
+        shown: 0,
+        by_tag: false,
+    });
+    let none = build_resume(st, new, o, lv);
+    let without = if none.chars().count() < text.chars().count() {
+        text = none;
+        " even without the titles of the decisions in force"
+    } else {
+        ""
+    };
+    text.push_str(&format!(
+        "\n(kontext: this is over {} characters{without}; the charter and the goals are never cut)\n",
+        o.max_chars
+    ));
     text
 }
 
@@ -1484,6 +1592,256 @@ mod tests {
             writer: None,
             distill: false,
         }
+    }
+
+    /// A small ledger whose `resume` fits once the existing ladder runs.
+    fn small_ledger() -> Vec<Entry> {
+        let mut v = Vec::new();
+        let mut c = e("A-000001", 1, "charter", "Invoices for small shops");
+        c.fields
+            .insert("objective".into(), json!("Send invoices by email"));
+        v.push(c);
+        let mut s = e("R-000001", 2, "sign", "");
+        s.refs = vec!["A-000001".into()];
+        v.push(s);
+        v.push(e("G-000001", 3, "goal", "First invoice sent"));
+        for (i, tag) in ["billing", "invoices", "billing"].iter().enumerate() {
+            let mut d = e(
+                &format!("D-00000{i}"),
+                10 + i,
+                "decision",
+                &format!("Invoice rule number {i}"),
+            );
+            d.why = "because the accountant asked for it".into();
+            d.tags = vec![tag.to_string()];
+            v.push(d);
+        }
+        let mut q = e("Q-000001", 20, "question", "Which tax rate applies?");
+        q.fields.insert("to".into(), json!("pm"));
+        q.actor = Actor::agent("coder");
+        v.push(q);
+        let mut p = e("P-000001", 21, "proposal", "Number invoices per year");
+        p.actor = Actor::agent("coder");
+        p.why = "the accountant resets the count every year".into();
+        v.push(p);
+        let mut f = e("F-000001", 22, "fact", "The billing table has no index");
+        f.actor = Actor::agent("scout");
+        v.push(f);
+        for i in 0..4 {
+            v.push(e(
+                &format!("J-00000{i}"),
+                30 + i,
+                "journal",
+                &format!("Worked on the invoice template, step {i}"),
+            ));
+        }
+        v
+    }
+
+    const SMALL_HEAD: &str = "# Context of demo for pm (kontext resume)
+Generated now. Ledger: 0 entries, chain OK.
+
+The conversation is disposable: what is not in kontext is lost. Agents propose (`kontext propose`), they do not decide. What the user said applies even when unsigned; what was superseded no longer applies. Details of any id: `kontext show <id>`.
+Invoke kontext as a standalone command that starts with `kontext`: no `VAR=…` or `export` in front, no `cd … &&`, no pipes (`| head`, `| sed`) or `( … )`; that way a `Bash(kontext:*)` permission covers it and it does not wait for approval. Your identity goes in the arguments: `kontext --actor agent:<your-name> --role <role> log …`.
+
+## Charter
+A-000001 [signed] Invoices for small shops
+- Objective: Send invoices by email
+
+## Goals (1)
+- G-000001 [unsigned] First invoice sent
+
+## Decisions in force (3)
+";
+
+    const SMALL_FULL: &str = "### billing
+- D-000000 Invoice rule number 0 (why: because the accountant asked for it)
+- D-000002 Invoice rule number 2 (why: because the accountant asked for it)
+### invoices
+- D-000001 Invoice rule number 1 (why: because the accountant asked for it)
+
+## Epics (0)
+- (none)
+
+## Questions for pm (1)
+- Q-000001 Which tax rate applies? (from agent:coder)
+
+## Pending proposals (1)
+- P-000001 Number invoices per year from agent:coder (why: the accountant resets the count every year)
+
+## Recent facts (1)
+- F-000001 The billing table has no index
+
+## Journal (last 4 of 4)
+- 2026-11-03 18:00 human:omar Worked on the invoice template, step 0
+- 2026-11-03 18:00 human:omar Worked on the invoice template, step 1
+- 2026-11-03 18:00 human:omar Worked on the invoice template, step 2
+- 2026-11-03 18:00 human:omar Worked on the invoice template, step 3
+
+## What's new since your last time (13)
+- A-000001 charter: Invoices for small shops (human:omar)
+- A-000001 signed by human:omar: Invoices for small shops
+- G-000001 goal: First invoice sent (human:omar)
+- D-000000 decision: Invoice rule number 0 (human:omar)
+- D-000001 decision: Invoice rule number 1 (human:omar)
+- D-000002 decision: Invoice rule number 2 (human:omar)
+- Q-000001 question: Which tax rate applies? (agent:coder)
+- P-000001 proposal: Number invoices per year (agent:coder)
+- J-000000 journal: Worked on the invoice template, step 0 (human:omar)
+- J-000001 journal: Worked on the invoice template, step 1 (human:omar)
+- J-000002 journal: Worked on the invoice template, step 2 (human:omar)
+- J-000003 journal: Worked on the invoice template, step 3 (human:omar)
+- … and 1 entry from the epics' work (tasks, task journal, facts): each coordinator sees them with `kontext brief <epic>`
+";
+
+    const SMALL_CUT: &str = "- **billing**: D-000000 Invoice rule number 0; D-000002 Invoice rule number 2
+- **invoices**: D-000001 Invoice rule number 1
+
+## Epics (0)
+- (none)
+
+## Questions for pm (1)
+- Q-000001 Which tax rate applies? (from agent:coder)
+
+## Pending proposals (1)
+- P-000001 Number invoices per year from agent:coder
+
+## Recent facts (1)
+- … 1 more, see `kontext recall <topic>`
+
+## Journal (last 0 of 4)
+- (nothing)
+
+## What's new since your last time (13)
+- … 12 more, see `kontext standup --peek`
+- … and 1 entry from the epics' work (tasks, task journal, facts): each coordinator sees them with `kontext brief <epic>`
+";
+
+    /// What fits with the existing ladder comes out exactly as before the cut
+    /// of the decisions list existed (texts taken from that version).
+    #[test]
+    fn small_ledger_output_is_unchanged() {
+        let v = small_ledger();
+        let st = State::build_at(v.clone(), &Policy::new(&["omar"]), 0);
+        assert_eq!(
+            resume(&st, &v, &opts(9000)),
+            format!("{SMALL_HEAD}{SMALL_FULL}")
+        );
+        assert_eq!(
+            resume(&st, &v, &opts(1500)),
+            format!("{SMALL_HEAD}{SMALL_CUT}")
+        );
+    }
+
+    /// A ledger with 320 decisions in force under six tags, plus what the pm
+    /// must see: questions for it, pending proposals and a conflict.
+    fn large_ledger() -> Vec<Entry> {
+        let tags = ["billing", "invoices", "taxes", "email", "pdf", "exports"];
+        let mut v = Vec::new();
+        let mut c = e("A-000001", 1, "charter", "Invoices for small shops");
+        c.fields
+            .insert("objective".into(), json!("Send invoices by email"));
+        v.push(c);
+        for i in 0..320 {
+            let mut d = e(
+                &format!("D-1{i:05}"),
+                100 + i,
+                "decision",
+                &format!("Invoice rule {i}: round totals to cents before the tax is added"),
+            );
+            d.why = "the accountant asked for it in the review".into();
+            d.tags = vec![tags[i % tags.len()].into()];
+            v.push(d);
+        }
+        // Two decisions that supersede the same one: a conflict alert.
+        v.push(e("D-200000", 500, "decision", "Old export format"));
+        for (id, n) in [("D-200001", 501), ("D-200002", 502)] {
+            let mut d = e(id, n, "decision", "New export format");
+            d.fields.insert("supersedes".into(), json!(["D-200000"]));
+            v.push(d);
+        }
+        for i in 0..3 {
+            let mut q = e(
+                &format!("Q-00000{i}"),
+                600 + i,
+                "question",
+                &format!("Which tax rate applies to region {i}?"),
+            );
+            q.fields.insert("to".into(), json!("pm"));
+            q.actor = Actor::agent("coder");
+            v.push(q);
+        }
+        for i in 0..4 {
+            let mut p = e(
+                &format!("P-00000{i}"),
+                700 + i,
+                "proposal",
+                &format!("Number invoices per year, variant {i}"),
+            );
+            p.actor = Actor::agent("coder");
+            v.push(p);
+        }
+        v
+    }
+
+    #[test]
+    fn a_long_list_of_decisions_is_cut_and_the_rest_stays() {
+        let v = large_ledger();
+        let st = State::build_at(v.clone(), &Policy::new(&["omar"]), 0);
+        let law = st.law().len();
+        assert_eq!(law, 322);
+        let out = resume(&st, &v, &opts(9000));
+        assert!(out.chars().count() <= 9000, "{}", out.chars().count());
+        assert!(!out.contains("(kontext: this is over"), "{out}");
+        // The other sections, with their items.
+        for want in [
+            "A-000001 [unsigned] Invoices for small shops",
+            "## Questions for pm (3)",
+            "- Q-000002 Which tax rate applies to region 2? (from agent:coder)",
+            "## Pending proposals (4)",
+            "- P-000003 Number invoices per year, variant 3 from agent:coder",
+            "## Alerts (1)",
+            "- conflict: D-200000 is superseded at the same time by D-200001 and D-200002.",
+            "## What's new since your last time (331)\n- … 330 more, see `kontext standup --peek`\n",
+        ] {
+            assert!(out.contains(want), "missing {want:?}:\n{out}");
+        }
+        // The newest decisions stay; the notice says how many are not shown.
+        let sec = &out[out.find("## Decisions in force (322)").expect(&out)..];
+        let sec = &sec[..sec.find("\n## ").unwrap()];
+        let shown = sec.matches("D-1").count() + sec.matches("D-2").count();
+        assert!(shown > 10 && shown < law, "{shown}\n{sec}");
+        assert!(
+            sec.contains(&format!(
+                "- … {} older decisions in force not shown (by first tag: ",
+                law - shown
+            )),
+            "{sec}"
+        );
+        assert!(sec.contains("`kontext recall <words>`") && sec.contains("`kontext show <id>`"));
+        assert!(sec.contains("D-200002 New export format"), "{sec}");
+        assert!(!sec.contains("D-100000 "), "{sec}");
+        // The last line is whole.
+        assert!(
+            out.ends_with("\n- … 330 more, see `kontext standup --peek`\n"),
+            "{out}"
+        );
+        // `--json` is not cut.
+        let js = resume_json(&st, &v, &opts(9000));
+        assert_eq!(js["decisions"].as_array().unwrap().len(), law);
+
+        // Not even the rest fits: no titles, and the closing note says so.
+        let tiny = resume(&st, &v, &opts(1500));
+        assert!(
+            tiny.contains("- … 322 older decisions in force not shown."),
+            "{tiny}"
+        );
+        assert!(
+            tiny.ends_with(
+                "(kontext: this is over 1500 characters even without the titles of the decisions in force; the charter and the goals are never cut)\n"
+            ),
+            "{tiny}"
+        );
     }
 
     #[test]

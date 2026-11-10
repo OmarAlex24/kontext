@@ -192,6 +192,8 @@ Records that act on another entry (their `refs[0]` is the target):
 > - With `require_signatures`, an entry that is signed and doesn't carry a signature that verifies gets the alert "invalid or missing signature" (§14); it shows up when new, like the other entries that don't count.
 > - A claim that lost to another machine's claim is an alert (§7.2).
 
+> **Implemented after the first import of a large v0 ledger:** a proposal and the decision made from it count as one replacement in the conflict check. The decision was made from the proposal if the proposal's `accept` names it (`fields.decision_id`) or the decision says so (`fields.from_proposal`); `kontext accept --as-decision` writes both. v0 copied a proposal's `supersedes` onto its decision, so the old proposal was replaced by both and showed a conflict with nothing to decide; the rule is in the state, so it holds for what was already imported without rewriting the ledger. When a proposal and the later decision both name an older decision, there was no alert already: a pending proposal never replaces a decision, and after an `accept` with `decision_id` only the decision does.
+
 ## 6. SQLite index
 
 - `rusqlite` with SQLite included in the binary, WAL mode, `busy_timeout`.
@@ -268,7 +270,7 @@ If something came in, it rejects the close and shows it. The agent reads it and 
 | `kontext next epic:<x>` | Implementer or tester | One ready task, plus the facts and decisions that touch it and the assignment mark |
 | `kontext show <id>` | Anyone | A full entry with its history |
 
-Each view has a character budget. When it doesn't fit, it trims in this order: old journal, decision bodies (the titles stay), facts, and then the other lists. **The charter, the goals and the titles of the decisions in force are never trimmed.**
+Each view has a character budget. When it doesn't fit, it trims in this order: old journal, decision bodies (the titles stay), facts, and then the other lists. **The charter and the goals are never trimmed.** The titles of the decisions in force are trimmed only last, when the rest does not leave room for all of them (see "Implemented after the first large ledger" below).
 
 > **Implemented in phase 2:**
 > - `standup`: new decisions, what closed (signatures, acceptances, rejections, answers, replacements), what is waiting for your answer (unsigned charters and goals, questions for `owner` or for you, pending proposals; the ones from `agent:distill` are marked `[unreviewed]`), alerts, new journal entries, and a one-line summary. What is waiting for your answer always shows, new or not; conflicts too, until they are resolved; entries that don't count, only when they are new.
@@ -293,6 +295,13 @@ Each view has a character budget. When it doesn't fit, it trims in this order: o
 > - The pm also sees facts: the ones that are not from an epic (an epic's facts are seen by its coordinator), without the user's, the 15 newest.
 > - Trimming by priority: charter, goals and decisions → what the user said → open items → what's new → journal. In order: the journal one entry at a time; from "What's new", the replaced entries and those that don't count, then to 10 and then only the count; facts to 5 and then 0; the why of decisions; the open lists to 5; and finally the oldest of what the user said (at 15 and then 5, with a line "… N older ones").
 > - The hook's budget stays at 9,000 (the hard cap is still 9,900): Claude Code replaces the text with a path if it goes over 10,000, so there isn't much to gain by raising it; what changes is what gets in first.
+
+> **Implemented after the first large ledger:** a project imported from v0 had 304 decisions in force. Their titles alone took about 45,000 characters, so `resume` ended far over its budget after every trim, and the hook cut the text at 9,900: the session started with the first few dozen titles and without the questions for the pm, the pending proposals, the alerts or what's new, which fit in under 3,000 characters together. Now:
+> - When the trims above are not enough, the list of decisions in force is what gets cut last: every other section keeps what the trims left it, and the decisions get what is left of the budget. Output that fits without this cut does not change.
+> - The newest decisions in force stay (in ledger order), grouped by first tag as before. A line at the top of the section says how many older ones are not shown, how many of each first tag (the 10 tags with most, if it fits), that the list is partial, and to search with `kontext recall <words>` before proposing or deciding something (`kontext show <id>` reads one). Newest first because a long ledger's recent decisions are the ones the current work touches and the most likely to have replaced an older rule. This is a heuristic: nobody has measured whether agents with a partial list find and respect the rest.
+> - `brief` does the same with "Other decisions in force" first and then the epic's own decisions, so a long list of decisions no longer makes the hook cut the assignment mark at the end.
+> - If not even the other sections fit, the shorter of the two goes: all the titles, or none with the line that says how many there are; the closing note says which. The hook's hard cap (9,900) stays as a safety net for what the views never cut (a huge charter, for example).
+> - `resume --json` and `brief --json` are not cut.
 > - `recall` says what replaced an entry ("superseded by F-…"); `show` keeps the full chain, and for an entry that already replaced another it says "Replaces" (not "Would replace"), also if it is a fact or a pending proposal.
 
 ## 9. How context reaches the agent

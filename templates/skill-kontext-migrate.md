@@ -110,7 +110,7 @@ kontext doctor
 ```
 
 - `verify` says `OK` for each file in the ledger.
-- `resume` brings the charter (if there is one), the imported decisions, and the new proposals.
+- `resume` brings the charter (if there is one), the imported decisions (only the newest, with a count of the rest, if there are many), and the new proposals.
 - The hook prints a JSON with `hookSpecificOutput.additionalContext` that starts with the project's context. If it prints nothing, check `<home>/.kontext/hooks.log`.
 - `inbox count` counts what belongs to the human (at least the proposals you wrote).
 - `doctor` is the last check: it ends with `No problems` (notes are fine). Each `problem` line comes with its fix; report every one to the human with that fix, word for word. A hook pointing at a binary in `target/debug` means kontext was not installed with `cargo install`: go back to step 2.

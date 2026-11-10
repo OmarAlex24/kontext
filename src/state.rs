@@ -1371,6 +1371,18 @@ impl State {
         self.alerts.extend(drift);
     }
 
+    /// Was the decision `d` made from the proposal `p`? As `kontext accept
+    /// --as-decision` records it: the `accept` of `p` points to `d`
+    /// (`fields.decision_id`), and `d` says `fields.from_proposal = p`.
+    /// Either one is enough (v0 wrote both too).
+    fn made_from(&self, d: &str, p: &str) -> bool {
+        self.promoted_to.get(p).is_some_and(|x| x == d)
+            || self.get(d).is_some_and(|e| {
+                e.kind == "decision"
+                    && e.fields.get("from_proposal").and_then(Value::as_str) == Some(p)
+            })
+    }
+
     /// What is computed once the whole ledger has been walked: the charter in
     /// force and the conflicts.
     fn finish(&mut self) {
@@ -1397,6 +1409,12 @@ impl State {
                         Some(Status::Superseded | Status::Rejected | Status::Ignored)
                     )
                 })
+                .cloned()
+                .collect();
+            // A proposal and the decision made from it are one superseder.
+            let alive: Vec<String> = alive
+                .iter()
+                .filter(|p| !alive.iter().any(|d| self.made_from(d, p)))
                 .cloned()
                 .collect();
             if alive.len() > 1 {
@@ -1640,6 +1658,73 @@ mod tests {
             json!(["D-00000a", "D-00000b"]),
         ));
         assert!(build(v).alerts.is_empty());
+    }
+
+    /// v0 copied a proposal's `supersedes` onto the decision made from it: the
+    /// target is superseded by the proposal and by its decision, which are the
+    /// same decision at two moments. That is not a conflict.
+    #[test]
+    fn a_proposal_and_its_decision_are_one_superseder() {
+        let coder = Actor::agent("coder");
+        let v0_shape = vec![
+            by(e("P-000001", "001", "proposal", &[]), coder.clone()),
+            by(
+                with(
+                    e("P-000002", "002", "proposal", &[]),
+                    "supersedes",
+                    json!(["P-000001"]),
+                ),
+                coder.clone(),
+            ),
+            with(
+                with(
+                    e("D-000001", "003", "decision", &["P-000002"]),
+                    "from_proposal",
+                    json!("P-000002"),
+                ),
+                "supersedes",
+                json!(["P-000001"]),
+            ),
+            with(
+                e("R-000001", "004", "accept", &["P-000002"]),
+                "decision_id",
+                json!("D-000001"),
+            ),
+        ];
+        let st = build(v0_shape.clone());
+        assert_eq!(st.status_of("P-000001"), Some(Status::Superseded));
+        assert_eq!(st.promoted_to["P-000002"], "D-000001");
+        assert!(st.alerts.is_empty(), "{:?}", st.alerts);
+        // The same before the `accept` is read: the decision says where it
+        // comes from.
+        let st = build(v0_shape[..3].to_vec());
+        assert!(st.alerts.is_empty(), "{:?}", st.alerts);
+
+        // Two unrelated entries in force that supersede the same one still
+        // conflict: a pending proposal and a decision that was not made from it.
+        let st = build(vec![
+            by(e("P-000001", "001", "proposal", &[]), coder.clone()),
+            by(
+                with(
+                    e("P-000002", "002", "proposal", &[]),
+                    "supersedes",
+                    json!(["P-000001"]),
+                ),
+                coder.clone(),
+            ),
+            with(
+                e("D-000001", "003", "decision", &[]),
+                "supersedes",
+                json!(["P-000001"]),
+            ),
+        ]);
+        assert_eq!(
+            st.alerts,
+            vec![Alert::Conflict {
+                target: "P-000001".into(),
+                by: vec!["P-000002".into(), "D-000001".into()],
+            }]
+        );
     }
 
     #[test]

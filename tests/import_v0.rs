@@ -305,6 +305,78 @@ fn grows_incrementally() {
     p.kontext_ok(&["verify"]);
 }
 
+/// Writes a v0 ledger with its chain (`seq`, `prev_hash`, `hash`) as `ctx.py`
+/// computes it.
+fn write_v0(dir: &Path, entries: Vec<Value>) {
+    let mut prev = "0".repeat(64);
+    let mut out = String::new();
+    for (i, mut e) in entries.into_iter().enumerate() {
+        e["seq"] = serde_json::json!(i + 1);
+        e["prev_hash"] = Value::String(prev.clone());
+        prev = kontext::import_v0::v0_hash(&e);
+        e["hash"] = Value::String(prev.clone());
+        out.push_str(&serde_json::to_string(&e).unwrap());
+        out.push('\n');
+    }
+    fs::create_dir_all(dir.join("ledger")).unwrap();
+    fs::write(dir.join("ledger/entries.jsonl"), out).unwrap();
+}
+
+/// v0 copied the `supersedes` of a proposal onto the decision made from it.
+/// After the import, the old proposal is superseded once, with no conflict.
+#[test]
+fn a_proposal_and_its_decision_do_not_conflict_after_import() {
+    let entry = |id: &str, kind: &str, title: &str, actor: &str| {
+        serde_json::json!({
+            "id": id, "ts": "2026-11-04T01:24:14Z", "kind": kind, "title": title,
+            "body": "", "why": "", "tags": ["billing"], "actor": actor,
+            "source": "manual", "refs": [], "status": "accepted",
+        })
+    };
+    let p1 = entry(
+        "P-0001",
+        "proposal",
+        "Send invoices monthly",
+        "agent:coordinator",
+    );
+    let mut p2 = entry(
+        "P-0002",
+        "proposal",
+        "Send invoices weekly",
+        "agent:coordinator",
+    );
+    p2["supersedes"] = serde_json::json!(["P-0001"]);
+    let mut d = entry("D-0001", "decision", "Send invoices weekly", "human:omar");
+    d["refs"] = serde_json::json!(["P-0002"]);
+    d["from_proposal"] = serde_json::json!("P-0002");
+    d["supersedes"] = serde_json::json!(["P-0001"]);
+    let mut acc = entry("ACC-0001", "accept", "Accept P-0002", "human:omar");
+    acc["refs"] = serde_json::json!(["P-0002"]);
+    acc["decision_id"] = serde_json::json!("D-0001");
+    let dir = tempfile::tempdir().unwrap();
+    write_v0(dir.path(), vec![p1, p2, d, acc]);
+
+    let p = Project::new();
+    let out = p.kontext_ok(&["import", "--from-v0", dir.path().to_str().unwrap()]);
+    assert!(out.contains("Imported 4 of 4 entries"), "{out}");
+    let ids: HashMap<String, String> = p
+        .entries("omar@test")
+        .iter()
+        .map(|e| {
+            (
+                e["fields"]["v0_id"].as_str().unwrap().to_string(),
+                e["id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let state: Value = serde_json::from_str(&p.kontext_ok(&["debug", "state"])).unwrap();
+    let status = |v0_id: &str| state["status"][&ids[v0_id]].as_str().unwrap().to_string();
+    assert_eq!(status("P-0001"), "superseded");
+    assert_eq!(status("P-0002"), "accepted");
+    assert_eq!(status("D-0001"), "accepted");
+    assert_eq!(state["alerts"], serde_json::json!([]), "{state}");
+}
+
 #[test]
 fn refuses_broken_v0_chain_unless_forced() {
     let dir = tempfile::tempdir().unwrap();

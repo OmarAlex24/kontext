@@ -214,7 +214,7 @@ fn resume_layout() {
 }
 
 #[test]
-fn tiny_budget_never_drops_charter_goals_or_decision_titles() {
+fn tiny_budget_never_drops_charter_or_goals() {
     let (p, ids) = seeded();
     for i in 0..30 {
         p.kontext_ok(&["log", &format!("journal entry number {i} with some text")]);
@@ -233,21 +233,42 @@ fn tiny_budget_never_drops_charter_goals_or_decision_titles() {
         "{out}"
     );
     assert!(out.contains("Recurring charge monthly") && out.contains("Refunds from the panel"));
-    for i in 0..30 {
-        assert!(
-            out.contains(&format!("Decision {i}")),
-            "missing Decision {i}:\n{out}"
-        );
-    }
-    assert!(out.contains(&format!("{} Charge with Stripe, not with Conekta", ids[3])));
-    // The rest was cut: no journal, no why, lists with "… N more".
+    // The rest was cut: no journal, no why, lists with "… N more", and, as
+    // it still does not fit, no titles of decisions, with a line that says so.
     assert!(out.contains("## Journal (last 0 of 31)"), "{out}");
     assert!(!out.contains("a long reason"), "{out}");
-    assert!(out.contains("- **t0**: "), "{out}");
     assert!(out.contains("more, see `kontext standup --peek`"), "{out}");
+    assert!(!out.contains("Decision 0"), "{out}");
     assert!(
-        out.contains("(kontext: this is over 300 characters;"),
+        out.contains("- … 31 older decisions in force not shown. This list is partial"),
         "{out}"
+    );
+    assert!(
+        out.contains("(kontext: this is over 300 characters even without the titles of the decisions in force;"),
+        "{out}"
+    );
+
+    // With a budget the rest fits in, the newest titles fill what is left.
+    let floor = out.split("\n(kontext: this is over").next().unwrap();
+    let max = floor.chars().count() + 400;
+    let some = p.kontext_ok(&[
+        "resume",
+        "--as",
+        "pm",
+        "--max-chars",
+        &max.to_string(),
+        "--peek",
+    ]);
+    assert!(some.chars().count() <= max, "{some}");
+    assert!(!some.contains("(kontext: this is over"), "{some}");
+    assert!(some.contains("Decision 29"), "{some}");
+    assert!(
+        !some.contains(&format!("{} Charge with Stripe", ids[3])),
+        "{some}"
+    );
+    assert!(
+        some.contains("older decisions in force not shown (by first tag: "),
+        "{some}"
     );
 
     // With a medium budget, the old journal goes first.
