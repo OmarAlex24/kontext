@@ -1138,6 +1138,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 home: p.home,
                 writer: p.writer,
                 you,
+                cwd: std::env::current_dir().ok(),
             };
             crate::ui::serve(src, &crate::ui::Options { host, port, open })?;
             Ok(ExitCode::SUCCESS)
@@ -1686,7 +1687,12 @@ impl Ctx<'_> {
         let human = self.reader(reader)?;
         let (mut store, project) = self.open()?;
         let st = app::state(&mut store, &project)?;
-        let r = crate::report::build(&st, &project, &human);
+        let mut r = crate::report::build(&st, &project, &human);
+        // The user's ideas, from `.pm/` as `kontext ideas` finds it; without
+        // them, the report has no "Your ideas".
+        r.ideas = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::report::ideas_for(&st, &project, &cwd));
         let text = if html {
             let images = match &output {
                 Some(out) => crate::report::Images::file(store.home(), out),
@@ -1722,7 +1728,7 @@ impl Ctx<'_> {
                 print_json(&json!({"project": project.name, "path": null, "total": 0,
                     "counts": crate::ideas::IdeaState::ALL.iter()
                         .map(|s| json!({"state": s, "count": 0})).collect::<Vec<_>>(),
-                    "ideas": []}))?;
+                    "ideas": [], "warnings": []}))?;
             } else {
                 println!("{}", crate::ideas::NONE_TEXT);
             }

@@ -75,7 +75,7 @@ fn ext_of(p: &str) -> Option<String> {
 
 /// The image type from its first bytes, or `None` if it is not one that is
 /// accepted.
-fn sniff(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
         Some("png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {

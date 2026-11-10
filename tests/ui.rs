@@ -385,3 +385,83 @@ fn non_loopback_host_warns() {
     assert!(err.contains("not loopback"), "{err}");
     assert!(err.contains("has no password"), "{err}");
 }
+
+#[test]
+fn report_reads_the_ideas_on_each_request_and_its_csp_covers_them() {
+    let d = demo();
+    // Without `.pm/`, the CSP is the one it always was.
+    {
+        let ui = start(&d, &[]);
+        let (_, head, body) = request(&ui.addr, "GET", "/report", None);
+        assert!(!body.contains("id=\"your-ideas\""));
+        assert!(head.contains(&format!(
+            "Content-Security-Policy: {}",
+            kontext::report::csp()
+        )));
+    }
+    // `kontext ui` starts in d.root: make it a repo with `.pm/items.md`.
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&d.root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    let pm = d.root.join(".pm");
+    std::fs::create_dir_all(&pm).unwrap();
+    let header = "| id | idea | source | state | where | evidence |\n|---|---|---|---|---|---|\n";
+    std::fs::write(
+        pm.join("items.md"),
+        format!("{header}| P1 | Export invoices as CSV | | pending | | |\n"),
+    )
+    .unwrap();
+    let ui = start(&d, &[]);
+    let (code, head, body) = request(&ui.addr, "GET", "/report", None);
+    assert_eq!(code, 200);
+    assert!(body.contains("id=\"your-ideas\""), "{body}");
+    assert!(body.contains("<span>Your ideas</span><span class=\"n\">1</span>"));
+    // Every inline style and script of the page runs under the CSP.
+    let csp = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Security-Policy: "))
+        .unwrap();
+    for (open, close, directive) in [
+        ("<style>", "</style>", "style-src"),
+        ("<script>", "</script>", "script-src"),
+    ] {
+        let blocks: Vec<&str> = body
+            .split(open)
+            .skip(1)
+            .map(|b| b.split_once(close).unwrap().0)
+            .collect();
+        assert_eq!(blocks.len(), 2, "{directive}");
+        let allowed = csp
+            .split(';')
+            .find(|d| d.trim_start().starts_with(directive))
+            .unwrap();
+        for b in blocks {
+            let hash = kontext::media::base64(Sha256::digest(b.as_bytes()).as_slice());
+            assert!(
+                allowed.contains(&format!("'sha256-{hash}'")),
+                "{directive}: {csp}"
+            );
+        }
+    }
+    assert!(!body.contains(" style=\""));
+    // An edited items.md shows on reload, with no restart.
+    std::fs::write(
+        pm.join("items.md"),
+        format!(
+            "{header}| P1 | Export invoices as CSV | | pending | | |\n| P2 | Send reminders | | pending | | |\n"
+        ),
+    )
+    .unwrap();
+    let (_, _, body) = request(&ui.addr, "GET", "/report", None);
+    assert!(
+        body.contains("<span>Your ideas</span><span class=\"n\">2</span>"),
+        "{body}"
+    );
+    assert!(body.contains("Send reminders"));
+}

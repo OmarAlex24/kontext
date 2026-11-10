@@ -183,6 +183,8 @@ pub struct Ideas {
     /// The seven states in display order, with zeros.
     pub counts: Vec<Count>,
     pub ideas: Vec<Idea>,
+    /// What is wrong with the table as a whole (a missing `where` column).
+    pub warnings: Vec<String>,
 }
 
 impl Ideas {
@@ -248,11 +250,21 @@ fn is_separator(cells: &[String]) -> bool {
         })
 }
 
+/// What `kontext ideas` and the report say when the table has rows but no
+/// `where` column.
+pub const NO_WHERE_WARNING: &str =
+    "items.md has no `where` column: every idea shows as no destination.";
+
 /// The rows of `items.md`. The columns are found by their header name
 /// (`id`, `idea`, `source`, `state`, `where`, `evidence`, in any case and
 /// order); other columns, lines that are not table rows and rows without an
 /// id are ignored. Without an `id` column there are no rows.
 pub fn parse(text: &str) -> Vec<Row> {
+    parse_table(text).0
+}
+
+/// [`parse`], and whether the table's header has a `where` column.
+pub fn parse_table(text: &str) -> (Vec<Row>, bool) {
     let mut cols: Option<HashMap<String, usize>> = None;
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -294,7 +306,8 @@ pub fn parse(text: &str) -> Vec<Row> {
             evidence: get("evidence"),
         });
     }
-    out
+    let has_where = cols.is_some_and(|m| m.contains_key("where"));
+    (out, has_where)
 }
 
 // ------------------------------------------------------------ sources
@@ -482,10 +495,15 @@ pub fn build(st: &State, project: &str, people: &[String], pm: &Path, items_md: 
         pm,
         files: HashMap::new(),
     };
-    let ideas: Vec<Idea> = parse(items_md)
+    let (rows, has_where) = parse_table(items_md);
+    let ideas: Vec<Idea> = rows
         .into_iter()
         .map(|row| idea(st, people, &prefixes, &mut dumps, row))
         .collect();
+    let mut warnings = Vec::new();
+    if !ideas.is_empty() && !has_where {
+        warnings.push(NO_WHERE_WARNING.to_string());
+    }
     Ideas {
         project: project.to_string(),
         path: pm.join("items.md"),
@@ -498,6 +516,7 @@ pub fn build(st: &State, project: &str, people: &[String], pm: &Path, items_md: 
             })
             .collect(),
         ideas,
+        warnings,
     }
 }
 
@@ -676,6 +695,9 @@ pub fn text(ideas: &Ideas) -> String {
         return l.join("\n") + "\n";
     }
     l.push(summary(ideas) + ".");
+    for w in &ideas.warnings {
+        l.push(format!("warning: {w}"));
+    }
     for s in IdeaState::ALL {
         let group = ideas.of_state(s);
         if group.is_empty() {
@@ -809,6 +831,30 @@ mod tests {
         assert_eq!(rows[0].evidence, "");
         assert!(parse("| idea | state |\n|---|---|\n| a | done |\n").is_empty());
         assert!(parse("").is_empty());
+    }
+
+    #[test]
+    fn a_table_without_where_warns_once() {
+        let st = state();
+        let md = "| id | idea | state |\n|---|---|---|\n| P1 | a | done |\n| P2 | b | pending |\n";
+        let ideas = build(&st, "demo", &[], Path::new("/nowhere"), md);
+        assert_eq!(ideas.warnings, vec![NO_WHERE_WARNING.to_string()]);
+        assert_eq!(ideas.count(IdeaState::NoDestination), 2, "the states stay");
+        let t = text(&ideas);
+        assert!(t.contains(&format!("warning: {NO_WHERE_WARNING}")), "{t}");
+        // With a `where` column, or with no rows, nothing to warn about.
+        let md = "| id | idea | where |\n|---|---|---|\n| P1 | a | |\n";
+        assert!(
+            build(&st, "demo", &[], Path::new("/nowhere"), md)
+                .warnings
+                .is_empty()
+        );
+        let md = "| id | idea | state |\n|---|---|---|\n";
+        assert!(
+            build(&st, "demo", &[], Path::new("/nowhere"), md)
+                .warnings
+                .is_empty()
+        );
     }
 
     // ------------------------------------------------------------ rules

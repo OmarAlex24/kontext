@@ -42,9 +42,9 @@
     const b = doc.createElement("button");
     b.type = "button";
     b.className = icon ? "copy icon" : "copy";
-    if (!icon) b.textContent = "Copiar";
-    b.setAttribute("aria-label", "Copiar " + text);
-    if (icon) b.title = "Copiar";
+    if (!icon) b.textContent = "Copy";
+    b.setAttribute("aria-label", "Copy " + text);
+    if (icon) b.title = "Copy";
     let timer = 0;
     b.addEventListener("click", async () => {
       const ok = await copyText(text);
@@ -61,8 +61,8 @@
       live.textContent = ok ? "Copied: " + text : "Could not copy; it was selected instead";
       clearTimeout(timer);
       timer = setTimeout(() => {
-        if (!icon) b.textContent = "Copiar";
-        if (icon) b.title = "Copiar";
+        if (!icon) b.textContent = "Copy";
+        if (icon) b.title = "Copy";
         b.classList.remove("done");
       }, 1600);
     });
@@ -302,7 +302,7 @@
   const barTop = doc.querySelector(".bar-top");
   const openBtn = doc.querySelector(".bar-btn");
   const small = matchMedia("(max-width: 62.49rem)");
-  const sectionIds = ["your-turn", "problems", "what-it-looks-like", "progress"];
+  const sectionIds = ["your-turn", "problems", "your-ideas", "what-it-looks-like", "progress"];
   const sections = sectionIds.map((id) => doc.getElementById(id)).filter(Boolean);
   for (const s of sections) s.tabIndex = -1;
 
