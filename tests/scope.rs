@@ -1562,3 +1562,89 @@ fn the_scope_signature_is_not_dismissed_from_the_inbox() {
     assert_eq!(c, 2);
     assert_eq!(t.p.entries("omar@test").len(), before, "nothing written");
 }
+
+// ── The tree with a signed plan (phase 2, PR 4) ─────────────────────────
+
+#[test]
+fn the_tree_says_whether_the_plan_is_signed_and_marks_what_is_not() {
+    let t = planned();
+    // Unsigned: no scope in the header or the JSON.
+    let text = pm_ok(&t.p, &["tree"]);
+    assert!(!text.contains("signed"), "{text}");
+    let v: Value = serde_json::from_str(&pm_ok(&t.p, &["--json", "tree"])).unwrap();
+    assert!(v.get("scope").is_none());
+    let s = sign(&t.p);
+    let head = pm_ok(&t.p, &["tree"]).lines().next().unwrap().to_string();
+    let v: Value = serde_json::from_str(&pm_ok(&t.p, &["--json", "tree"])).unwrap();
+    assert_eq!(v["scope"]["signed"], s.as_str());
+    let on = v["scope"]["signed_on"].as_str().unwrap();
+    assert!(head.ends_with(&format!("· plan signed {on}")), "{head}");
+    assert!(v["scope"].get("pending").is_none());
+
+    // A feature enters and another leaves.
+    let inv = pm_id(
+        &t.p,
+        &[
+            "feature",
+            "add",
+            "Invoices",
+            "--epic",
+            "pay",
+            "--acceptance",
+            "a PDF per order",
+        ],
+    );
+    pm_ok(
+        &t.p,
+        &["feature", "drop", &t.refunds, "--why", "not for v1"],
+    );
+    let text = pm_ok(&t.p, &["tree"]);
+    let mut lines = text.lines();
+    assert!(
+        lines
+            .next()
+            .unwrap()
+            .ends_with("· 1 scope change waiting for you"),
+        "{text}"
+    );
+    assert_eq!(
+        lines.next().unwrap().trim(),
+        "enters Invoices · leaves Refunds"
+    );
+    let line = |title: &str| {
+        // The tree's lines, after the header and the scope line.
+        text.lines()
+            .skip(2)
+            .find(|l| l.contains(&format!(" {title} ")) || l.ends_with(&format!(" {title}")))
+            .unwrap_or_else(|| panic!("no {title} in:\n{text}"))
+            .to_string()
+    };
+    assert!(line("Invoices").ends_with("not signed"), "{text}");
+    assert!(
+        line("Refunds").ends_with("dropping, waiting for you"),
+        "{text}"
+    );
+    assert!(!line("Card charge").contains("signed"), "{text}");
+    let v: Value = serde_json::from_str(&pm_ok(&t.p, &["--json", "tree"])).unwrap();
+    assert_eq!(
+        v["scope"]["pending"]["enters"],
+        serde_json::json!(["Invoices"])
+    );
+    let pay = &v["waves"][1]["epics"][0];
+    let marks: Vec<(String, Value)> = pay["feature_list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["id"].as_str().unwrap().to_string(), f["scope"].clone()))
+        .collect();
+    assert!(marks.contains(&(inv.clone(), serde_json::json!("not_signed"))));
+    assert!(marks.contains(&(t.refunds.clone(), serde_json::json!("dropping"))));
+    // The dropping feature is listed but does not count.
+    assert_eq!(pay["features"]["total"], 2);
+
+    // Signed: the marks go, the dropped feature leaves the tree.
+    sign(&t.p);
+    let text = pm_ok(&t.p, &["tree"]);
+    assert!(!text.contains("Refunds"), "{text}");
+    assert!(!text.contains("not signed"), "{text}");
+}

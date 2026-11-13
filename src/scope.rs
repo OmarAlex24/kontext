@@ -400,7 +400,7 @@ impl Summary {
 }
 
 /// "Nov 12" from an `hlc`.
-fn day(hlc: &str) -> String {
+pub fn day(hlc: &str) -> String {
     crate::ideas::month_day(hlc.get(..10).unwrap_or(hlc))
 }
 
