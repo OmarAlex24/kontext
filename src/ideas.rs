@@ -17,19 +17,34 @@
 //!    `done` (`done` without evidence shows as in progress, with a note; an
 //!    unknown state, as pending with a note).
 //!
+//! In rule d a feature counts as its own state: done → done; to validate or
+//! in progress → in progress; pending → pending; a superseded one is followed
+//! to its replacement, with a note.
+//!
+//! Apart from its state, an idea is **placed** when the user discarded it or
+//! its `where` cites a feature, a task or a decision: the work has a home. An
+//! idea that cites only an epic, a question, text or nothing is not placed,
+//! and says what it does cite ("Payments, no feature").
+//!
+//! The messages of the dumps (each `## <date> <HH:MM>` entry) are audited when
+//! the pm runs `kontext ideas --mark-audited` before the coverage audit: it
+//! writes `.pm/audited.json` with the time and how many entries each dump had.
+//! What is beyond those counts, and any dump not listed, is not audited yet.
+//!
 //! An id that is not in the ledger fails nothing: it stays as text, with a
 //! note. Nothing here prints: [`build`] gives a plain [`Ideas`], and
 //! [`text`] and `serde` show it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::features::FeatureStatus;
 use crate::model::{ENTITY_KINDS, Entry, RECORD_PREFIX};
 use crate::repos::Repos;
 use crate::state::{State, Status};
@@ -165,6 +180,31 @@ pub struct Idea {
     pub refs: Vec<Reference>,
     pub evidence: Vec<Evidence>,
     pub notes: Vec<String>,
+    /// Discarded, or its `where` cites a feature, a task or a decision.
+    pub placed: bool,
+    /// When it is not placed, what its `where` does cite ("Payments, no
+    /// feature", "question Q-… open", the text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cites: Option<String>,
+}
+
+/// An idea that is not placed, for the "Not placed" list.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct NotPlaced {
+    pub id: String,
+    pub idea: String,
+    pub said: Option<String>,
+    pub quote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cites: Option<String>,
+}
+
+/// The user's messages in the dumps that no coverage audit has seen.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unaudited {
+    pub count: usize,
+    /// When the last audit was marked (ISO-8601); `None`: never.
+    pub since: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -185,6 +225,9 @@ pub struct Ideas {
     pub ideas: Vec<Idea>,
     /// What is wrong with the table as a whole (a missing `where` column).
     pub warnings: Vec<String>,
+    /// The ideas that are not placed, in the table's order.
+    pub not_placed: Vec<NotPlaced>,
+    pub unaudited: Unaudited,
 }
 
 impl Ideas {
@@ -367,16 +410,13 @@ pub const USER_MARKER: &str = "**User:**";
 /// `**Coordinator asked:**` (until `**User:**`) are not; a file without the
 /// skill's markers is all the user's, as before.
 fn users_own(lines: &[String], i: usize) -> bool {
-    static HEADER: OnceLock<Regex> = OnceLock::new();
-    let header =
-        HEADER.get_or_init(|| Regex::new(r"^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$").unwrap());
     let marker = |l: &str| l.trim() == ASKED_MARKER || l.trim() == USER_MARKER;
     let line = &lines[i];
-    if header.is_match(line) || marker(line) {
+    if is_entry_header(line) || marker(line) {
         return false;
     }
     for l in lines[..i].iter().rev() {
-        if header.is_match(l) || l.trim() == USER_MARKER {
+        if is_entry_header(l) || l.trim() == USER_MARKER {
             return true;
         }
         if l.trim() == ASKED_MARKER {
@@ -384,6 +424,15 @@ fn users_own(lines: &[String], i: usize) -> bool {
         }
     }
     true
+}
+
+/// The header of a dump entry: `## 2026-11-07 14:05`. Each one is a message
+/// of the user.
+pub fn is_entry_header(line: &str) -> bool {
+    static HEADER: OnceLock<Regex> = OnceLock::new();
+    let header =
+        HEADER.get_or_init(|| Regex::new(r"^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s*$").unwrap());
+    header.is_match(line)
 }
 
 /// Reads the dumps once each.
@@ -478,6 +527,9 @@ fn known_prefixes(st: &State) -> BTreeSet<String> {
 }
 
 fn status_text(st: &State, e: &Entry) -> String {
+    if let Some(f) = st.feature(&e.id) {
+        return f.status.label().to_string();
+    }
     if let Some(t) = st.task_status(&e.id) {
         return t.label().to_string();
     }
@@ -534,6 +586,71 @@ fn tasks_state(st: &State, tasks: &[String]) -> IdeaState {
     }
 }
 
+/// The state of a cited feature (rule d). A superseded one is followed to
+/// its replacement, with a note.
+fn feature_state(st: &State, id: &str, notes: &mut Vec<String>) -> IdeaState {
+    let mut cur = id.to_string();
+    let mut seen = BTreeSet::from([cur.clone()]);
+    while let Some(next) = st.superseded_by.get(&cur) {
+        if !seen.insert(next.clone()) {
+            break;
+        }
+        cur = next.clone();
+    }
+    if cur != id {
+        notes.push(format!(
+            "{id} was superseded by {cur}: its state is {cur}'s"
+        ));
+    }
+    match st.feature(&cur).map(|f| f.status) {
+        Some(FeatureStatus::Done) => IdeaState::Done,
+        Some(FeatureStatus::ToValidate | FeatureStatus::InProgress) => IdeaState::InProgress,
+        Some(FeatureStatus::NotCounted) => {
+            notes.push(format!("{cur} does not count: shown as pending"));
+            IdeaState::Pending
+        }
+        _ => IdeaState::Pending,
+    }
+}
+
+/// Several work states in one: all done → done; all pending → pending;
+/// otherwise in progress.
+fn combine(parts: &[IdeaState]) -> IdeaState {
+    if parts.iter().all(|s| *s == IdeaState::Done) {
+        IdeaState::Done
+    } else if parts.iter().all(|s| *s == IdeaState::Pending) {
+        IdeaState::Pending
+    } else {
+        IdeaState::InProgress
+    }
+}
+
+/// Discarded, or the `where` cites a feature, a task or a decision.
+fn is_placed(state: IdeaState, cited: &[&Entry]) -> bool {
+    state == IdeaState::Discarded
+        || cited
+            .iter()
+            .any(|e| matches!(e.kind.as_str(), "feature" | "task" | "decision"))
+}
+
+/// What the `where` of an idea that is not placed cites: "Payments, no
+/// feature", "question Q-… open", or its text. `None` if it is empty.
+fn cites_text(st: &State, cited: &[&Entry], where_: &str) -> Option<String> {
+    if cited.is_empty() {
+        let t = one_line(where_, 80);
+        return (!t.is_empty()).then_some(t);
+    }
+    let parts: Vec<String> = cited
+        .iter()
+        .map(|e| match e.kind.as_str() {
+            "epic" => format!("{}, no feature", one_line(&e.title, 60)),
+            "question" | "proposal" => format!("{} {} {}", e.kind, e.id, status_text(st, e)),
+            k => format!("{k} {}", e.id),
+        })
+        .collect();
+    Some(parts.join("; "))
+}
+
 /// The written state, normalized: `In-Progress` → `in progress`.
 fn normalize(s: &str) -> String {
     s.trim()
@@ -564,6 +681,17 @@ pub fn build(st: &State, project: &str, people: &[String], pm: &Path, items_md: 
     if !ideas.is_empty() && !has_where {
         warnings.push(NO_WHERE_WARNING.to_string());
     }
+    let not_placed = ideas
+        .iter()
+        .filter(|i| !i.placed)
+        .map(|i| NotPlaced {
+            id: i.id.clone(),
+            idea: i.idea.clone(),
+            said: i.said.clone(),
+            quote: i.quote.clone(),
+            cites: i.cites.clone(),
+        })
+        .collect();
     Ideas {
         project: project.to_string(),
         path: pm.join("items.md"),
@@ -577,6 +705,8 @@ pub fn build(st: &State, project: &str, people: &[String], pm: &Path, items_md: 
             .collect(),
         ideas,
         warnings,
+        not_placed,
+        unaudited: unaudited(pm),
     }
 }
 
@@ -603,11 +733,15 @@ fn idea(
     // The entries cited in `where` and in `evidence`, once each.
     let mut refs: Vec<Reference> = Vec::new();
     let mut entries: Vec<&Entry> = Vec::new();
-    let tokens = id_tokens(&row.where_)
-        .into_iter()
-        .chain(id_tokens(&row.evidence));
+    // Those cited in `where` (they decide whether it is placed).
+    let mut cited: Vec<&Entry> = Vec::new();
+    let in_where = id_tokens(&row.where_);
+    let tokens = in_where
+        .iter()
+        .map(|t| (t.clone(), true))
+        .chain(id_tokens(&row.evidence).into_iter().map(|t| (t, false)));
     let mut seen = BTreeSet::new();
-    for tok in tokens {
+    for (tok, from_where) in tokens {
         if !seen.insert(tok.clone()) {
             continue;
         }
@@ -618,6 +752,9 @@ fn idea(
         match st.resolve(&tok) {
             Ok(id) => {
                 let Some(e) = st.get(&id) else { continue };
+                if from_where && !cited.iter().any(|x| x.id == e.id) {
+                    cited.push(e);
+                }
                 if entries.iter().any(|x| x.id == e.id) {
                     continue;
                 }
@@ -636,6 +773,12 @@ fn idea(
     }
     let written = normalize(&row.state);
     let (state, from) = derive(st, people, &row, &written, &entries, &evidence, &mut notes);
+    let placed = is_placed(state, &cited);
+    let cites = if placed {
+        None
+    } else {
+        cites_text(st, &cited, &row.where_)
+    };
     Idea {
         id: row.id,
         idea: row.idea,
@@ -649,6 +792,8 @@ fn idea(
         refs,
         evidence,
         notes,
+        placed,
+        cites,
     }
 }
 
@@ -679,9 +824,10 @@ fn derive(
     if waits {
         return (IdeaState::WaitingForYou, StateFrom::Ledger);
     }
-    // d. The tasks cited and those of the epics cited.
+    // d. The tasks cited and those of the epics cited, and the features cited.
     let mut tasks: Vec<String> = Vec::new();
     let mut work = false;
+    let mut parts: Vec<IdeaState> = Vec::new();
     for e in entries {
         match e.kind.as_str() {
             "task" => {
@@ -692,13 +838,17 @@ fn derive(
                 work = true;
                 tasks.extend(st.tasks_of(&e.id).into_iter().map(|t| t.id.clone()));
             }
+            "feature" => parts.push(feature_state(st, &e.id, notes)),
             _ => {}
         }
     }
     if work {
         tasks.sort();
         tasks.dedup();
-        return (tasks_state(st, &tasks), StateFrom::Ledger);
+        parts.push(tasks_state(st, &tasks));
+    }
+    if !parts.is_empty() {
+        return (combine(&parts), StateFrom::Ledger);
     }
     // e.
     let state = match written {
@@ -716,6 +866,112 @@ fn derive(
         }
     };
     (state, StateFrom::Table)
+}
+
+// ------------------------------------------------------------ audit
+
+/// The file, in `.pm/`, where `kontext ideas --mark-audited` writes the audit.
+pub const AUDITED_FILE: &str = "audited.json";
+
+/// What `.pm/audited.json` holds: when the audit was marked, and how many
+/// entries each dump had then (`dumps/2026-11-07.md` → 3).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Audited {
+    pub at: String,
+    pub files: BTreeMap<String, usize>,
+}
+
+/// The entries (`## <date> <HH:MM>`) of each dump in `<pm>/dumps/`, by its
+/// path relative to `.pm/`.
+pub fn dump_entries(pm: &Path) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    let Ok(dir) = fs::read_dir(pm.join("dumps")) else {
+        return out;
+    };
+    for f in dir.flatten() {
+        let name = f.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".md") || !f.path().is_file() {
+            continue;
+        }
+        let n = fs::read_to_string(f.path())
+            .map(|t| t.lines().filter(|l| is_entry_header(l)).count())
+            .unwrap_or(0);
+        out.insert(format!("dumps/{name}"), n);
+    }
+    out
+}
+
+/// The last audit marked, if `.pm/audited.json` exists and reads.
+pub fn audited(pm: &Path) -> Option<Audited> {
+    let text = fs::read_to_string(pm.join(AUDITED_FILE)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The messages no audit has seen: the entries beyond the counts of the last
+/// audit, and all those of a dump it did not list. Without an audit, all.
+pub fn unaudited(pm: &Path) -> Unaudited {
+    let last = audited(pm);
+    let count = dump_entries(pm)
+        .iter()
+        .map(|(f, n)| {
+            let seen = last.as_ref().and_then(|a| a.files.get(f)).copied();
+            n.saturating_sub(seen.unwrap_or(0))
+        })
+        .sum();
+    Unaudited {
+        count,
+        since: last.map(|a| a.at),
+    }
+}
+
+/// Writes `<pm>/audited.json` with the time (`KONTEXT_NOW` or the clock) and
+/// the entries each dump has now.
+pub fn mark_audited(pm: &Path) -> Result<Audited> {
+    let at = jiff::Timestamp::from_millisecond(crate::tasks::now_ms())?
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let a = Audited {
+        at,
+        files: dump_entries(pm),
+    };
+    fs::create_dir_all(pm).with_context(|| format!("could not create {}", pm.display()))?;
+    let path = pm.join(AUDITED_FILE);
+    let tmp = pm.join(format!(".{AUDITED_FILE}.tmp"));
+    fs::write(&tmp, serde_json::to_string_pretty(&a)? + "\n")
+        .with_context(|| format!("could not write {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("could not write {}", path.display()))?;
+    Ok(a)
+}
+
+/// `2026-11-12…` → `Nov 12`.
+pub fn month_day(date: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut it = date.get(..10).unwrap_or(date).split('-');
+    let parsed = (|| {
+        let (_, m, d) = (it.next()?, it.next()?, it.next()?);
+        let m: usize = m.parse().ok()?;
+        let d: u32 = d.parse().ok()?;
+        Some(format!("{} {d}", MONTHS.get(m.checked_sub(1)?)?))
+    })();
+    parsed.unwrap_or_else(|| date.to_string())
+}
+
+/// "12 of your messages not audited since Nov 12", "3 of your messages never
+/// audited"; `None` when there is nothing to audit.
+pub fn unaudited_text(u: &Unaudited) -> Option<String> {
+    if u.count == 0 {
+        return None;
+    }
+    Some(match &u.since {
+        Some(s) => format!(
+            "{} of your messages not audited since {}",
+            u.count,
+            month_day(s)
+        ),
+        None => format!("{} of your messages never audited", u.count),
+    })
 }
 
 // ------------------------------------------------------------ text
@@ -752,9 +1008,21 @@ pub fn text(ideas: &Ideas) -> String {
             "{} has no ideas yet.",
             ideas.path.to_string_lossy()
         ));
+        if let Some(u) = unaudited_text(&ideas.unaudited) {
+            l.push(u + ".");
+        }
         return l.join("\n") + "\n";
     }
     l.push(summary(ideas) + ".");
+    let ids: Vec<&str> = ideas.not_placed.iter().map(|n| n.id.as_str()).collect();
+    if ids.is_empty() {
+        l.push("Not placed: 0.".to_string());
+    } else {
+        l.push(format!("Not placed: {} ({}).", ids.len(), ids.join(", ")));
+    }
+    if let Some(u) = unaudited_text(&ideas.unaudited) {
+        l.push(u + ".");
+    }
     for w in &ideas.warnings {
         l.push(format!("warning: {w}"));
     }
@@ -797,6 +1065,9 @@ pub fn text(ideas: &Ideas) -> String {
                     })
                     .collect();
                 l.push(format!("  evidence: {}", ev.join(", ")));
+            }
+            if let Some(c) = &i.cites {
+                l.push(format!("  not placed: {c}"));
             }
             for n in &i.notes {
                 l.push(format!("  note: {n}"));

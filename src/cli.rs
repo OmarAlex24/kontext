@@ -431,8 +431,14 @@ pub enum Cmd {
         reader: Option<String>,
     },
     /// The user's ideas in `.pm/items.md` (skill kontext-pm) and where each one went: its state
-    /// comes from the ledger through the ids in `where`. Doesn't write anything
-    Ideas,
+    /// comes from the ledger through the ids in `where`. Doesn't write anything, except with
+    /// `--mark-audited`
+    Ideas {
+        /// Before a coverage audit: write `.pm/audited.json` with the time and how many messages
+        /// each dump has, so the messages after it count as not audited
+        #[arg(long)]
+        mark_audited: bool,
+    },
     /// Which conversations the capture hook writes from, on this machine: `here`, `list`, `forget`.
     /// Works with the capture off
     Capture {
@@ -1280,7 +1286,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             output,
             reader,
         } => cx.report(html, output, reader),
-        Cmd::Ideas => cx.ideas(),
+        Cmd::Ideas { mark_audited } => cx.ideas(mark_audited),
         Cmd::Capture { cmd } => capture_cmd(project, cx.json, cmd),
         Cmd::Standup { peek, reader } => cx.standup(peek, reader),
         Cmd::Resume {
@@ -2063,17 +2069,23 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn ideas(&self) -> Result<ExitCode> {
+    fn ideas(&self, mark_audited: bool) -> Result<ExitCode> {
         let (mut store, project) = self.open()?;
         let cwd = std::env::current_dir()?;
         let repos = Repos::load(&project, &cwd)?;
         let own = crate::capture::Settings::of(&project).worktrees;
+        if mark_audited {
+            return self.mark_audited(&repos, &cwd, own);
+        }
         let Some(pm) = crate::ideas::locate(&repos, own) else {
             if self.json {
+                let unaudited = crate::ideas::pm_dir(&cwd, own)
+                    .map(|pm| crate::ideas::unaudited(&pm))
+                    .unwrap_or_default();
                 print_json(&json!({"project": project.name, "path": null, "total": 0,
                     "counts": crate::ideas::IdeaState::ALL.iter()
                         .map(|s| json!({"state": s, "count": 0})).collect::<Vec<_>>(),
-                    "ideas": [], "warnings": []}))?;
+                    "ideas": [], "warnings": [], "not_placed": [], "unaudited": unaudited}))?;
             } else {
                 println!("{}", crate::ideas::NONE_TEXT);
             }
@@ -2086,6 +2098,32 @@ impl Ctx<'_> {
             print_json(&ideas)?;
         } else {
             print!("{}", crate::ideas::text(&ideas));
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// `kontext ideas --mark-audited`: the `.pm/` of the repo it runs in, or
+    /// else the one `kontext ideas` reads.
+    fn mark_audited(&self, repos: &Repos, cwd: &Path, own: bool) -> Result<ExitCode> {
+        let Some(pm) = crate::ideas::pm_dir(cwd, own).or_else(|| crate::ideas::locate(repos, own))
+        else {
+            return Err(Refused(
+                "--mark-audited needs a .pm/: run it in the code repo that has the dumps".into(),
+            )
+            .into());
+        };
+        let a = crate::ideas::mark_audited(&pm)?;
+        let path = pm.join(crate::ideas::AUDITED_FILE);
+        let total: usize = a.files.values().sum();
+        if self.json {
+            print_json(&json!({"path": path, "at": a.at, "files": a.files, "messages": total}))?;
+        } else {
+            println!(
+                "Audit marked at {}: {total} messages in {} dumps ({}).",
+                a.at,
+                a.files.len(),
+                path.display()
+            );
         }
         Ok(ExitCode::SUCCESS)
     }

@@ -254,3 +254,188 @@ fn finds_pm_in_a_project_repo_from_elsewhere() {
     assert!(out.contains("1 idea · no destination 1."), "{out}");
     assert!(out.contains("- P1 · export"), "{out}");
 }
+
+#[test]
+fn features_decide_the_state_and_follow_their_replacement() {
+    let (p, _g, _e) = with_epic();
+    let u = p.id_of(
+        &[],
+        &[
+            "feature",
+            "add",
+            "Refunds",
+            "--epic",
+            "payments",
+            "--acceptance",
+            "a refund",
+        ],
+    );
+    let t = p.id_of(&[], &["task", "add", "Refund endpoint", "--feature", &u]);
+    let repo = pm_repo(
+        &p,
+        "app",
+        &format!("| P1 | refunds | dumps/2026-11-07.md:5 | done | {u} | |\n"),
+    );
+    let v = json_in(&p, &repo);
+    assert_eq!(state_of(&v, "P1"), "pending");
+    assert_eq!(v["ideas"][0]["state_from"], "ledger");
+    assert_eq!(v["ideas"][0]["refs"][0]["kind"], "feature");
+    assert_eq!(v["ideas"][0]["refs"][0]["status"], "pending");
+
+    // All its tasks closed: to validate shows as in progress.
+    p.kontext_ok(&["done", &t, "--evidence", "cmd:\"cargo test\"=0"]);
+    let v = json_in(&p, &repo);
+    assert_eq!(state_of(&v, "P1"), "in progress");
+    assert_eq!(v["ideas"][0]["refs"][0]["status"], "to validate");
+
+    p.kontext_ok(&["done", &u, "--evidence", "url:https://example.com/refund"]);
+    assert_eq!(state_of(&json_in(&p, &repo), "P1"), "done");
+
+    // Superseded: the replacement decides, with a note.
+    let u2 = p.id_of(
+        &[],
+        &["feature", "add", "Partial refunds", "--epic", "payments"],
+    );
+    p.kontext_ok(&["supersede", &u, &u2, "--why", "partial too"]);
+    let v = json_in(&p, &repo);
+    assert_eq!(state_of(&v, "P1"), "pending");
+    let note = v["ideas"][0]["notes"][0].as_str().unwrap();
+    assert!(
+        note.contains(&format!("{u} was superseded by {u2}")),
+        "{note}"
+    );
+    assert_eq!(v["ideas"][0]["placed"], true);
+}
+
+#[test]
+fn placed_needs_a_feature_task_or_decision() {
+    let (p, _g, e) = with_epic();
+    let u = p.id_of(&[], &["feature", "add", "Refunds", "--epic", "payments"]);
+    let t = p.id_of(&[], &["task", "add", "Loose", "--epic", "payments"]);
+    let d = p.id_of(&[], &["decide", "Use Stripe", "--why", "3DS"]);
+    let q = p.id_of(&[], &["ask", "Which currency?", "--to", "owner"]);
+    let repo = pm_repo(
+        &p,
+        "app",
+        &format!(
+            "| P1 | refunds | dumps/2026-11-07.md:5 | pending | {u} | |\n\
+             | P2 | loose | | pending | {t} | |\n\
+             | P3 | stripe | | decided | {d} | |\n\
+             | P4 | dropped | | discarded | | |\n\
+             | P5 | payments | | pending | {e} | |\n\
+             | P6 | currency | | pending | {q} | |\n\
+             | P7 | someday | | pending | ask the accountant | |\n\
+             | P8 | csv | dumps/2026-11-07.md:5 | | | |\n"
+        ),
+    );
+    let v = json_in(&p, &repo);
+    let placed: Vec<bool> = v["ideas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["placed"].as_bool().unwrap())
+        .collect();
+    assert_eq!(placed, [true, true, true, true, false, false, false, false]);
+    // The states are as before: placed is apart.
+    assert_eq!(state_of(&v, "P5"), "pending");
+    assert_eq!(state_of(&v, "P6"), "waiting for you");
+    let np = v["not_placed"].as_array().unwrap();
+    let ids: Vec<&str> = np.iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["P5", "P6", "P7", "P8"]);
+    assert_eq!(np[0]["cites"], "Card payments, no feature");
+    assert_eq!(np[1]["cites"], format!("question {q} open"));
+    assert_eq!(np[2]["cites"], "ask the accountant");
+    assert!(np[3].get("cites").is_none(), "{}", np[3]);
+    assert_eq!(np[3]["quote"], "let customers export their invoices as CSV");
+    assert_eq!(np[3]["said"], "2026-11-07");
+    assert!(v["ideas"][0].get("cites").is_none());
+
+    let out = ideas_in(&p, &repo, &["ideas"]);
+    assert!(out.contains("Not placed: 4 (P5, P6, P7, P8)."), "{out}");
+    assert!(
+        out.contains("  not placed: Card payments, no feature"),
+        "{out}"
+    );
+}
+
+#[test]
+fn mark_audited_counts_the_messages_after_it() {
+    let p = Project::new();
+    let repo = pm_repo(&p, "app", "| P1 | csv | dumps/2026-11-07.md:5 | | | |\n");
+    // Never audited: every entry of every dump.
+    fs::write(
+        repo.join(".pm/dumps/2026-11-08.md"),
+        "## 2026-11-08 09:00\n\n**User:**\n\nA\n\n## 2026-11-08 09:30\n\n**User:**\n\nB\n",
+    )
+    .unwrap();
+    let v = json_in(&p, &repo);
+    assert_eq!(v["unaudited"]["count"], 3);
+    assert!(v["unaudited"]["since"].is_null());
+    let out = ideas_in(&p, &repo, &["ideas"]);
+    assert!(out.contains("3 of your messages never audited."), "{out}");
+
+    let out = p
+        .cmd(&["ideas", "--mark-audited"])
+        .current_dir(&repo)
+        .env("KONTEXT_NOW", "2026-11-12T10:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(said.contains("3 messages in 2 dumps"), "{said}");
+    let a: Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".pm/audited.json")).unwrap()).unwrap();
+    assert_eq!(a["at"], "2026-11-12T10:00:00Z");
+    assert_eq!(a["files"]["dumps/2026-11-07.md"], 1);
+    assert_eq!(a["files"]["dumps/2026-11-08.md"], 2);
+    let v = json_in(&p, &repo);
+    assert_eq!(v["unaudited"]["count"], 0);
+    assert_eq!(v["unaudited"]["since"], "2026-11-12T10:00:00Z");
+    assert!(!ideas_in(&p, &repo, &["ideas"]).contains("audited"));
+
+    // A new entry in a dump it saw, and a dump it did not list.
+    let mut d = fs::read_to_string(repo.join(".pm/dumps/2026-11-08.md")).unwrap();
+    d.push_str("\n## 2026-11-08 18:00\n\n**User:**\n\nC\n");
+    fs::write(repo.join(".pm/dumps/2026-11-08.md"), d).unwrap();
+    fs::write(
+        repo.join(".pm/dumps/2026-11-13.md"),
+        "## 2026-11-13 08:00\n\n**User:**\n\nD\n",
+    )
+    .unwrap();
+    let v = json_in(&p, &repo);
+    assert_eq!(v["unaudited"]["count"], 2);
+    let out = ideas_in(&p, &repo, &["ideas"]);
+    assert!(
+        out.contains("2 of your messages not audited since Nov 12."),
+        "{out}"
+    );
+
+    // Without items.md the JSON still says it; the text is as before.
+    fs::remove_file(repo.join(".pm/items.md")).unwrap();
+    let v = json_in(&p, &repo);
+    assert_eq!(v["unaudited"]["count"], 2);
+    assert_eq!(v["not_placed"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn mark_audited_outside_a_repo_is_refused() {
+    let p = Project::new();
+    let dir = p.dir.path().join("nogit");
+    fs::create_dir_all(&dir).unwrap();
+    let out = p
+        .cmd(&["ideas", "--mark-audited"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.join(".pm").exists());
+}
