@@ -70,6 +70,8 @@ kontext decide "The screens follow the approved mockup" --epic <epic> \
 
 The coordinators build against that reference (it appears in "How it looks" in the report), and each worker closes with a screenshot of the same screen (`--evidence screenshot.png --screen <screen>`), so the human sees the before and after.
 
+**Sign the plan: phase 0 ends here.** Show the user `kontext scope summary` verbatim: the charter, the goals, each wave with its epics, features and acceptance, and the ideas not placed (a plan with any is refused: place or discard them first). On their yes ("sí" is enough), sign it with the hash it ends with: `kontext scope sign --hash <hash> --approved-by <owner> --said "<their words>"`. From then on you decide alone inside it (section 10 of the `kontext-pm` skill), and a change of features, epics, goals or the charter is a scope change they sign the same way; its new work is not handed out until they do. Launch no wave before the plan is signed.
+
 - **Wave 1:** the foundations epic, in series (one coordinator).
 - **Middle waves:** the independent epics in parallel, one coordinator each (what `kontext plan` puts in the same wave).
 - **Final wave:** integration and end-to-end tests.
