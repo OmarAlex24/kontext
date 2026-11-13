@@ -129,6 +129,13 @@ impl Net {
 }
 
 impl Machine {
+    /// Its own writer's last line on the server, from the frontier.
+    fn server_tail(&self, net: &Net) -> u64 {
+        frontier(net, &self.token())["tails"][self.writer()]["n"]
+            .as_u64()
+            .unwrap_or(0)
+    }
+
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(BIN);
         c.args(args)
@@ -394,10 +401,15 @@ fn a_line_that_forks_a_chain_is_refused_and_never_written() {
     fs::write(c.config.join("tokens/demo.token"), a.token()).unwrap();
 
     // C writes while it cannot reach the server; then A writes the same `n`.
-    c.ok_env(
-        &[("KONTEXT_SERVER", "http://127.0.0.1:9")],
-        &["log", "written on C"],
-    );
+    let projects = c.config.join("projects.toml");
+    let registered = fs::read_to_string(&projects).unwrap();
+    fs::write(
+        &projects,
+        registered.replace(net.url(), "http://127.0.0.1:9"),
+    )
+    .unwrap();
+    c.ok(&["log", "written on C"]);
+    fs::write(&projects, &registered).unwrap();
     a.ok(&["log", "written on A"]);
     let c_before = c.lines("omar@a");
     let a_before = a.lines("omar@a");
@@ -764,4 +776,59 @@ fn status_json_has_no_server_key_without_a_server() {
     let j = p.kontext_ok(&["--json", "status"]);
     let v: Value = serde_json::from_str(&j).unwrap();
     assert!(v.get("server").is_none(), "{j}");
+}
+
+/// The environment never takes a registered project somewhere else: on a
+/// project without a server, `KONTEXT_SERVER` and `KONTEXT_TOKEN` (even a
+/// malformed one) change nothing; on one with a server, a token is only sent
+/// to the server it is registered with.
+#[test]
+fn the_environment_does_not_take_over_a_registered_project() {
+    // A listener that notes any connection: no token may ever reach it.
+    let trap = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    trap.set_nonblocking(true).unwrap();
+    let trap_url = format!("http://{}", trap.local_addr().unwrap());
+
+    let p = common::Project::new();
+    p.kontext_ok(&["log", "git only"]);
+    let plain = |args: &[&str]| p.kontext_ok(args);
+    let with_env = |args: &[&str], token: &str| {
+        p.kontext_env_ok(
+            &[("KONTEXT_SERVER", &trap_url), ("KONTEXT_TOKEN", token)],
+            args,
+        )
+    };
+    let demo_token = {
+        // A well-formed token for a project named demo, for another writer.
+        let head = "eyJwIjoiZGVtbyIsInciOiJzb21lb25lQGVsc2V3aGVyZSJ9";
+        format!("kxt1.{head}.c2VjcmV0")
+    };
+    for token in ["not-a-token", demo_token.as_str()] {
+        let a = plain(&["status"]);
+        let b = with_env(&["status"], token);
+        assert_eq!(a, b, "status changed with the environment");
+        assert!(!b.contains("Server:"), "{b}");
+        let j = with_env(&["--json", "status"], token);
+        let v: Value = serde_json::from_str(&j).unwrap();
+        assert!(v.get("server").is_none(), "{j}");
+        assert_eq!(v["writer"], "omar@test", "{j}");
+        let out = with_env(&["sync"], token);
+        assert!(out.contains("Commit") || out.contains("Nothing"), "{out}");
+    }
+    assert!(
+        trap.accept().is_err(),
+        "something connected to KONTEXT_SERVER"
+    );
+
+    // A project with a server: KONTEXT_SERVER pointing elsewhere is ignored,
+    // and its token never goes there.
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar"]);
+    a.ok_env(
+        &[("KONTEXT_SERVER", &trap_url), ("KONTEXT_TOKEN", &a.token())],
+        &["log", "to its own server"],
+    );
+    assert_eq!(a.server_tail(&net), a.lines("omar@a").len() as u64);
+    assert!(trap.accept().is_err(), "the token went to KONTEXT_SERVER");
 }

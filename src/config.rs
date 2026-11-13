@@ -108,26 +108,27 @@ impl Machine {
     /// token's writer is minted with it, so sandboxes that share a hostname
     /// never share a writer), or else this machine's.
     pub fn writer_for(&self, project: &str) -> Result<String> {
+        // Only a project with a server has a token: one without behaves as
+        // before, whatever is in the config folder or the environment.
+        if self.server_for(project).is_none() {
+            return self.writer();
+        }
         match token_for(project)? {
             Some(t) => Ok(t.writer),
             None => self.writer(),
         }
     }
 
-    /// The server URL for a project: `$KONTEXT_SERVER`, or `server` in its
-    /// `[projects.<name>]`.
+    /// The server URL for a project: `server` in its `[projects.<name>]`,
+    /// normalized. A registered project always uses its own configuration:
+    /// `$KONTEXT_SERVER` never changes it (it only names the server of a
+    /// sandbox's project that is not set up yet, DESIGN §14.2).
     pub fn server_for(&self, project: &str) -> Option<String> {
-        std::env::var("KONTEXT_SERVER")
-            .ok()
-            .map(|s| s.trim().trim_end_matches('/').to_string())
+        self.projects
+            .get(project)
+            .and_then(|p| p.server.as_deref())
+            .map(crate::server::normalize_url)
             .filter(|s| !s.is_empty())
-            .or_else(|| {
-                self.projects
-                    .get(project)
-                    .and_then(|p| p.server.as_deref())
-                    .map(|s| s.trim().trim_end_matches('/').to_string())
-                    .filter(|s| !s.is_empty())
-            })
     }
 
     /// Sets (or removes) `server` of a registered project, keeping the rest of
@@ -871,17 +872,12 @@ fn base64url_decode(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// The token for a project: `$KONTEXT_TOKEN` (for sandboxes) when it is for
-/// that project, or the one saved in `<config dir>/tokens/<project>.token`.
+/// The token of a registered project: the one saved in
+/// `<config dir>/tokens/<project>.token` (0600). `$KONTEXT_TOKEN` is never
+/// read here: it is only for `clone --server`, `server connect` and setting
+/// up a sandbox, which save it, so a token is only ever sent to the server
+/// its project is registered with.
 pub fn token_for(project: &str) -> Result<Option<Token>> {
-    if let Ok(raw) = std::env::var("KONTEXT_TOKEN")
-        && !raw.trim().is_empty()
-    {
-        let t = Token::parse(&raw).context("$KONTEXT_TOKEN")?;
-        if t.project == project {
-            return Ok(Some(t));
-        }
-    }
     let p = Token::path(project)?;
     match fs::read_to_string(&p) {
         Ok(s) => Token::parse(&s)

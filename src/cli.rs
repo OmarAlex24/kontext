@@ -1642,8 +1642,8 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             match crate::remote::Link::of(&p.name)? {
                 crate::remote::Link::None => {}
                 crate::remote::Link::NoToken(url) => bail!(
-                    "project {} syncs with {url}, and this machine has no token for it: set KONTEXT_TOKEN \
-                     or save it in {}",
+                    "project {} syncs with {url}, and this machine has no token for it: ask an owner for \
+                     one and save it in {} (mode 0600)",
                     p.name,
                     config::Token::path(&p.name)?.display()
                 ),

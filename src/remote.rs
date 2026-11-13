@@ -1479,7 +1479,9 @@ impl Status {
             self.url,
             match (&self.project, &self.writer) {
                 (Some(p), Some(w)) => format!(" (project {p}, token for writer {w})"),
-                _ => " (no token: set KONTEXT_TOKEN or ask the owner for one)".into(),
+                _ => " (no token: ask an owner for one and save it in the kontext config folder, \
+                       tokens/<project>.token, mode 0600)"
+                    .into(),
             }
         )];
         l.push(format!(
@@ -1568,11 +1570,19 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
         }
         None => match config::token_for(name)? {
             Some(t) if t.project == name => t,
-            _ => bail!(
-                "project {name} already exists on {url} and this machine has no token for it. If it is \
-                 this project, ask its owner for one (`kontext token create`) and save it with \
-                 KONTEXT_TOKEN, then run `kontext sync`"
-            ),
+            _ => match env_token(name)? {
+                // Given for this command, for this server: saved like the
+                // token `clone --server` gets.
+                Some(t) => {
+                    t.save(name)?;
+                    t
+                }
+                None => bail!(
+                    "project {name} already exists on {url} and this machine has no token for it. If it \
+                     is this project, ask its owner for one (`kontext token create`) and run \
+                     `KONTEXT_TOKEN=<token> kontext server connect {url}`"
+                ),
+            },
         },
     };
     if token.writer != writer {
@@ -1586,6 +1596,17 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
     let mut opts = Options::full(true);
     opts.admin = Some(admin);
     sync(home, &remote, &opts)
+}
+
+/// `$KONTEXT_TOKEN`, if it is set and is a token for `project`.
+fn env_token(project: &str) -> Result<Option<Token>> {
+    match std::env::var("KONTEXT_TOKEN") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let t = Token::parse(&raw).context("$KONTEXT_TOKEN")?;
+            Ok((t.project == project).then_some(t))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// What `kontext clone --server` needs.
