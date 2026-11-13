@@ -506,15 +506,10 @@ fn scope_draft(st: &State, project: &str, out: &mut Vec<Draft>) {
     d.alt = Some("say yes to the pm, who signs it with you".into());
     d.ids = diff.adds.iter().chain(&diff.removes).cloned().collect();
     d.keys = Vec::new();
-    for line in summary
-        .summary
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with("# "))
-        .take(SCOPE_LINES)
-    {
+    for line in preview(&summary.summary, SCOPE_LINES) {
         d.subs.push(Sub {
             id: String::new(),
-            text: line.trim().to_string(),
+            text: line,
             by: String::new(),
             hlc: String::new(),
             new: false,
@@ -527,6 +522,42 @@ fn scope_draft(st: &State, project: &str, out: &mut Vec<Draft>) {
         .map(|t| t.id.clone())
         .collect();
     out.push(d);
+}
+
+/// The first lines of a scope change's summary, for the inbox: its sections
+/// as "Enters (1):" and their lines, without the empty ones ("(nothing)"),
+/// the title or the line that says since when. At most `max` lines, never
+/// ending on a section's name.
+fn preview(summary: &str, max: usize) -> Vec<String> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut header: Option<String> = None;
+    let mut skip = false;
+    for l in summary.lines().map(str::trim) {
+        if l.is_empty() || l.starts_with("# ") || l.starts_with("Since ") {
+            continue;
+        }
+        if let Some(h) = l.strip_prefix("## ") {
+            skip = h == "Your ideas";
+            header = Some(format!("{h}:"));
+            continue;
+        }
+        if skip {
+            continue;
+        }
+        if l == "(nothing)" {
+            header = None;
+            continue;
+        }
+        if let Some(h) = header.take() {
+            out.push((h, true));
+        }
+        out.push((l.to_string(), false));
+    }
+    out.truncate(max);
+    while out.last().is_some_and(|(_, h)| *h) {
+        out.pop();
+    }
+    out.into_iter().map(|(l, _)| l).collect()
 }
 
 /// The key of the pending scope signature in the inbox.
