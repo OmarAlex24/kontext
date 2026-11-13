@@ -47,7 +47,7 @@ Count like this: one coordinator per epic; as many implementers as tasks ready a
 
 ## 3. Waves
 
-**Phase 0, no code (XXL).** With the user, in the conversation: the charter (`kontext charter`), the goals (`kontext goal add`), and the architecture decisions (`kontext decide`). The user signs them (`kontext sign`); you only use `--approved-by` once they have approved them in the conversation. Then, the epic map, with the features of each epic: what the human will see working, each with its acceptance written as what they see:
+**Phase 0, no code (XXL).** With the user, in the conversation: the charter (`kontext charter`), the goals (`kontext goal add`), and the architecture decisions (`kontext decide`). They are signed together with the plan, at the end of phase 0 (below), not one by one; a decision you write before then needs `--approved-by`, only once they have approved it in the conversation. Then, the epic map, with the features of each epic: what the human will see working, each with its acceptance written as what they see:
 
 ```sh
 kontext epic add "Foundations" --goal <G> --name foundations
