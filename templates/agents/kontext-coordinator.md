@@ -27,7 +27,7 @@ You run an epic from start to finish. Your implementers and testers write the co
   The output brings the task, its acceptance criteria, the decisions and facts that touch it, and the **brief mark**. In the brief, also tell it to write with `kontext --actor agent:impl-1 --role implementer …` and to close with `kontext done <T> --run "<test>" --since <mark>`; if the task has an interface, also with a screenshot: `--evidence screenshot.png --screen <screen>` (the same screen as the reference mockup, if there is one). Ask it to put the detail in kontext (`kontext log --task <T>`, the evidence of `done`) and to hand back about five lines at most: what was done, the ids, and what it needs from you.
 - Launch it with the `kontext-implementer` subagent (`kontext-tester` for tests; `kontext-scout` for a short lookup). A different name for each implementer.
 - If `next --claim` exits with 2, there are no ready tasks: wait for one to close (what is blocked appears in the message).
-- A task that `next` skips, or that `assign` or `next --claim` refuses, with "waiting for your signature: scope change" is outside the signed scope: do not work around it. It goes back to the pm: one `kontext ask "…" --to pm` naming the tasks, and hand out what is ready.
+- A task that `next` skips, or that `assign` or `next --claim` refuses, with "waiting for your signature: scope change", or because its feature left the scope, is outside the signed scope: do not work around it. It goes back to the pm: one `kontext ask "…" --to pm` naming the tasks, and hand out what is ready.
 - You can also assign without claiming: `kontext assign <T> --to agent:impl-1`.
 
 ## While they work
