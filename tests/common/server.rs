@@ -7,9 +7,10 @@
 //! instead, so CI always runs them.
 
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const ADMIN: &str = "test-admin-secret";
 
@@ -63,7 +64,10 @@ impl LocalServer {
             .args(["--port", &port.to_string(), "--admin-secret", ADMIN])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            // Its own process group: workerd is node's child, and stopping the
+            // server has to stop it too (otherwise it keeps the port).
+            .process_group(0);
         if let Some(p) = persist {
             c.arg("--persist").arg(p);
         }
@@ -97,9 +101,23 @@ impl LocalServer {
         self.url.rsplit(':').next().unwrap().parse().unwrap()
     }
 
-    /// Stops it (the network goes away for the clients).
+    /// Stops it, workerd included (the network goes away for the clients).
     pub fn stop(&mut self) {
-        let _ = self.child.kill();
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return;
+        }
+        let group = -(self.child.id() as i32);
+        // SIGTERM lets dev.mjs dispose of Miniflare (and workerd); the whole
+        // group gets SIGKILL if that takes too long.
+        unsafe { libc::kill(group, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        unsafe { libc::kill(group, libc::SIGKILL) };
         let _ = self.child.wait();
     }
 
@@ -126,7 +144,6 @@ impl LocalServer {
 
 impl Drop for LocalServer {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stop();
     }
 }
