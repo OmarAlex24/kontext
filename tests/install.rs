@@ -445,6 +445,7 @@ fn installs_agent_files_and_keeps_edited_ones() {
         stdout.contains("Kept") && stdout.contains("kontext-implementer.md"),
         "{stdout}"
     );
+    assert!(stdout.contains("changed by hand"), "{stdout}");
     assert_eq!(fs::read_to_string(&edited).unwrap(), "my version\n");
     assert!(agents.join("kontext-tester.md").exists());
     let out = install(&p, &r, &["--force"]);
@@ -456,6 +457,158 @@ fn installs_agent_files_and_keeps_edited_ones() {
     );
     let out = install(&p, &r, &[]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to change"));
+}
+
+/// The `coordinator` template as `kontext install` wrote it at 716e888: a
+/// file nobody touched, from an older version.
+const OLD_COORDINATOR: &str = include_str!("fixtures/agents/kontext-coordinator-716e888.md");
+
+/// `kontext doctor --json` from `dir`, with nothing of the real machine's
+/// Claude Code folders read. Returns its findings as `[level] message | fix`.
+fn doctor(p: &Project, dir: &Path) -> Vec<String> {
+    let claude = p.dir.path().join("claude-config");
+    fs::create_dir_all(&claude).unwrap();
+    let out = p
+        .cmd(&["doctor", "--json"])
+        .current_dir(dir)
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| format!("[{}] {} | {}", c["level"], c["message"], c["fix"]))
+        .collect()
+}
+
+/// An agent file equal to an earlier released version is replaced without
+/// `--force`; one changed by hand is kept until `--force`. `doctor` says
+/// which is which. The skills are replaced either way.
+#[test]
+fn replaces_agent_files_from_older_versions_and_keeps_hand_edits() {
+    let p = Project::new();
+    let r = repo(&p);
+    let agents = r.join(".claude/agents");
+    let coordinator = agents.join("kontext-coordinator.md");
+    let implementer = agents.join("kontext-implementer.md");
+    let current = |name: &str| {
+        kontext::install::AGENTS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap()
+            .1
+    };
+    assert_ne!(OLD_COORDINATOR, current("kontext-coordinator.md"));
+    assert!(install(&p, &r, &[]).status.success());
+    fs::write(&coordinator, OLD_COORDINATOR).unwrap();
+    fs::write(&implementer, "my version\n").unwrap();
+    let skill = r.join(".claude/skills/kontext/SKILL.md");
+    fs::write(&skill, "my skill\n").unwrap();
+
+    let found = doctor(&p, &r);
+    let has = |needle: &str| found.iter().any(|f| f.contains(needle));
+    assert!(
+        has("from an older kontext version: .claude/agents/kontext-coordinator.md")
+            && has("`kontext install` updates them"),
+        "{found:#?}"
+    );
+    assert!(
+        has("agent files changed by hand: .claude/agents/kontext-implementer.md")
+            && has("`kontext install --force` replaces them"),
+        "{found:#?}"
+    );
+    assert!(
+        !found
+            .iter()
+            .any(|f| f.contains("kontext-coordinator.md") && f.contains("--force")),
+        "{found:#?}"
+    );
+
+    let out = install(&p, &r, &["--dry-run"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let kept: Vec<&str> = stdout.lines().filter(|l| l.starts_with("Kept ")).collect();
+    assert_eq!(kept.len(), 1, "{stdout}");
+    assert!(
+        kept[0].contains("kontext-implementer.md: it was changed by hand"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("kontext-coordinator.md"), "{stdout}");
+    assert_eq!(fs::read_to_string(&coordinator).unwrap(), OLD_COORDINATOR);
+
+    let out = install(&p, &r, &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert_eq!(
+        fs::read_to_string(&coordinator).unwrap(),
+        current("kontext-coordinator.md")
+    );
+    assert_eq!(fs::read_to_string(&implementer).unwrap(), "my version\n");
+    assert_eq!(
+        fs::read_to_string(&skill).unwrap(),
+        kontext::install::SKILL,
+        "the skills are always replaced"
+    );
+
+    let found = doctor(&p, &r);
+    let has = |needle: &str| found.iter().any(|f| f.contains(needle));
+    assert!(!has("from an older kontext version"), "{found:#?}");
+    assert!(has("agent files changed by hand"), "{found:#?}");
+
+    assert!(install(&p, &r, &["--force"]).status.success());
+    assert_eq!(
+        fs::read_to_string(&implementer).unwrap(),
+        current("kontext-implementer.md")
+    );
+    let found = doctor(&p, &r);
+    assert!(
+        found.iter().any(|f| f.contains("agent files current")),
+        "{found:#?}"
+    );
+}
+
+/// The list of released agent versions cannot go stale: every current
+/// template is in it (a changed template fails here until its hash is
+/// appended to templates/agent-versions.txt), every line names an agent
+/// file, and the 716e888 coordinator is one of the older versions.
+#[test]
+fn agent_versions_list_has_every_template() {
+    use kontext::install::{AGENTS, agent_versions, is_released_agent};
+    for (name, text) in AGENTS {
+        assert!(
+            is_released_agent(name, text),
+            "templates/agents/{name} changed: append its sha256 to \
+             templates/agent-versions.txt (`shasum -a 256 templates/agents/{name}`); \
+             never remove a line"
+        );
+    }
+    let mut lines = 0;
+    for (file, hash) in agent_versions() {
+        lines += 1;
+        assert!(AGENTS.iter().any(|(n, _)| *n == file), "{file}");
+        assert!(
+            hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{hash}"
+        );
+    }
+    assert!(lines >= 13, "{lines}");
+    assert!(is_released_agent("kontext-coordinator.md", OLD_COORDINATOR));
+    assert!(!is_released_agent(
+        "kontext-implementer.md",
+        OLD_COORDINATOR
+    ));
+    assert!(!is_released_agent(
+        "kontext-coordinator.md",
+        &OLD_COORDINATOR.replace('\n', "\r\n")
+    ));
 }
 
 /// Installed from a cargo build directory, `install` still works and exits
