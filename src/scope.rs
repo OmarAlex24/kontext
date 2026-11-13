@@ -170,6 +170,14 @@ pub fn pending(st: &State) -> Option<Diff> {
     (!d.is_empty()).then_some(d)
 }
 
+/// Is this feature leaving the signed scope, waiting for the owner to sign
+/// it out? It is in the last signature's `covers` and no longer in force. A
+/// feature dropped that no signature covered never entered the scope: it
+/// waits for nothing.
+pub fn leaving(st: &State, id: &str) -> bool {
+    plan_signed(st) && signed_covers(st).contains(id) && !current(st).iter().any(|x| x == id)
+}
+
 /// "U-… Refunds" for the views.
 pub fn label(st: &State, id: &str) -> String {
     match st.get(id) {

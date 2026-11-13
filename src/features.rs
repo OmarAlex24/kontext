@@ -279,7 +279,7 @@ pub fn status_text(st: &State, id: &str) -> Option<String> {
             }
             match st.drop_signed.get(id) {
                 Some(sc) => s.push_str(&format!("; the owner signed it in {sc}")),
-                None if crate::scope::plan_signed(st) => {
+                None if crate::scope::leaving(st, id) => {
                     s.push_str("; waiting for the owner's signature (scope change)")
                 }
                 None => {}

@@ -649,6 +649,68 @@ fn an_idea_whose_feature_was_dropped_waits_then_counts_as_discarded() {
 }
 
 #[test]
+fn an_idea_on_a_feature_no_signature_covered_is_not_placed_not_discarded() {
+    let t = planned();
+    let repo = pm_repo(&t.p, "");
+    let h = serde_json::from_str::<Value>(&in_dir(&t.p, &repo, &["--json", "scope", "summary"]).1)
+        .unwrap()["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (c, _, err) = in_dir(
+        &t.p,
+        &repo,
+        &["scope", "sign", "--hash", &h, "--approved-by", "omar"],
+    );
+    assert_eq!(c, 0, "{err}");
+    // A feature enters after the plan, gets an idea, and leaves before any
+    // signature covers it; another change is then signed.
+    let gift = pm_id(&t.p, &["feature", "add", "Gift cards", "--epic", "pay"]);
+    fs::write(
+        repo.join(".pm/items.md"),
+        format!(
+            "| id | idea | source | state | where | evidence |\n|---|---|---|---|---|---|\n\
+             | I1 | gift cards | | | {gift} | |\n"
+        ),
+    )
+    .unwrap();
+    pm_ok(&t.p, &["feature", "drop", &gift, "--why", "later"]);
+    let show = t.p.kontext_ok(&["show", &gift]);
+    assert!(
+        !show.contains("waiting for the owner's signature"),
+        "{show}"
+    );
+    pm_ok(&t.p, &["feature", "add", "Invoices", "--epic", "pay"]);
+    let v: Value =
+        serde_json::from_str(&in_dir(&t.p, &repo, &["--json", "scope", "summary"]).1).unwrap();
+    let text = v["summary"].as_str().unwrap();
+    assert!(text.contains("## Leaves (0)"), "{text}");
+    assert!(!text.contains(&gift), "it never entered the scope:\n{text}");
+    let (c, _, err) = in_dir(
+        &t.p,
+        &repo,
+        &[
+            "scope",
+            "sign",
+            "--hash",
+            v["hash"].as_str().unwrap(),
+            "--approved-by",
+            "omar",
+        ],
+    );
+    assert_eq!(c, 0, "{err}");
+    // The owner never saw it leave: the idea is not placed, not discarded.
+    let ideas: Value = serde_json::from_str(&in_dir(&t.p, &repo, &["--json", "ideas"]).1).unwrap();
+    assert_eq!(ideas["ideas"][0]["state"], "pending", "{ideas}");
+    assert_eq!(ideas["not_placed"][0]["id"], "I1", "{ideas}");
+    assert_eq!(
+        ideas["not_placed"][0]["cites"],
+        format!("feature {gift} dropped (it was never in a signed scope)")
+    );
+}
+
+
+#[test]
 fn verify_checks_the_summary_hash() {
     let t = planned();
     sign(&t.p);

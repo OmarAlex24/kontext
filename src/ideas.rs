@@ -681,8 +681,11 @@ fn cites_text(st: &State, cited: &[&Entry], where_: &str) -> Option<String> {
         .map(|e| match e.kind.as_str() {
             "epic" => format!("{}, no feature", one_line(&e.title, 60)),
             "question" | "proposal" => format!("{} {} {}", e.kind, e.id, status_text(st, e)),
-            "feature" if st.dropped.contains_key(&e.id) => {
+            "feature" if crate::scope::leaving(st, &e.id) => {
                 format!("feature {} dropped, waiting for your signature", e.id)
+            }
+            "feature" if st.dropped.contains_key(&e.id) => {
+                format!("feature {} dropped (it was never in a signed scope)", e.id)
             }
             "feature" | "task" | "decision" => {
                 format!("{} {} {}", e.kind, e.id, status_text(st, e))

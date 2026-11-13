@@ -562,7 +562,8 @@ pub struct State {
     /// Feature → the `supersede` without a replacement that dropped it (while
     /// it stays dropped).
     pub dropped: BTreeMap<String, String>,
-    /// Dropped feature → the `scope` entry whose signature covered its removal.
+    /// Dropped feature → the `scope` entry whose signature covered its removal
+    /// (it was in that entry's `removes`).
     pub drop_signed: BTreeMap<String, String>,
     /// Charters in the order they were signed.
     sign_order: Vec<String>,
@@ -1405,10 +1406,14 @@ impl State {
             return;
         }
         self.scopes.push(e.id.clone());
-        let covers: BTreeSet<String> = string_list(e.fields.get("covers")).into_iter().collect();
+        // A dropped feature is signed out only if this signature's summary
+        // listed it as leaving (`removes`): the owner saw it go. One added and
+        // dropped between two signatures never entered the scope, so no
+        // signature covers its removal (an idea placed only on it is not placed).
+        let removes: BTreeSet<String> = string_list(e.fields.get("removes")).into_iter().collect();
         let dropped: Vec<String> = self.dropped.keys().cloned().collect();
         for f in dropped {
-            if !covers.contains(&f) {
+            if removes.contains(&f) {
                 self.drop_signed.entry(f).or_insert_with(|| e.id.clone());
             }
         }
