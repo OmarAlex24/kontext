@@ -848,6 +848,11 @@ pub fn assign(store: &mut Store, actor: &Actor, task: &str, to: &str) -> Result<
                 "{id} is already closed; reopen it with `kontext reopen {id} --why …`"
             ));
         }
+        if let Some(why) = st.get(&id).and_then(|t| crate::scope::blocked(st, t)) {
+            return refused(format!(
+                "{id} is not handed out: {why}. The pm shows the owner `kontext scope summary` and signs it with them"
+            ));
+        }
         let mut r = raw("assign", actor, &format!("Assigns {id} to {to}"));
         r.refs = vec![id];
         r.fields.insert("to".into(), json!(to));
@@ -934,9 +939,14 @@ pub fn pick(st: &State, epic: &str, actor: &Actor) -> Option<(String, bool)> {
             return Some((t.id.clone(), true));
         }
     }
+    // A task whose feature, epic or goal waits for the owner's signature
+    // (a scope change) is not handed out.
     tasks
         .iter()
-        .find(|t| st.task_status(&t.id) == Some(TaskStatus::Ready))
+        .find(|t| {
+            st.task_status(&t.id) == Some(TaskStatus::Ready)
+                && crate::scope::blocked(st, t).is_none()
+        })
         .map(|t| (t.id.clone(), false))
 }
 
@@ -944,7 +954,20 @@ pub fn pick(st: &State, epic: &str, actor: &Actor) -> Option<(String, bool)> {
 pub fn nothing_ready(st: &State, epic: &str, actor: &Actor) -> String {
     let e = st.get(epic);
     let name = e.map(epic_name).unwrap_or_default();
-    let mut l = vec![format!("No ready tasks in epic {name} ({epic}).")];
+    let waiting: Vec<(&Entry, String)> = st
+        .tasks_of(epic)
+        .into_iter()
+        .filter(|t| st.task_status(&t.id) == Some(TaskStatus::Ready))
+        .filter_map(|t| crate::scope::blocked(st, t).map(|why| (t, why)))
+        .collect();
+    let mut l = vec![if waiting.is_empty() {
+        format!("No ready tasks in epic {name} ({epic}).")
+    } else {
+        format!(
+            "No task to hand out in epic {name} ({epic}): {}.",
+            crate::scope::WAITING
+        )
+    }];
     let blocked: Vec<&Entry> = st
         .tasks_of(epic)
         .into_iter()
@@ -968,6 +991,16 @@ pub fn nothing_ready(st: &State, epic: &str, actor: &Actor) -> String {
                 t.id,
                 crate::views::one_line(&t.title, 100),
                 by.join(", ")
+            ));
+        }
+    }
+    if !waiting.is_empty() {
+        l.push("Not handed out until the owner signs the scope change (the pm shows them `kontext scope summary`):".into());
+        for (t, why) in waiting {
+            l.push(format!(
+                "- {} {} → {why}",
+                t.id,
+                crate::views::one_line(&t.title, 100)
             ));
         }
     }

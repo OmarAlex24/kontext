@@ -330,6 +330,7 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
         epic.id,
         tasks::coordinator_of(epic)
     ));
+    l.extend(crate::scope::pending_line(st));
     l.push(String::new());
     l.push(
         "You coordinate this epic: hand out the ready tasks, answer what the charter \
@@ -737,6 +738,9 @@ pub fn brief_json(st: &State, new: &[Entry], o: &BriefOpts) -> Value {
             .map(|f| features::json(st, f))
             .collect();
     }
+    if let Some(p) = crate::scope::pending_line(st) {
+        v["pending_scope"] = json!(p);
+    }
     v
 }
 
@@ -834,6 +838,10 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
         None => {}
     }
     l.push(format!("Assignment mark: `{mark}`"));
+    // With a signed plan: the ready tasks of the epic that were skipped.
+    for (id, why) in scope_skipped(st, t) {
+        l.push(format!("Skipped {id}: {why}."));
+    }
     // Phase 5: one of your claims that lost to another machine.
     for a in lost_claims(st, &o.actor) {
         l.push(format!("Warning: {a}"));
@@ -1003,7 +1011,27 @@ pub fn next_json(st: &State, task: &str, o: &NextOpts) -> Value {
     if let Some(f) = features::counted_feature(st, t).and_then(|f| st.get(f)) {
         v["feature"] = features::json(st, f);
     }
+    let skipped = scope_skipped(st, t);
+    if !skipped.is_empty() {
+        v["skipped"] = skipped
+            .into_iter()
+            .map(|(task, reason)| json!({"task": task, "reason": reason}))
+            .collect();
+    }
     v
+}
+
+/// The other ready tasks of the task's epic that are not handed out because
+/// a scope change waits for the owner (empty without a signed plan).
+fn scope_skipped(st: &State, t: &Entry) -> Vec<(String, String)> {
+    let Some(epic) = st.epic_of(t) else {
+        return Vec::new();
+    };
+    st.tasks_of(&epic.id)
+        .into_iter()
+        .filter(|x| x.id != t.id && st.task_status(&x.id) == Some(TaskStatus::Ready))
+        .filter_map(|x| crate::scope::blocked(st, x).map(|why| (x.id.clone(), why)))
+        .collect()
 }
 
 /// The claims of `actor` that lost to an earlier claim from another machine.

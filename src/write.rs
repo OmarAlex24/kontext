@@ -46,6 +46,30 @@ fn set(fields: &mut Map<String, Value>, k: &str, v: Option<&str>) {
     }
 }
 
+/// The owner rule for `decide`, `accept` and `reject`: with a signed plan the
+/// pm also decides alone (DESIGN §2, principle 7). The state applies the same
+/// rule when reading.
+pub fn may_decide(store: &mut Store, actor: &Actor, approved_by: Option<&str>) -> Result<bool> {
+    if store.policy().check(actor, approved_by).is_ok() {
+        return Ok(true);
+    }
+    let st = store.state()?;
+    Ok(crate::scope::pm_decides_alone(&st, actor, approved_by))
+}
+
+fn require_decider(
+    store: &mut Store,
+    actor: &Actor,
+    approved_by: Option<&str>,
+    what: &str,
+    instead: &str,
+) -> Result<()> {
+    if may_decide(store, actor, approved_by)? {
+        return Ok(());
+    }
+    require_owner(store, actor, approved_by, what, instead)
+}
+
 /// Checks the owner rule before writing.
 fn require_owner(
     store: &Store,
@@ -224,7 +248,7 @@ pub fn decide(
     if a.title.trim().is_empty() {
         bail!("the decision needs a title");
     }
-    require_owner(
+    require_decider(
         store,
         actor,
         approved_by,
@@ -272,7 +296,7 @@ pub fn accept(
     approved_by: Option<&str>,
     why: &str,
 ) -> Result<Vec<Entry>> {
-    require_owner(
+    require_decider(
         store,
         actor,
         approved_by,
@@ -325,7 +349,7 @@ pub fn reject(
     if why.trim().is_empty() {
         bail!("rejecting needs --why");
     }
-    require_owner(
+    require_decider(
         store,
         actor,
         approved_by,

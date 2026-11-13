@@ -925,3 +925,153 @@ fn verify_checks_the_summary_hash() {
     t.p.kontext_ok(&["reindex"]);
     assert_eq!(summary(&t.p)["type"], "plan");
 }
+
+// ── What a signed plan changes (phase 2, PR 2) ──────────────────────────
+
+const IMPL: &[(&str, &str)] = &[("KONTEXT_ACTOR", "agent:impl1")];
+
+/// The status that `show --json` derives for an id.
+fn status(p: &Project, id: &str) -> String {
+    let v: Value = serde_json::from_str(&pm_ok(p, &["--json", "show", id])).unwrap();
+    v["status"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn a_signed_plan_signs_its_charter_and_goals_and_the_pm_decides_alone() {
+    let t = planned();
+    let charter = summary(&t.p)["covers"][0].as_str().unwrap().to_string();
+    assert_eq!(status(&t.p, &t.goal), "unsigned");
+    // Before the signature the pm needs the owner's approval.
+    let (c, _, err) = code(&t.p, PM, &["decide", "Use Stripe", "--why", "3DS"]);
+    assert_eq!(c, 2, "{err}");
+    let s = sign(&t.p);
+    assert_eq!(status(&t.p, &t.goal), "signed");
+    assert_eq!(status(&t.p, &charter), "signed");
+    // Inside the signed scope the pm decides, accepts and rejects alone.
+    let d = pm_id(&t.p, &["decide", "Use Stripe", "--why", "3DS"]);
+    assert_eq!(status(&t.p, &d), "accepted");
+    let p1 =
+        t.p.id_of(IMPL, &["propose", "Retry the webhook", "--why", "flaky"]);
+    let p2 =
+        t.p.id_of(IMPL, &["propose", "Rewrite in Go", "--why", "speed"]);
+    pm_ok(&t.p, &["accept", &p1]);
+    pm_ok(&t.p, &["reject", &p2, "--why", "not now"]);
+    assert_eq!(status(&t.p, &p2), "rejected");
+    let law: Value =
+        serde_json::from_str(&pm_ok(&t.p, &["--json", "resume", "--as", "pm"])).unwrap();
+    let titles: Vec<&str> = law["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["title"].as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Use Stripe"), "{titles:?}");
+    assert!(titles.contains(&"Retry the webhook"), "{titles:?}");
+    // The pm's resume says what it may do alone.
+    let resume = pm_ok(&t.p, &["resume", "--as", "pm"]);
+    assert!(
+        resume.contains(&format!("The scope is signed ({s}")),
+        "{resume}"
+    );
+    // Another agent still does not decide.
+    let (c, _, _) = code(&t.p, IMPL, &["decide", "Use Go", "--why", "x"]);
+    assert_eq!(c, 2);
+    // Verify is still clean.
+    pm_ok(&t.p, &["verify"]);
+}
+
+#[test]
+fn new_scope_waits_for_the_signature_and_signed_work_keeps_moving() {
+    let t = planned();
+    // Without a signed plan nothing is held back.
+    let early = pm_id(&t.p, &["task", "add", "Migrations", "--epic", "found"]);
+    let out = t.p.kontext_env_ok(IMPL, &["next", "--epic", "found"]);
+    assert!(out.contains(&early), "{out}");
+    assert!(!out.contains("Skipped"), "{out}");
+    sign(&t.p);
+    // A feature enters after the signature, with a task, then a task under a
+    // signed feature.
+    let inv = pm_id(
+        &t.p,
+        &[
+            "feature",
+            "add",
+            "Invoices",
+            "--epic",
+            "pay",
+            "--acceptance",
+            "a PDF per order",
+        ],
+    );
+    let held = pm_id(&t.p, &["task", "add", "PDF", "--feature", &inv]);
+    let free = pm_id(&t.p, &["task", "add", "Charge", "--feature", &t.card]);
+    let out = t.p.kontext_env_ok(IMPL, &["next", "--epic", "pay"]);
+    assert!(out.contains(&free), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Skipped {held}: waiting for your signature: scope change ({inv} Invoices is not signed yet)."
+        )),
+        "{out}"
+    );
+    let v: Value =
+        serde_json::from_str(&t.p.kontext_env_ok(IMPL, &["--json", "next", "--epic", "pay"]))
+            .unwrap();
+    assert_eq!(v["skipped"][0]["task"], held.as_str());
+    // assign refuses it.
+    let (c, _, err) = code(&t.p, PM, &["assign", &held, "--to", "impl1"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(
+        err.contains("waiting for your signature: scope change"),
+        "{err}"
+    );
+    // The views mention the pending change on one line.
+    let line = format!("Scope change waiting for the owner's signature: enters {inv} Invoices.");
+    for args in [
+        &["plan"][..],
+        &["resume", "--as", "pm"],
+        &["brief", "pay", "--peek"],
+        &["standup", "--peek"],
+    ] {
+        let out = pm_ok(&t.p, args);
+        assert!(out.contains(&line), "{args:?} lacks the line:\n{out}");
+    }
+    // With the signed task closed, nothing else is handed out.
+    t.p.kontext_ok(&["done", &free, "--evidence", "cmd:\"true\"=0"]);
+    for args in [
+        &["next", "--epic", "pay"][..],
+        &["next", "--epic", "pay", "--claim"],
+    ] {
+        let (c, _, err) = code(&t.p, IMPL, args);
+        assert_eq!(c, 2, "{args:?}: {err}");
+        assert!(err.contains("No task to hand out in epic pay"), "{err}");
+        assert!(err.contains(&held), "{err}");
+    }
+    // Signed, it goes out, and the views drop the line.
+    sign(&t.p);
+    let out =
+        t.p.kontext_env_ok(IMPL, &["next", "--epic", "pay", "--claim"]);
+    assert!(out.contains(&held), "{out}");
+    assert!(!pm_ok(&t.p, &["plan"]).contains("Scope change waiting"));
+}
+
+#[test]
+fn a_feature_leaving_the_scope_holds_its_tasks_until_signed() {
+    let t = planned();
+    sign(&t.p);
+    let rt = pm_id(
+        &t.p,
+        &["task", "add", "Refund API", "--feature", &t.refunds],
+    );
+    pm_ok(
+        &t.p,
+        &["feature", "drop", &t.refunds, "--why", "not for v1"],
+    );
+    let (c, _, err) = code(&t.p, PM, &["assign", &rt, "--to", "impl1"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("is leaving the scope"), "{err}");
+    let plan = pm_ok(&t.p, &["plan"]);
+    assert!(
+        plan.contains(&format!("leaves {} Refunds", t.refunds)),
+        "{plan}"
+    );
+}

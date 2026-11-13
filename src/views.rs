@@ -164,6 +164,9 @@ pub struct Standup {
     pub journal: Vec<Item>,
     /// Other new entries by kind (facts, questions for others…).
     pub other: BTreeMap<String, usize>,
+    /// With a signed plan: the scope change that waits for the owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_scope: Option<String>,
 }
 
 pub fn standup(
@@ -185,6 +188,7 @@ pub fn standup(
         alerts: Vec::new(),
         journal: Vec::new(),
         other: BTreeMap::new(),
+        pending_scope: crate::scope::pending_line(st),
     };
     for e in new {
         let counts = st.counts(&e.id);
@@ -394,6 +398,9 @@ impl Standup {
 
     pub fn markdown(&self) -> String {
         let mut l = vec![format!("# Standup of {} for {}", self.project, self.reader)];
+        if let Some(p) = &self.pending_scope {
+            l.push(p.clone());
+        }
         let since = match &self.since {
             Some(d) => format!("since your last time ({d})"),
             None => "since the beginning (this is your first standup)".to_string(),
@@ -809,19 +816,28 @@ fn build_resume(st: &State, new: &[Entry], o: &ResumeOpts, lv: Level) -> String 
         o.generated,
         plural(o.entries, "entry", "entries")
     ));
+    if o.role == "pm" {
+        l.extend(crate::scope::pm_line(st));
+    }
+    l.extend(crate::scope::pending_line(st));
     l.push(String::new());
+    // With a signed plan the pm decides inside the scope (its line above).
+    let others = if o.role == "pm" && crate::scope::plan_signed(st) {
+        "Other agents"
+    } else {
+        "Agents"
+    };
     if o.distill {
         l.push(format!(
-            "{DISTILL_HINT} Agents do not decide. What the user said applies even when unsigned; \
+            "{DISTILL_HINT} {others} do not decide. What the user said applies even when unsigned; \
              what was superseded no longer applies."
         ));
     } else {
-        l.push(
-            "The conversation is disposable: what is not in kontext is lost. Agents propose \
+        l.push(format!(
+            "The conversation is disposable: what is not in kontext is lost. {others} propose \
              (`kontext propose`), they do not decide. What the user said applies even when unsigned; \
              what was superseded no longer applies. Details of any id: `kontext show <id>`."
-                .into(),
-        );
+        ));
     }
     l.push(invoke_hint(o.writer.as_deref()));
     l.push(String::new());
@@ -1217,7 +1233,7 @@ pub fn resume_json(st: &State, new: &[Entry], o: &ResumeOpts) -> Value {
             })
         })
         .collect();
-    json!({
+    let mut v = json!({
         "epics": epics,
         "project": o.project,
         "role": o.role,
@@ -1235,7 +1251,11 @@ pub fn resume_json(st: &State, new: &[Entry], o: &ResumeOpts) -> Value {
         "journal": list(st.journal()),
         "alerts": st.alerts.iter().filter(|a| !pm || !matches!(a, crate::state::Alert::FactStale { .. })).collect::<Vec<_>>(),
         "new": list(new.iter().collect()),
-    })
+    });
+    if let Some(p) = crate::scope::pending_line(st) {
+        v["pending_scope"] = json!(p);
+    }
+    v
 }
 
 pub(crate) fn ref_label(st: &State, id: &str) -> String {

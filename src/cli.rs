@@ -1087,7 +1087,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Decide { d, approved_by } => cx.written("the decision", |s, a| {
             let mut args = d.args();
             // Without permission, `decide` refuses: don't store the attachment for nothing.
-            if s.policy().check(a, approved_by.as_deref()).is_ok() {
+            if write::may_decide(s, a, approved_by.as_deref())? {
                 args.attachments = store_media(s, &d.attach, &d.screen, true)?;
             }
             write::decide(s, a, &args, approved_by.as_deref())
@@ -1257,10 +1257,18 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             let (mut store, _) = cx.open()?;
             let st = store.state()?;
             let plan = crate::plan::of_state(&st);
+            let pending = crate::scope::pending_line(&st);
             if cx.json {
-                print_json(&plan.json())?;
+                let mut v = plan.json();
+                if let Some(p) = pending {
+                    v["pending_scope"] = serde_json::json!(p);
+                }
+                print_json(&v)?;
             } else {
                 print!("{}", plan.text());
+                if let Some(p) = pending {
+                    println!("\n{p}");
+                }
             }
             Ok(if plan.ok {
                 ExitCode::SUCCESS

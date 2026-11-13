@@ -207,6 +207,75 @@ pub fn diff_line(st: &State, d: &Diff) -> String {
     parts.join("; ")
 }
 
+/// The reason a task can't be handed out, as `kontext next` and `kontext
+/// assign` say it.
+pub const WAITING: &str = "waiting for your signature: scope change";
+
+/// Why a task is not handed out: with a signed plan, its feature, its epic or
+/// one of its goals entered the scope after the last signature, or is
+/// leaving it and the owner has not signed that yet. Tasks are not scope: a
+/// task added under a signed feature is not held. `None` without a signed
+/// plan.
+pub fn blocked(st: &State, task: &Entry) -> Option<String> {
+    if !plan_signed(st) {
+        return None;
+    }
+    let covers = signed_covers(st);
+    let now: BTreeSet<String> = current(st).into_iter().collect();
+    let feature = crate::features::feature_of(task)
+        .filter(|f| st.kind_of(f) == Some("feature"))
+        .map(str::to_string);
+    let ids = feature
+        .into_iter()
+        .chain(field(task, "epic").map(str::to_string))
+        .chain(string_list(task.fields.get("goals")));
+    for id in ids {
+        if now.contains(&id) && !covers.contains(&id) {
+            return Some(format!("{WAITING} ({} is not signed yet)", label(st, &id)));
+        }
+        if covers.contains(&id) && !now.contains(&id) {
+            return Some(format!(
+                "{WAITING} ({} is leaving the scope)",
+                label(st, &id)
+            ));
+        }
+    }
+    None
+}
+
+/// One line for the views when a scope change waits for the owner.
+pub fn pending_line(st: &State) -> Option<String> {
+    let d = pending(st)?;
+    Some(format!(
+        "Scope change waiting for the owner's signature: {}. Its new work is not handed out \
+         until they sign; `kontext scope summary` shows what they would sign.",
+        diff_line(st, &d)
+    ))
+}
+
+/// The line for the pm when a plan is signed: what it may do alone.
+pub fn pm_line(st: &State) -> Option<String> {
+    let s = last(st)?;
+    Some(format!(
+        "The scope is signed ({}, {}): inside it you decide and log (`kontext decide`, \
+         `accept`, `reject` without --approved-by). A change of features, epics, goals or the \
+         charter goes to the owner as a scope change: show them `kontext scope summary` and \
+         sign on their yes.",
+        s.id,
+        day(&s.hlc)
+    ))
+}
+
+/// May the pm decide, accept or reject without `--approved-by`? With a signed
+/// plan and without `require_signatures` (the same rule as the state's).
+pub fn pm_decides_alone(st: &State, actor: &Actor, approved_by: Option<&str>) -> bool {
+    approved_by.is_none_or(|a| a.trim().is_empty())
+        && actor.is_agent()
+        && actor.role.as_deref() == Some("pm")
+        && plan_signed(st)
+        && !st.policy.require_signatures
+}
+
 // ------------------------------------------------------------ summary
 
 /// What `kontext scope summary` would have the human sign now.

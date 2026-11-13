@@ -877,9 +877,26 @@ impl State {
         }
     }
 
+    /// With a signed plan (at this point of the walk), the pm decides alone
+    /// inside it: a `decision`, `accept` or `reject` from the pm counts
+    /// without `approved_by`. Not with `require_signatures`: there, what
+    /// becomes law still needs an owner's key.
+    fn pm_decides_alone(&self, e: &Entry) -> bool {
+        !self.scopes.is_empty()
+            && !self.policy.require_signatures
+            && matches!(e.kind.as_str(), "decision" | "accept" | "reject")
+            && e.actor.is_agent()
+            && e.actor.role.as_deref() == Some("pm")
+            && !e.fields.contains_key("v0_id")
+    }
+
     /// Checks the owner rule. If it does not count, records it as an alert.
     fn authorize(&mut self, e: &Entry) -> bool {
-        match self.policy.check_entry(e) {
+        let checked = match self.policy.check_entry(e) {
+            Err(_) if self.pm_decides_alone(e) => Ok(()),
+            other => other,
+        };
+        match checked {
             Ok(())
                 if self.policy.require_signatures && crate::sign::wants_signature(e).is_some() =>
             {
@@ -1406,6 +1423,26 @@ impl State {
             return;
         }
         self.scopes.push(e.id.clone());
+        let covers: BTreeSet<String> = string_list(e.fields.get("covers")).into_iter().collect();
+        // The charter and goals it covers count as signed, as a `sign` would
+        // make them (the decisions it covers are already in force).
+        let order: Vec<String> = self.order.clone();
+        for id in order.iter().filter(|id| covers.contains(*id)) {
+            let kind = self.kind_of(id).map(str::to_string);
+            if !matches!(kind.as_deref(), Some("charter" | "goal"))
+                || self.status_of(id) != Some(Status::Unsigned)
+            {
+                continue;
+            }
+            self.set(id, Status::Signed);
+            self.signed_by.insert(id.clone(), e.id.clone());
+            if kind.as_deref() == Some("charter") {
+                for old in self.fields_list(id, "supersedes") {
+                    self.supersede(&old, id);
+                }
+                self.sign_order.push(id.clone());
+            }
+        }
         // A dropped feature is signed out only if this signature's summary
         // listed it as leaving (`removes`): the owner saw it go. One added and
         // dropped between two signatures never entered the scope, so no
@@ -1624,6 +1661,9 @@ impl State {
             for g in goals {
                 let reason = match (self.kind_of(&g), self.status_of(&g)) {
                     (Some("goal"), Some(Status::Signed)) => continue,
+                    // With a signed plan, an unsigned goal is part of the
+                    // pending scope change, which says so on its own.
+                    (Some("goal"), Some(Status::Unsigned)) if !self.scopes.is_empty() => continue,
                     (Some("goal"), Some(Status::Unsigned)) => {
                         drift.push(Alert::UnsignedGoal {
                             id: e.id.clone(),
