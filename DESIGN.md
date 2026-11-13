@@ -302,25 +302,27 @@ Each view has a character budget. When it doesn't fit, it trims in this order: o
 
 > **Implemented: `kontext tree [--json]`.** With features the project has three levels (wave, epic, feature), and "how are we doing?" took `plan`, `resume --as pm` and `ideas` to answer. `kontext tree` draws it in one screen, read-only (it writes nothing and advances no cursor):
 > ```
-> quoro                            3/9 features · wave 2 of 3
+> quoro                            3/9 features · 2 waves to go
+> ├─ Done
+> │  └─ ✓ Foundations              4/4 tasks
 > ├─ Wave 1
-> │  └─ ✓ Foundations              4/4
-> ├─ Wave 2
 > │  ├─ ◐ Payments                 2/3
 > │  │   ├─ ✓ Card charge
 > │  │   ├─ ◐ Refunds              waiting for you
 > │  │   └─ ○ Invoices
 > │  └─ ◐ Catalog                  1/2
+> ├─ Wave 2
+> │  └─ ○ Integration              0/2
 > └─ Not placed (2) · 12 of your messages not audited since Nov 12
 >     ├─ "que el recibo salga en PDF"  Nov 12
 >     └─ "límite de pedidos abiertos"  Nov 12  (Payments, no feature)
 > ```
-> - **Waves** are `plan::compute` over every epic in force with the closed ones counted as open, so a finished wave keeps its number and the header can say "wave 2 of 3" (the first wave with an open epic). `kontext plan` itself is unchanged: it still plans only the open epics. Epics with no wave (a cycle, a dependency that does not exist or is no longer in force) go in a "No wave" group with the plan's reason.
+> - **Waves** are exactly `kontext plan`'s (`plan::of_state`): the open epics with the same numbers, and the same "No wave" group with the same reasons (a cycle, a dependency that does not exist or is no longer in force, waiting on one of those). The closed epics go first, one line each, in a "Done" group. A first version laid the closed epics out as if open so a finished wave kept its number; that put ready epics under "No wave" when a closed epic had a dangling `--after`, and drew epics a wave later than `plan` (an epic after a closed one is ready now), so it was dropped.
 > - **Epics.** ✓ closed (by `plan`'s rule: its features, or else its tasks), ◐ something started (a feature not pending, or a task assigned, claimed or closed), ○ nothing yet. A closed epic takes one line; an open one lists its features in force. The count is features done/total, or "n/m tasks" for an epic without features. Tasks are never listed.
 > - **Features.** ✓ done, ◐ in progress or to validate, ○ pending; then "to validate", and "waiting for you" when an open question for a person (as the inbox decides it: `owner`, an owner, `human:<x>` or someone in `[people]`, not dismissed) cites the feature or one of its tasks (`--feature`, `--task` or its refs).
-> - **Header.** "n/m features" across the project, or "n/m epics closed" when there are no features.
+> - **Header.** "n/m features" across the project, or "n/m epics closed" when there are no features; then "N waves to go" (the plan's waves), "N with no wave" if any, or "all done" when every epic is closed.
 > - **Not placed** comes from `kontext ideas` (§12.3): each idea not placed with the user's words (the quote, or else the idea), the date said and what it cites; the header adds the messages not audited. Without `.pm/items.md` the section is absent.
-> - `--json` gives the same tree (`waves[].epics[].feature_list[]`, `no_wave`, `not_placed: null | {count, ideas, unaudited}`), which `kontext ui` draws.
+> - `--json` gives the same tree (`done[]`, `waves[].epics[].feature_list[]`, `no_wave`, `not_placed: null | {count, ideas, unaudited}`), which `kontext ui` draws.
 
 > **Implemented in phase 4:**
 > - `brief`, `next` and `resume` only list facts in force; the "unreviewed" ones are marked `[unreviewed]`. A fact that expired shows up as an alert in `standup` (until it is replaced) and in the `brief` of its epic, or of all of them if it has no epic. The pm doesn't see facts or those alerts. `show` of a fact lists its fingerprints and its status; `--json` adds `freshness`.

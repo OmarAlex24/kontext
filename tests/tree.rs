@@ -91,7 +91,10 @@ fn the_tree_has_waves_epics_and_features() {
     let out = tree_in(&p, &dir, false);
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("demo "), "{out}");
-    assert!(lines[0].ends_with("1/3 features · wave 1 of 2"), "{out}");
+    assert!(
+        lines[0].ends_with("1/3 features · 2 waves to go · 1 with no wave"),
+        "{out}"
+    );
     assert_eq!(lines[1], "├─ Wave 1", "{out}");
     assert!(lines[2].starts_with("│  └─ ◐ Card payments"), "{out}");
     assert!(lines[2].trim_end().ends_with("1/3"), "{out}");
@@ -118,7 +121,7 @@ fn the_tree_has_waves_epics_and_features() {
     let v: Value = serde_json::from_str(&tree_in(&p, &dir, true)).unwrap();
     assert_eq!(v["features"]["done"], 1);
     assert_eq!(v["features"]["total"], 3);
-    assert_eq!(v["current_wave"], 1);
+    assert_eq!(v["done"], serde_json::json!([]));
     let pay = &v["waves"][0]["epics"][0];
     assert_eq!(pay["name"], "payments");
     assert_eq!(pay["progress"], "in_progress");
@@ -137,7 +140,7 @@ fn the_tree_has_waves_epics_and_features() {
 }
 
 #[test]
-fn a_closed_epic_takes_one_line_and_its_wave_stays() {
+fn a_closed_epic_takes_one_line_under_done() {
     let (p, [_, u2, u3], _) = project();
     p.kontext_ok(&["done", &u2, "--evidence", "url:https://example.com/refund"]);
     let t3 = p.id_of(&[], &["task", "add", "PDF invoice", "--feature", &u3]);
@@ -147,10 +150,16 @@ fn a_closed_epic_takes_one_line_and_its_wave_stays() {
     fs::create_dir_all(&dir).unwrap();
     let out = tree_in(&p, &dir, false);
     let lines: Vec<&str> = out.lines().collect();
-    assert!(lines[0].ends_with("3/3 features · wave 2 of 2"), "{out}");
+    assert!(
+        lines[0].ends_with("3/3 features · 1 wave to go · 1 with no wave"),
+        "{out}"
+    );
+    assert_eq!(lines[1], "├─ Done", "{out}");
     assert!(lines[2].starts_with("│  └─ ✓ Card payments"), "{out}");
     assert!(lines[2].ends_with("3/3"), "{out}");
-    assert_eq!(lines[3], "├─ Wave 2", "the closed epic is one line: {out}");
+    // Catalog waited for payments, which is closed: it is in wave 1 now.
+    assert_eq!(lines[3], "├─ Wave 1", "the closed epic is one line: {out}");
+    assert!(lines[4].starts_with("│  └─ ○ Catalog"), "{out}");
 }
 
 #[test]
@@ -238,7 +247,7 @@ fn a_project_without_features_counts_epics() {
         out.lines()
             .next()
             .unwrap()
-            .ends_with("0/1 epics closed · wave 1 of 1"),
+            .ends_with("0/1 epics closed · 1 wave to go"),
         "{out}"
     );
     close(&p, &t);
@@ -247,9 +256,120 @@ fn a_project_without_features_counts_epics() {
         out.lines()
             .next()
             .unwrap()
-            .ends_with("1/1 epics closed · 1 wave, all closed"),
+            .ends_with("1/1 epics closed · all done"),
         "{out}"
     );
     assert!(out.contains("└─ ✓ Card payments"), "{out}");
     assert!(out.contains("1/1 tasks"), "{out}");
+}
+
+/// The waves (number and epic names), the closed epics and those with no
+/// wave (name and reason), from `kontext plan --json` or `kontext tree --json`.
+fn layout(v: &Value, closed: &str, blocked: &str) -> Value {
+    let name = |e: &Value| e.get("epic").unwrap_or(e)["name"].clone();
+    let names = |l: &Value| -> Vec<Value> { l.as_array().unwrap().iter().map(name).collect() };
+    let waves: Vec<Value> = v["waves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| serde_json::json!({"n": w["n"], "epics": names(&w["epics"])}))
+        .collect();
+    let blocked: Vec<Value> = v[blocked]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| serde_json::json!([name(b), b["reason"]]))
+        .collect();
+    serde_json::json!({"waves": waves, "closed": names(&v[closed]), "blocked": blocked})
+}
+
+/// Checks that the tree lays out the epics exactly as `kontext plan` does.
+fn same_layout_as_plan(p: &Project) -> Value {
+    // `plan` exits with 1 when an epic has no wave: read its output anyway.
+    let plan: Value = serde_json::from_slice(&p.kontext(&["--json", "plan"]).stdout).unwrap();
+    let dir = p.dir.path().join("elsewhere");
+    fs::create_dir_all(&dir).unwrap();
+    let tree: Value = serde_json::from_str(&tree_in(p, &dir, true)).unwrap();
+    let got = layout(&tree, "done", "no_wave");
+    assert_eq!(
+        got,
+        layout(&plan, "closed", "blocked"),
+        "tree and plan disagree"
+    );
+    got
+}
+
+#[test]
+fn the_waves_are_those_of_kontext_plan() {
+    let (p, g, _) = with_epic();
+    let epic = |name: &str, after: &str| {
+        p.kontext_ok(&[
+            "epic", "add", name, "--goal", &g, "--name", name, "--after", after,
+        ]);
+    };
+    // Alpha waits for an epic that does not exist, Beta for Alpha.
+    epic("alpha", "ghost");
+    epic("beta", "alpha");
+    let a = p.id_of(&[], &["task", "add", "A", "--epic", "alpha"]);
+    p.kontext_ok(&["task", "add", "B", "--epic", "beta"]);
+    p.kontext_ok(&["task", "add", "P", "--epic", "payments"]);
+    let got = same_layout_as_plan(&p);
+    let blocked: Vec<&Value> = got["blocked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| &b[0])
+        .collect();
+    assert_eq!(blocked, ["alpha", "beta"]);
+    // Alpha closes: Beta is in wave 1, as in `kontext plan`.
+    close(&p, &a);
+    let got = same_layout_as_plan(&p);
+    assert_eq!(got["closed"], serde_json::json!(["alpha"]));
+    assert_eq!(
+        got["waves"],
+        serde_json::json!([{"n": 1, "epics": ["payments", "beta"]}])
+    );
+    let dir = p.dir.path().join("elsewhere");
+    let out = tree_in(&p, &dir, false);
+    assert!(out.contains("├─ Done\n│  └─ ✓ alpha"), "{out}");
+    assert!(!out.contains("No wave"), "{out}");
+
+    // Core open, Alpha2 after it and closed, Beta2 after Alpha2: wave 1 with Core.
+    let (p, g, _) = with_epic();
+    let epic = |name: &str, after: Option<&str>| {
+        let mut args = vec!["epic", "add", name, "--goal", &g, "--name", name];
+        if let Some(a) = after {
+            args.extend(["--after", a]);
+        }
+        p.kontext_ok(&args);
+    };
+    epic("core", None);
+    epic("alpha", Some("core"));
+    epic("beta", Some("alpha"));
+    p.kontext_ok(&["task", "add", "C", "--epic", "core"]);
+    let a = p.id_of(&[], &["task", "add", "A", "--epic", "alpha"]);
+    p.kontext_ok(&["task", "add", "B", "--epic", "beta"]);
+    p.kontext_ok(&["task", "add", "P", "--epic", "payments"]);
+    close(&p, &a);
+    let got = same_layout_as_plan(&p);
+    assert_eq!(
+        got["waves"],
+        serde_json::json!([{"n": 1, "epics": ["payments", "core", "beta"]}])
+    );
+    assert_eq!(got["closed"], serde_json::json!(["alpha"]));
+}
+
+#[test]
+fn a_feature_that_lost_its_validation_draws_as_started() {
+    let (p, [u1, ..], _) = project();
+    let v: Value = serde_json::from_str(&p.kontext_ok(&["--json", "show", &u1])).unwrap();
+    let task = v["feature"]["tasks"][0].as_str().unwrap().to_string();
+    p.kontext_ok(&["reopen", &task, "--why", "bug"]);
+    let dir = p.dir.path().join("elsewhere");
+    fs::create_dir_all(&dir).unwrap();
+    let v: Value = serde_json::from_str(&tree_in(&p, &dir, true)).unwrap();
+    let f = &v["waves"][0]["epics"][0]["feature_list"][0];
+    assert_eq!(f["id"], u1.as_str());
+    assert_eq!(f["status"], "in progress");
+    assert_eq!(f["progress"], "in_progress");
 }

@@ -1,27 +1,29 @@
 //! `kontext tree`: the whole project on one screen (DESIGN §8).
 //!
 //! ```text
-//! quoro                            3/9 features · wave 2 of 3
+//! quoro                            3/9 features · 2 waves to go
+//! ├─ Done
+//! │  └─ ✓ Foundations              4/4 tasks
 //! ├─ Wave 1
-//! │  └─ ✓ Foundations              4/4
-//! ├─ Wave 2
 //! │  ├─ ◐ Payments                 2/3
 //! │  │   ├─ ✓ Card charge
 //! │  │   ├─ ◐ Refunds              waiting for you
 //! │  │   └─ ○ Invoices
 //! │  └─ ◐ Catalog                  1/2
+//! ├─ Wave 2
+//! │  └─ ○ Integration              0/2
 //! └─ Not placed (2) · 12 of your messages not audited since Nov 12
 //!     ├─ "que el recibo salga en PDF"           Nov 12
 //!     └─ "límite de pedidos abiertos"  (Payments, no feature)
 //! ```
 //!
-//! The waves are those of [`crate::plan`] over every epic in force, closed or
-//! not (with the closed ones left open, so a finished wave keeps its place);
-//! the current wave is the first with an open epic. Closed epics take one
-//! line; open ones expand into their features (an epic without features shows
-//! its tasks' count). Tasks are never listed. "Not placed" comes from
-//! [`crate::ideas`] and is absent without `.pm/items.md`. Read-only: it writes
-//! nothing and advances no cursor.
+//! The waves, their numbers and the epics with no wave (and why) are exactly
+//! those of `kontext plan` ([`crate::plan::of_state`]): only open epics have a
+//! wave. Closed epics go first, one line each, under "Done". Open epics expand
+//! into their features (an epic without features shows its tasks' count).
+//! Tasks are never listed. "Not placed" comes from [`crate::ideas`] and is
+//! absent without `.pm/items.md`. Read-only: it writes nothing and advances no
+//! cursor.
 
 use std::collections::BTreeSet;
 
@@ -29,7 +31,7 @@ use serde::Serialize;
 
 use crate::features::{self, FeatureStatus};
 use crate::ideas::{Ideas, NotPlaced, Unaudited};
-use crate::plan::{self, Node};
+use crate::plan::{self, Node, PlanEpic};
 use crate::state::State;
 use crate::tasks::TaskStatus;
 use crate::views::{field, one_line};
@@ -110,8 +112,9 @@ pub struct Tree {
     /// Features in force across the project (`None`: there are none).
     pub features: Option<Count>,
     pub epics: Count,
-    /// The first wave with an open epic (`None`: none is open).
-    pub current_wave: Option<usize>,
+    /// The closed epics, one line each.
+    pub done: Vec<TreeEpic>,
+    /// The waves of the open epics, as `kontext plan` numbers them.
     pub waves: Vec<TreeWave>,
     /// Epics in force with no wave (a cycle, a missing dependency), each with
     /// its reason.
@@ -129,7 +132,7 @@ fn waiting_features(st: &State, people: &[String]) -> BTreeSet<String> {
         let e = st.get(id)?;
         match e.kind.as_str() {
             "feature" => Some(e.id.clone()),
-            "task" => features::feature_of(e).map(str::to_string),
+            "task" => features::counted_feature(st, e).map(str::to_string),
             _ => None,
         }
     };
@@ -215,57 +218,43 @@ fn epic_node(st: &State, n: &Node, waiting: &BTreeSet<String>) -> TreeEpic {
 /// is a `.pm/items.md`; `people`, the names in `[people]`.
 pub fn build(st: &State, project: &str, people: &[String], ideas: Option<&Ideas>) -> Tree {
     let nodes = plan::nodes(st);
-    // Every epic in force, as if none were closed: a closed epic keeps the
-    // wave it had.
-    let open_all: Vec<Node> = nodes
-        .iter()
-        .map(|n| Node {
-            tasks: 0,
-            closed_tasks: 0,
-            features: 0,
-            done_features: 0,
-            ..n.clone()
-        })
-        .collect();
-    let layout = plan::compute(&open_all);
+    let layout = plan::compute(&nodes);
     let waiting = waiting_features(st, people);
-    let node = |id: &str| nodes.iter().find(|n| n.id == id);
+    let node = |e: &PlanEpic| nodes.iter().find(|n| n.id == e.id);
+    let epics = |list: &[PlanEpic]| -> Vec<TreeEpic> {
+        list.iter()
+            .filter_map(node)
+            .map(|n| epic_node(st, n, &waiting))
+            .collect()
+    };
+    let done = epics(&layout.closed);
     let waves: Vec<TreeWave> = layout
         .waves
         .iter()
         .map(|w| TreeWave {
             n: w.n,
-            epics: w
-                .epics
-                .iter()
-                .filter_map(|e| node(&e.id))
-                .map(|n| epic_node(st, n, &waiting))
-                .collect(),
+            epics: epics(&w.epics),
         })
         .collect();
     let no_wave: Vec<TreeEpic> = layout
         .blocked
         .iter()
         .filter_map(|b| {
-            node(&b.epic.id).map(|n| TreeEpic {
+            node(&b.epic).map(|n| TreeEpic {
                 reason: Some(b.reason.clone()),
                 ..epic_node(st, n, &waiting)
             })
         })
         .collect();
-    let all: Vec<&TreeEpic> = waves
+    let all: Vec<&TreeEpic> = done
         .iter()
-        .flat_map(|w| &w.epics)
+        .chain(waves.iter().flat_map(|w| &w.epics))
         .chain(&no_wave)
         .collect();
     let (fdone, ftotal) = all
         .iter()
         .filter_map(|e| e.features.as_ref())
         .fold((0, 0), |(d, t), c| (d + c.done, t + c.total));
-    let current_wave = waves
-        .iter()
-        .find(|w| w.epics.iter().any(|e| !e.closed))
-        .map(|w| w.n);
     Tree {
         project: project.to_string(),
         features: (ftotal > 0).then_some(Count {
@@ -273,15 +262,15 @@ pub fn build(st: &State, project: &str, people: &[String], ideas: Option<&Ideas>
             total: ftotal,
         }),
         epics: Count {
-            done: all.iter().filter(|e| e.closed).count(),
+            done: done.len(),
             total: all.len(),
         },
-        current_wave,
         not_placed: ideas.map(|i| TreeIdeas {
             count: i.not_placed.len(),
             ideas: i.not_placed.clone(),
             unaudited: i.unaudited.clone(),
         }),
+        done,
         waves,
         no_wave,
     }
@@ -359,16 +348,18 @@ fn header(t: &Tree) -> String {
         Some(c) => parts.push(format!("{}/{} features", c.done, c.total)),
         None => parts.push(format!("{}/{} epics closed", t.epics.done, t.epics.total)),
     }
-    if !t.waves.is_empty() {
-        match t.current_wave {
-            Some(n) => parts.push(format!("wave {n} of {}", t.waves.len())),
-            None if t.no_wave.iter().all(|e| e.closed) => parts.push(format!(
-                "{} {}, all closed",
-                t.waves.len(),
-                if t.waves.len() == 1 { "wave" } else { "waves" }
-            )),
-            None => {}
-        }
+    let n = t.waves.len();
+    if n > 0 {
+        parts.push(format!(
+            "{n} {} to go",
+            if n == 1 { "wave" } else { "waves" }
+        ));
+    }
+    if !t.no_wave.is_empty() {
+        parts.push(format!("{} with no wave", t.no_wave.len()));
+    }
+    if n == 0 && t.no_wave.is_empty() && !t.done.is_empty() {
+        parts.push("all done".to_string());
     }
     parts.join(" · ")
 }
@@ -379,18 +370,23 @@ pub fn text(t: &Tree) -> String {
         left: t.project.clone(),
         right: header(t),
     }];
-    if t.waves.is_empty() && t.no_wave.is_empty() {
+    if t.done.is_empty() && t.waves.is_empty() && t.no_wave.is_empty() {
         lines.push(Line {
             left: "(no epics yet: `kontext epic add \"<title>\" --goal <G>`)".into(),
             right: String::new(),
         });
     }
-    // The groups: each wave, then the epics with no wave, then the ideas.
-    let mut groups: Vec<(String, &[TreeEpic])> = t
-        .waves
-        .iter()
-        .map(|w| (format!("Wave {}", w.n), w.epics.as_slice()))
-        .collect();
+    // The groups: the closed epics, each wave, the epics with no wave, then
+    // the ideas.
+    let mut groups: Vec<(String, &[TreeEpic])> = Vec::new();
+    if !t.done.is_empty() {
+        groups.push(("Done".to_string(), t.done.as_slice()));
+    }
+    groups.extend(
+        t.waves
+            .iter()
+            .map(|w| (format!("Wave {}", w.n), w.epics.as_slice())),
+    );
     if !t.no_wave.is_empty() {
         groups.push(("No wave".to_string(), t.no_wave.as_slice()));
     }
