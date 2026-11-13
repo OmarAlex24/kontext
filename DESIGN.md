@@ -493,8 +493,8 @@ So `install --local` in the main checkout is what reaches every worktree session
 
 | Command | Phase | What it does |
 |---|---|---|
-| `kontext init <name> [--remote <git-url>]` | 1 | Creates a `kontext-home` and registers it in `~/.config/kontext/projects.toml` |
-| `kontext clone <git-url>` | 5 | Brings in an existing `kontext-home` |
+| `kontext init <name> [--remote <git-url> \| --server <url>]` | 1 | Creates a `kontext-home` and registers it in `~/.config/kontext/projects.toml`; with `--server`, also on the kontext server (§14.1) |
+| `kontext clone <git-url>` / `clone --server <url> <project>` | 5 | Brings in an existing `kontext-home`, from git or from its server (with `KONTEXT_TOKEN`) |
 | `kontext install [--dry-run] [--local] [--link-only] [--worktree-role <role>]` | 2 | See 9.3 and 9.7 |
 | `kontext verify` | 1 | Checks the chain of each file and that there are no repeated `id`s with different content. An entry of a kind from a newer version is listed, not a problem (§4.3). It also checks that `writer` matches the file name and that there is no incomplete line at the end. If the last lines are deleted, the chain is still valid: that only shows up against another copy (git) |
 | `kontext reindex` | 1 | Rebuilds the index |
@@ -513,7 +513,8 @@ So `install --local` in the main checkout is what reaches every worktree session
 | `kontext find <topic>` / `--show <path:line>` / `--check` | 4 | Searches the docs of the project's repos, with ranking, synonyms and status in force or historical |
 | `kontext distill --transcript <path>` | 4 | Manual distill |
 | `kontext changelog [--since <ref>]` | 4 | Technical changelog from the closed tasks and the merged PRs (`gh`). Always comes out the same |
-| `kontext sync` | 5 | `git pull --rebase` and `push` of the `kontext-home` |
+| `kontext sync` | 5 | `git pull --rebase` and `push` of the `kontext-home`; with a server, push and pull now, media included |
+| `kontext server connect <url>` | sync server | Attaches an existing project to a kontext server: with the admin secret it creates the project there and uploads all of it; with only a token (`KONTEXT_TOKEN`) it uploads this machine's own lines |
 | `kontext server deploy [--name] [--account-id] [--subdomain] [--replace]` | sync server | Uploads the kontext server to your Cloudflare account (§14.1) and prints its URL; running it again updates it. It refuses a Worker of the same name that kontext did not deploy, unless `--replace` |
 | `kontext token create --role <r> [--epic] [--person] [--ttl] [--writer]` / `list` / `revoke <id>` | sync server | An owner's tokens for the project's server (§14.2): one per machine, person or sandbox, with the variables a sandbox needs |
 | `kontext ui` | 6 | Local read-only page: the tree at `/`, the ledger at `/ledger`, the report at `/report` |
@@ -737,11 +738,21 @@ One thing changes: the model's command is configurable (`[distill].command`) ins
 
 ## 14. Several people
 
-- **Transport:** the `kontext-home` is a git repo. `kontext sync` does pull and push. Since each writer has its own file, merging never conflicts.
+- **Transport:** a kontext server (§14.1), or git: the `kontext-home` is a git repo, and `kontext sync` does pull and push. Since each writer has its own file, merging never conflicts either way.
 - **Identity:** the writer is `<user>@<machine>`. The human name comes from `git config user.email`, mapped through `project.toml`.
 - **Permissions:** only the `owners` can `sign`, `accept`, `reject` and `decide`. An entry of those types written by someone who is not an owner is stored, but doesn't count, and appears as an alert.
 - **Signatures (optional):** with `require_signatures = true`, `sign`, `decide` and `accept` need an SSH signature that can be verified against the keys in `project.toml`.
-- **Later:** `kontext serve` with the same protocol (joining files), for anyone who doesn't want to use git. It is not in these phases.
+- **Without git:** a kontext server that relays the ledger lines (§14.1), with a token per machine, person or sandbox (§14.2).
+
+> **Implemented: the sync server.** A project with `server = "<url>"` in its `[projects.<name>]` of `projects.toml` (or `KONTEXT_SERVER`) syncs through it, and git sync stays as it was for the rest:
+> - **Push and pull.** Every command except `init`, `clone`, `sync`, `server`, `token`, `ui`, `doctor`, `measure` and `hook` pulls before it runs and pushes what it wrote after it, outside the writer's lock and even if the command failed (what it wrote is in the file). Each request has 2.5 s and the whole of it 6 s; after a network failure there is no automatic attempt for 30 s, so offline commands cost nothing. The start hook pulls too (quietly; `hooks.log` says what it did). `kontext sync` does the same with longer timeouts and says what happened.
+> - **What a pull writes.** A line is appended to its writer's file, byte for byte as the server has it, under that writer's lock, only if it continues the local chain (`n`, `prev`) and its hash is right (recomputed here; the server does not). One that does not is never written: it is kept as a fork in `.kontext/server.json`, and `kontext status` shows it. A local file that ends at the same `n` as the server's with another hash (two copies wrote as the same writer) is a fork too, and nothing is pushed for that writer. So the local ledger is always the authority, and the chain verifies on every copy.
+> - **Cursors, config and media.** A copy pushes only its own writer's cursor files (and pulls the rest, keeping the stamp as the file's time). `project.toml` and `synonyms.toml` go up only with `--include-config`, from an owner, on top of the version that copy saw; a pulled version replaces the local file only if it was not changed here, otherwise it waits in `.kontext/server-config/` with a warning. Media go up and down by their hash.
+> - **`kontext status`** shows the server, the last contact or the last error, the own entries not pushed, and the refused line and the forks, if any.
+> - **`kontext ui`** listens to the project's WebSocket and pulls when the frontier changes (never pushes); a thread checks the files every second, and `/api/events` (Server-Sent Events, same Host check and CSP as the rest) tells both pages to read again. The 5-second poll stays as the fallback.
+> - **`kontext server connect`** uploads an existing project with the admin secret, which may push every writer's file and cursors (a token pushes only its own). It is the one place the admin pushes lines; it is batched and resumable, and running it again uploads nothing more.
+> - **§9.5 holds:** what a pull brings is only appended to the ledger files and shows up through the views and the start hook of a new session, as with git; nothing rewrites what a session already received.
+> - **Old binaries** (e2cd98f) read a synced kontext-home: `verify`, `standup` and `status` work, and they ignore `server =` in `projects.toml`.
 
 > **Implemented in phase 5:**
 > - **Identity:** the machine's human name is the person in `[people]` matching the `git config user.email` of the `kontext-home`, or if there is none, the previous one (`git config user.name`). It is used as the default reader for `standup`. If someone writes as `human:<name>` and that email doesn't belong to that person, a warning is shown on stderr; without `[people]` or with `require_signatures`, no warning.

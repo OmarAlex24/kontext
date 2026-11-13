@@ -28,12 +28,12 @@ That leaves the `kontext` binary in `~/.cargo/bin`. Install it either way before
 
 The skill `kontext-migrate` tells an agent how to install kontext in a project and move the memory that already exists into it: a `ctx.py` ledger (the v0 prototype), and the rules and decisions in `CLAUDE.md`, `AGENTS.md`, notes and Claude Code's automatic memory (as proposals that you sign). It asks once about anything it can't work out, and says up front where it is going to write.
 
-To have it in all your sessions before installing anything (the repo is private: it needs `gh auth login`):
+To have it in all your sessions before installing anything:
 
 ```sh
 mkdir -p ~/.claude/skills/kontext-migrate
-gh api repos/OmarAlex24/kontext/contents/templates/skill-kontext-migrate.md \
-  -H "Accept: application/vnd.github.raw" > ~/.claude/skills/kontext-migrate/SKILL.md
+curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/templates/skill-kontext-migrate.md \
+  > ~/.claude/skills/kontext-migrate/SKILL.md
 ```
 
 and ask Claude Code "install kontext in this project". With the binary already installed, `kontext install --skills-only --global` adds (or updates) all the kontext skills in `~/.claude/skills/`, without needing a project. `kontext install` in a repo also installs them.
@@ -209,6 +209,10 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 | `KONTEXT_DISTILL_DISABLE` | If set to anything, the `pre-compact` and `session-end` hooks don't run the distill |
 | `KONTEXT_CAPTURE_DISABLE` | If set to anything, the capture hooks (`user-prompt-submit`, `stop`, `session-end`) write nothing |
 | `KONTEXT_GH_BIN` | Another binary instead of `gh` for `changelog` (tests) |
+| `KONTEXT_SERVER` | The project's kontext server, instead of `server` in `projects.toml` (a sandbox) |
+| `KONTEXT_TOKEN` | A token for the kontext server (`kxt1.…`), instead of the one saved in the config folder; with `KONTEXT_SERVER`, a sandbox sets the project up on its first command |
+| `KONTEXT_ADMIN_SECRET` | The server's admin secret, on a machine other than the one that deployed it (`init --server`, `server connect`) |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | For `kontext server deploy` |
 
 ## Phase 3 commands
 
@@ -479,7 +483,7 @@ PRs come from `gh pr list --repo <owner/repo> --state merged --search "merged:>=
 |---|---|
 | `kontext clone <git-url> [--home <path>] [--name <name>]` | Brings in an existing `kontext-home` (default `~/kontext-home/<repo name>`), registers it in `projects.toml`, sets this machine's writer if none was set, builds the index and prints the charter and the owners |
 | `kontext sync [--include-config]` | Commits your own changes (`ledger/` and `cursors/`, with the message `kontext: <writer> <N> entries`), fetches the others' changes (`fetch` and `rebase`) and pushes (`push -u`). Then it says how many entries arrived from each writer, which new alerts they caused, and whether the chain of what arrived verifies. Without a remote, it only commits |
-| `kontext status` | Project, writer, remote, last sync, own entries not committed and not pushed, index, chains, alerts and signatures. `--json` for the UI |
+| `kontext status` | Project, writer, remote, last sync, own entries not committed and not pushed, index, chains, alerts and signatures; with a kontext server, the server, the last contact or error, own entries not pushed and any line it refused. `--json` for the UI |
 | `kontext doctor` | Checks the installation and says what is wrong and which command fixes it: this binary, the `kontext` on `PATH`, the config and the project, the kontext-home, the hooks in every settings file, the capture, the skills and agent files, and the hook log. Each line is `ok`, a `note` or a `problem` with its fix; exits with 1 if there is any problem. Writes nothing, and works on a broken setup (no `projects.toml`, no project, a missing binary) |
 | `kontext verify` | Besides the chains, checks any signatures there are (and, with `require_signatures`, that the required ones are present). Exits with 1 if any doesn't verify |
 | `--sign` | Global option: signs even if `projects.toml` has no `[signing] key` (uses `~/.ssh/id_ed25519.pub`) |
@@ -573,6 +577,50 @@ python3 -m unittest discover bench/tests      # the harness tests
 **A real run spends tokens** (`run.py` asks for `--yes`). How to run it, what each column measures, and the drift formula, fixed before running: [bench/README.md](./bench/README.md).
 
 ## Working with other people
+
+Two ways to share a project: a **kontext server** (below: every command syncs on its own, sandboxes join with a token, the page updates live), or a **git remote** (`kontext sync` by hand). Either way the `kontext-home` on each machine is the working copy, and it keeps working offline.
+
+### With a kontext server
+
+The server is a Cloudflare Worker that you deploy on your own account (the free plan is enough); it relays ledger lines and never decides anything. Every command pulls before it reads and pushes what it wrote, with short timeouts: offline, commands work on the local copy and what you wrote goes up with the next command that reaches the server.
+
+```sh
+# Once per Cloudflare account. The API token needs the account permission
+# "Workers Scripts: Edit"; the admin secret is kept in servers.json (0600).
+CLOUDFLARE_API_TOKEN=… kontext server deploy          # prints https://kontext.<subdomain>.workers.dev
+
+# A new project on it, or an existing one with all its history
+kontext init billing --server https://kontext.<subdomain>.workers.dev
+kontext server connect https://kontext.<subdomain>.workers.dev
+
+# Someone else, or another machine of yours: the owner makes a token (shown once)
+kontext token create --role owner --person ana
+KONTEXT_TOKEN=kxt1.… kontext clone --server https://kontext.<subdomain>.workers.dev billing
+
+# A sandbox for a coordinator: set the printed variables in its environment;
+# its first kontext command sets the project up there
+kontext token create --role coordinator --epic payments --ttl 8h
+kontext token list
+kontext token revoke tok_…
+```
+
+| Command | What it does |
+|---|---|
+| `kontext server deploy [--name kontext] [--account-id] [--subdomain] [--no-check]` | Uploads the server with the Cloudflare API (no wrangler or Node) and prints its URL; running it again updates it and keeps its admin secret |
+| `kontext init <name> --server <url>` | Creates the project on the server (with the admin secret) and locally, and saves this machine's owner token (0600) |
+| `kontext server connect <url>` | Attaches an existing project and uploads every writer's lines, the cursors, the config and the media; changes nothing local; running it again resumes |
+| `kontext clone --server <url> <project> [--home] [--name]` | Brings a project down with the token in `KONTEXT_TOKEN` |
+| `kontext token create --role <owner\|pm\|coordinator\|implementer\|tester\|scout> [--epic] [--person] [--ttl] [--writer]` | A token bound to a person, a role and its own writer; prints the variables for a sandbox |
+| `kontext token list` / `revoke <id>` | The project's tokens (never their secrets); a revoked one stops at once |
+| `kontext sync [--include-config]` | With a server: pull and push now, and say what arrived, what went up and what was refused (exit 1 if a line was refused or did not continue a chain) |
+| `kontext ui` | Also listens to the server: a change on another machine shows up in a second or two |
+
+- **Who may write what:** each token's role (DESIGN §14.2). A sandbox's coordinator token writes as that epic's coordinator and its workers, never as a human, the pm or another epic's coordinator, and never decisions or signatures. kontext refuses such a line before writing it (exit 2).
+- **Nothing in the repo:** no token, server URL or ledger goes in the code repo. Tokens live in the config folder (0600) or in the environment.
+- **If two copies write as the same writer** (a token used in two places), the server keeps the first and refuses the other's lines; `kontext status` says so, and nothing is overwritten.
+- **Old binaries** read a synced kontext-home as before (the format did not change); they just don't sync it.
+
+### With a git remote
 
 The `kontext-home` is a git repo. Each writer (`<user>@<machine>`) has its own file in `ledger/` and its own cursors in `cursors/<reader>/<writer>.json`, so combining what several machines wrote never conflicts: `kontext sync` only adds files and lines.
 

@@ -32,10 +32,16 @@ Report in a short list: what there is, where it is, and how much (for example "C
 ## 2. Installing the binary, if it is missing
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh
+```
+
+That installs the release binary for macOS (Apple silicon) or Linux (x86_64, arm64; static, so it runs in any container) in `~/.local/bin`, checked against the release's checksums; it needs no Rust. If it says there is no release yet, or the machine is something else, build it:
+
+```sh
 cargo install --git https://github.com/OmarAlex24/kontext --locked
 ```
 
-The repo is public: it needs network access to github.com, not `gh` or git credentials. If there is a local checkout, `cargo install --path <checkout> --locked`. It needs Rust 1.89 or newer (`rustup`). Check with `kontext --version`.
+The repo is public: both need network access to github.com, not `gh` or git credentials. If there is a local checkout, `cargo install --path <checkout> --locked`. It needs Rust 1.89 or newer (`rustup`). Check with `kontext --version`.
 
 If there is no way to install it (no network, no Rust), stop here and tell the human: the rest needs the binary.
 
@@ -46,7 +52,7 @@ With the binary, leave this skill and the others where any session on this machi
 Ask **only once, all together**, only what you cannot work out:
 
 - **The owner** (who signs the charter and the decisions): propose the first name from `git config user.name`, in lowercase.
-- **Where the kontext-home lives** (propose `~/kontext-home/<name>`) and **whether it has a git remote** (to share it with other people or machines; without a remote it also works).
+- **Where the kontext-home lives** (propose `~/kontext-home/<name>`) and **how it is shared with other people, machines or sandboxes**: not at all (it works alone), a **git remote** (`kontext sync` by hand), or a **kontext server** (every command syncs on its own, sandboxes set themselves up with a token, and live updates in `kontext ui`; see "The kontext server" below). Offer the server when there is more than one machine, or agents in sandboxes or cloud threads.
 - **The cutover day**, only if another system is in use (for example `ctx.py`): until that day it keeps being used and is imported again; from that day on, you only write to kontext.
 
 In the same message, lay out the plan: the commands you are going to run and **the paths each one writes to** (`~/.config/kontext/projects.toml`, the kontext-home, `.kontext.toml`, `.claude/settings.json` or, with `--local` (step 5), `.claude/settings.local.json`, `.claude/skills/`, `.claude/agents/`). Wait for the answer.
@@ -62,6 +68,14 @@ In this order.
 ```sh
 kontext init <name> --home <path> [--remote <url>]
 ```
+
+With a kontext server instead of a git remote (it needs the server's admin secret, below):
+
+```sh
+kontext init <name> --home <path> --server <url>
+```
+
+If the project already exists (`kontext status` works), `kontext server connect <url>` attaches it to the server and uploads everything, its history included; it changes nothing local, and running it again resumes.
 
 `init` makes the first name from `git config user.name` the owner. If the owner the human named is someone else, change the `owners = [...]` line in `<home>/project.toml` (say so first: it is a write).
 
@@ -108,6 +122,17 @@ The other way round, the PM's worktree starts as `agent` until it is marked. A f
 
 The capture hook (it writes what the human types to the PM into `.pm/dumps/`) stays off unless the human asks for it. To turn it on, in this order: in the conversation where the human talks to the PM, run `kontext capture here` (it names that conversation, so only it is captured, not a coordinator that shares its folder); run `kontext doctor` there and check that its Capture section says this conversation is named; then set `[capture] enabled = true` in `project.toml` and run `kontext install` again (with the same flags as above).
 
+### The kontext server
+
+Only if the human chose it. Each owner runs their own: a Cloudflare Worker on their account (the free plan is enough).
+
+1. **Deploying** (once per Cloudflare account): the human makes an API token in the Cloudflare dashboard with the account permission **Workers Scripts: Edit**, and runs `kontext server deploy` with it in `CLOUDFLARE_API_TOKEN` (and `CLOUDFLARE_ACCOUNT_ID` if the token sees more than one account; `--subdomain <name>` the first time if the account has no workers.dev subdomain). It prints the server's URL. Do not ask for the Cloudflare token in the chat: the human runs that command, or sets the variable where you run.
+2. The **admin secret** stays in `servers.json` in the kontext config folder (mode 0600) of the machine that deployed; `init --server` and `server connect` use it from there. On another machine, `KONTEXT_ADMIN_SECRET`.
+3. **Other people and machines:** the owner makes each one a token (`kontext token create --role owner --person <name>`; it is shown once) and they run `KONTEXT_TOKEN=<token> kontext clone --server <url> <project>`.
+4. **Sandboxes and cloud threads:** `kontext token create --role coordinator --epic <name>` (or `implementer`, `tester`, `scout`; `--ttl 8h` for a sandbox that ends) prints `KONTEXT_SERVER`, `KONTEXT_PROJECT`, `KONTEXT_TOKEN`, `KONTEXT_ACTOR` and `KONTEXT_ROLE`; set them in the sandbox's environment, and its first kontext command sets the project up there. Each token writes only what its role may (DESIGN §14.2).
+
+**Never put a token, the admin secret, the server URL or the kontext-home in the code repo**, least of all a public one: tokens live in the config folder (0600) or in the environment. `kontext token list` and `kontext token revoke <id>` manage them.
+
 ## 6. Checking
 
 ```sh
@@ -129,7 +154,7 @@ kontext doctor
 End with this, short:
 
 ```
-kontext is installed in <repo> (project <name>, home <path>, remote <url or "no remote">).
+kontext is installed in <repo> (project <name>, home <path>, shared through <git remote url | kontext server url | nothing>).
 
 Migrated:
 - ctx.py: <N> entries imported from <path> (<by type>); verify OK
