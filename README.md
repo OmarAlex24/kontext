@@ -8,13 +8,21 @@ Status: phases 1 (base), 2 (charter, decisions, views, hooks), 3 (epics, tasks a
 
 ## Install
 
-You need Rust 1.89 or newer (`rustup`) and `git`.
+On macOS (Apple silicon) and Linux (x86_64 and arm64), from the latest release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh
+```
+
+It downloads the binary for your machine (static on Linux, so it runs in any container), checks it against the release's `SHA256SUMS`, and puts it in `~/.local/bin` (or `$KONTEXT_INSTALL_DIR`). `KONTEXT_VERSION=v0.2.0` picks a release. You need `git`; Rust and Node are not needed.
+
+From the source instead, with Rust 1.89 or newer (`rustup`):
 
 ```sh
 cargo install --path . --locked
 ```
 
-That leaves the `kontext` binary in `~/.cargo/bin`. Do this before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
+That leaves the `kontext` binary in `~/.cargo/bin`. Install it either way before `kontext install` before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
 
 ### Have an agent install it and migrate the memory
 
@@ -633,6 +641,8 @@ python3 -m unittest discover bench/tests   # the dry-run harness; needs target/d
 ```
 
 CI: `.github/workflows/ci.yml` runs the first three (fmt, clippy with warnings as errors, and the tests) on Linux with Rust 1.98.1, on every pull request whatever its base branch and on every push to `main`. The harness is not part of it.
+
+Releases: `.github/workflows/release.yml` builds `aarch64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (the Linux ones static, checked with `file` and `ldd`), runs `install.sh` against each archive (it must install, and it must refuse a wrong checksum), and on a `v*` tag attaches `kontext-<target>.tar.gz` and `SHA256SUMS` to a GitHub Release. It also builds, without releasing, on a pull request that touches it, `install.sh`, `Cargo.toml` or `Cargo.lock`. To cut one: bump `version` in `Cargo.toml`, merge, then `git tag v0.2.0 && git push origin v0.2.0` on `main`.
 
 The `kontext ui` tests start the server on a free port against the project from `examples/demo.sh` (they need `bash` and `git`). The harness tests don't run from `cargo test`: they are skipped if they can't find the `kontext` binary.
 

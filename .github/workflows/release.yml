@@ -1,0 +1,122 @@
+# Release binaries. On a version tag (v*), it builds macOS arm64 and Linux
+# x86_64 and arm64 (static, musl), checks each with install.sh, and attaches
+# the archives and SHA256SUMS to a GitHub Release. On a pull request that
+# touches this file, install.sh or the dependencies, it builds and checks the
+# same archives without releasing, so a dependency that breaks the static build
+# shows up before a tag does.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - install.sh
+      - Cargo.toml
+      - Cargo.lock
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --target ${{ matrix.target }}
+          rustup default 1.98.1
+          rustc --version
+
+      # musl-gcc for the C in the bundled SQLite (and ring); each Linux runner
+      # builds for its own architecture.
+      - name: musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -yq musl-tools
+
+      - name: cargo build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: The Linux binaries are static
+        if: runner.os == 'Linux'
+        run: |
+          bin=target/${{ matrix.target }}/release/kontext
+          file "$bin"
+          file "$bin" | grep -Eq 'static(-pie)? linked'
+          if ldd "$bin" 2>&1 | grep -q '=>'; then ldd "$bin"; exit 1; fi
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/kontext dist/
+          tar -C dist -czf dist/kontext-${{ matrix.target }}.tar.gz kontext
+          rm dist/kontext
+          cd dist
+          if command -v sha256sum >/dev/null; then sha256sum kontext-*.tar.gz; else shasum -a 256 kontext-*.tar.gz; fi > kontext-${{ matrix.target }}.sha256
+          cat kontext-${{ matrix.target }}.sha256
+
+      # install.sh against this archive: it installs, and it refuses a bad checksum.
+      - name: install.sh
+        run: |
+          cp dist/kontext-${{ matrix.target }}.sha256 dist/SHA256SUMS
+          KONTEXT_DOWNLOAD_BASE="file://$PWD/dist" KONTEXT_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/kontext" --version
+          sed 's/^./0/' dist/SHA256SUMS > dist/bad && mv dist/bad dist/SHA256SUMS
+          if KONTEXT_DOWNLOAD_BASE="file://$PWD/dist" KONTEXT_INSTALL_DIR="$RUNNER_TEMP/bad" sh install.sh; then
+            echo "install.sh accepted a bad checksum"; exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bad/kontext"
+          rm dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kontext-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          cat kontext-*.sha256 > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "kontext $TAG" --generate-notes \
+            kontext-*.tar.gz SHA256SUMS
