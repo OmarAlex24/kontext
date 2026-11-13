@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::model::Entry;
 use crate::state::{State, Status, string_list};
 use crate::tasks::{TaskStatus, epic_name};
 
@@ -114,33 +115,34 @@ pub struct Plan {
 
 /// The epics in the state, in `hlc` order.
 pub fn nodes(st: &State) -> Vec<Node> {
-    st.of_kind("epic")
-        .map(|e| {
-            let tasks = st.tasks_of(&e.id);
-            let (done_features, features, _) = crate::features::counts(st, &e.id);
-            Node {
-                id: e.id.clone(),
-                name: epic_name(e),
-                title: e.title.trim().to_string(),
-                after: string_list(e.fields.get("depends_on")),
-                active: st.status_of(&e.id) == Some(Status::Active),
-                tasks: tasks.len(),
-                closed_tasks: tasks
-                    .iter()
-                    .filter(|t| st.task_status(&t.id) == Some(TaskStatus::Closed))
-                    .count(),
-                features,
-                done_features,
-                open_loose: tasks
-                    .iter()
-                    .filter(|t| {
-                        crate::features::counted_feature(st, t).is_none()
-                            && st.task_status(&t.id) != Some(TaskStatus::Closed)
-                    })
-                    .count(),
-            }
-        })
-        .collect()
+    st.of_kind("epic").map(|e| node(st, e)).collect()
+}
+
+/// One epic, with what the plan needs (its closure is [`Node::closed`]).
+pub fn node(st: &State, e: &Entry) -> Node {
+    let tasks = st.tasks_of(&e.id);
+    let (done_features, features, _) = crate::features::counts(st, &e.id);
+    Node {
+        id: e.id.clone(),
+        name: epic_name(e),
+        title: e.title.trim().to_string(),
+        after: string_list(e.fields.get("depends_on")),
+        active: st.status_of(&e.id) == Some(Status::Active),
+        tasks: tasks.len(),
+        closed_tasks: tasks
+            .iter()
+            .filter(|t| st.task_status(&t.id) == Some(TaskStatus::Closed))
+            .count(),
+        features,
+        done_features,
+        open_loose: tasks
+            .iter()
+            .filter(|t| {
+                crate::features::counted_feature(st, t).is_none()
+                    && st.task_status(&t.id) != Some(TaskStatus::Closed)
+            })
+            .count(),
+    }
 }
 
 /// `kontext plan` over the state.

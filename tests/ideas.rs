@@ -439,3 +439,125 @@ fn mark_audited_outside_a_repo_is_refused() {
     );
     assert!(!dir.join(".pm").exists());
 }
+
+#[test]
+fn mark_audited_writes_where_ideas_reads() {
+    let p = Project::new();
+    let app = pm_repo(&p, "app", "| P1 | csv | dumps/2026-11-07.md:5 | | | |\n");
+    p.add_repo_toml("[[repos]]\nname = \"app\"\n");
+    p.map_repo("app", &app);
+    // Another git repo, with no .pm of its own.
+    let other = p.dir.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    assert_eq!(json_in(&p, &other)["unaudited"]["count"], 1);
+    let out = ideas_in(&p, &other, &["ideas", "--mark-audited"]);
+    assert!(out.contains("1 messages in 1 dumps"), "{out}");
+    assert!(app.join(".pm/audited.json").is_file());
+    assert!(!other.join(".pm").exists());
+    assert_eq!(json_in(&p, &other)["unaudited"]["count"], 0);
+
+    // No items.md anywhere: refused, saying where it looked.
+    fs::remove_file(app.join(".pm/items.md")).unwrap();
+    fs::remove_file(app.join(".pm/audited.json")).unwrap();
+    let out = p
+        .cmd(&["ideas", "--mark-audited"])
+        .current_dir(&other)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("no .pm/items.md"), "{err}");
+    for dir in [&other, &app] {
+        let looked = dir
+            .canonicalize()
+            .unwrap()
+            .join(".pm")
+            .display()
+            .to_string();
+        assert!(err.contains(&looked), "{looked} not in {err}");
+    }
+    assert!(!app.join(".pm/audited.json").exists());
+}
+
+#[test]
+fn only_what_counts_places_an_idea() {
+    let (p, _g, e) = with_epic();
+    // A feature from someone who is not the pm or an owner (only another
+    // machine writes it): stored, not counted.
+    let fields = format!("{{\"epic\":\"{e}\",\"goals\":[]}}");
+    let line = format!(
+        "{{\"kind\":\"feature\",\"title\":\"x\",\"actor\":{{\"type\":\"agent\",\"name\":\"impl-1\",\"role\":\"implementer\"}},\"refs\":[\"{e}\"],\"fields\":{fields}}}\n"
+    );
+    let bad = p.append(&line)[0].clone();
+    // A decision by an agent that is not an owner: does not count either.
+    let d = p.append(
+        "{\"kind\":\"decision\",\"title\":\"Use Conekta\",\"actor\":{\"type\":\"agent\",\"name\":\"impl-1\"},\"fields\":{}}\n",
+    )[0]
+    .clone();
+    // A decision superseded by one in force follows it.
+    let old = p.id_of(&[], &["decide", "Use Stripe", "--why", "3DS"]);
+    p.id_of(
+        &[],
+        &[
+            "decide",
+            "Use Stripe v2",
+            "--why",
+            "3DS2",
+            "--supersedes",
+            &old,
+        ],
+    );
+    let repo = pm_repo(
+        &p,
+        "app",
+        &format!(
+            "| P1 | refunds | | pending | {bad} | |\n\
+             | P2 | conekta | | decided | {d} | |\n\
+             | P3 | stripe | | decided | {old} | |\n"
+        ),
+    );
+    let v = json_in(&p, &repo);
+    let placed: Vec<bool> = v["ideas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["placed"].as_bool().unwrap())
+        .collect();
+    assert_eq!(placed, [false, false, true], "{v}");
+    let note = v["ideas"][0]["notes"][0].as_str().unwrap();
+    assert!(note.contains(&format!("{bad} does not count")), "{note}");
+    let np = v["not_placed"].as_array().unwrap();
+    assert_eq!(np[0]["cites"], format!("feature {bad} not counted"));
+    assert_eq!(np[1]["cites"], format!("decision {d} not counted"));
+}
+
+#[test]
+fn an_epic_with_features_is_done_only_when_plan_closes_it() {
+    let (p, _g, e) = with_epic();
+    let u = p.id_of(&[], &["feature", "add", "Refunds", "--epic", "payments"]);
+    let t = p.id_of(&[], &["task", "add", "Refund endpoint", "--feature", &u]);
+    p.kontext_ok(&["done", &t, "--evidence", "cmd:\"cargo test\"=0"]);
+    let repo = pm_repo(
+        &p,
+        "app",
+        &format!(
+            "| P1 | payments | | pending | {e} | |\n\
+             | P2 | refunds | | pending | {u} | |\n"
+        ),
+    );
+    // Every task closed, the feature not validated: not done.
+    assert_eq!(state_of(&json_in(&p, &repo), "P1"), "in progress");
+    p.kontext_ok(&["done", &u, "--evidence", "url:https://x"]);
+    assert_eq!(state_of(&json_in(&p, &repo), "P1"), "done");
+    // A task without a feature, open: the epic is open again.
+    let loose = p.id_of(&[], &["task", "add", "Loose", "--epic", "payments"]);
+    assert_eq!(state_of(&json_in(&p, &repo), "P1"), "in progress");
+    p.kontext_ok(&["done", &loose, "--evidence", "cmd:\"cargo test\"=0"]);
+    assert_eq!(state_of(&json_in(&p, &repo), "P1"), "done");
+    // A feature whose validation was lost by a reopened task: in progress.
+    p.kontext_ok(&["reopen", &t, "--why", "bug"]);
+    let v = json_in(&p, &repo);
+    assert_eq!(state_of(&v, "P2"), "in progress");
+    assert_eq!(state_of(&v, "P1"), "in progress");
+}

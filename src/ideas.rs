@@ -260,22 +260,30 @@ pub fn pm_dir_of(root: &Path, linked: bool, own_in_worktrees: bool) -> Option<Pa
     crate::git::main_checkout(root).map(|m| m.join(PM_DIR))
 }
 
-/// The `.pm/` folder that has an `items.md`: the one of the git repo the
-/// command runs in ([`pm_dir`]), or else that of the first project repo on
-/// this machine.
-pub fn locate(repos: &Repos, own_in_worktrees: bool) -> Option<PathBuf> {
-    let has = |pm: PathBuf| pm.join("items.md").is_file().then_some(pm);
-    if let Some(pm) = repos
+/// The `.pm/` folders [`locate`] looks in, in order: the one of the git repo
+/// the command runs in ([`pm_dir`]), then those of the project repos on this
+/// machine.
+pub fn candidates(repos: &Repos, own_in_worktrees: bool) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = repos
         .here()
         .and_then(|h| pm_dir(&h.root, own_in_worktrees))
-        .and_then(has)
-    {
-        return Some(pm);
-    }
-    repos
-        .available()
         .into_iter()
-        .find_map(|(_, root)| has(root.join(PM_DIR)))
+        .collect();
+    for (_, root) in repos.available() {
+        let pm = root.join(PM_DIR);
+        if !out.contains(&pm) {
+            out.push(pm);
+        }
+    }
+    out
+}
+
+/// The `.pm/` folder that has an `items.md`: the first of [`candidates`].
+/// `kontext ideas`, `--mark-audited` and `kontext tree` all use it.
+pub fn locate(repos: &Repos, own_in_worktrees: bool) -> Option<PathBuf> {
+    candidates(repos, own_in_worktrees)
+        .into_iter()
+        .find(|pm| pm.join("items.md").is_file())
 }
 
 // ------------------------------------------------------------ table
@@ -589,14 +597,7 @@ fn tasks_state(st: &State, tasks: &[String]) -> IdeaState {
 /// The state of a cited feature (rule d). A superseded one is followed to
 /// its replacement, with a note.
 fn feature_state(st: &State, id: &str, notes: &mut Vec<String>) -> IdeaState {
-    let mut cur = id.to_string();
-    let mut seen = BTreeSet::from([cur.clone()]);
-    while let Some(next) = st.superseded_by.get(&cur) {
-        if !seen.insert(next.clone()) {
-            break;
-        }
-        cur = next.clone();
-    }
+    let cur = replacement(st, id);
     if cur != id {
         notes.push(format!(
             "{id} was superseded by {cur}: its state is {cur}'s"
@@ -625,12 +626,40 @@ fn combine(parts: &[IdeaState]) -> IdeaState {
     }
 }
 
-/// Discarded, or the `where` cites a feature, a task or a decision.
-fn is_placed(state: IdeaState, cited: &[&Entry]) -> bool {
-    state == IdeaState::Discarded
-        || cited
-            .iter()
-            .any(|e| matches!(e.kind.as_str(), "feature" | "task" | "decision"))
+/// Where a superseded entry leads: the last of its replacements.
+fn replacement(st: &State, id: &str) -> String {
+    let mut cur = id.to_string();
+    let mut seen = BTreeSet::from([cur.clone()]);
+    while let Some(next) = st.superseded_by.get(&cur) {
+        if !seen.insert(next.clone()) {
+            break;
+        }
+        cur = next.clone();
+    }
+    cur
+}
+
+/// Does a citation place an idea? A feature, task or decision in force that
+/// counts; a superseded one, if its replacement does.
+fn places(st: &State, e: &Entry) -> bool {
+    let id = replacement(st, &e.id);
+    let Some(x) = st.get(&id) else {
+        return false;
+    };
+    match x.kind.as_str() {
+        "feature" => st.feature(&id).is_some_and(|f| f.status.in_force()),
+        "task" | "decision" => !matches!(
+            st.status_of(&id),
+            Some(Status::Ignored | Status::Superseded | Status::Rejected) | None
+        ),
+        _ => false,
+    }
+}
+
+/// Discarded, or the `where` cites a feature, a task or a decision that
+/// counts ([`places`]).
+fn is_placed(st: &State, state: IdeaState, cited: &[&Entry]) -> bool {
+    state == IdeaState::Discarded || cited.iter().any(|e| places(st, e))
 }
 
 /// What the `where` of an idea that is not placed cites: "Payments, no
@@ -645,6 +674,9 @@ fn cites_text(st: &State, cited: &[&Entry], where_: &str) -> Option<String> {
         .map(|e| match e.kind.as_str() {
             "epic" => format!("{}, no feature", one_line(&e.title, 60)),
             "question" | "proposal" => format!("{} {} {}", e.kind, e.id, status_text(st, e)),
+            "feature" | "task" | "decision" => {
+                format!("{} {} {}", e.kind, e.id, status_text(st, e))
+            }
             k => format!("{k} {}", e.id),
         })
         .collect();
@@ -773,7 +805,7 @@ fn idea(
     }
     let written = normalize(&row.state);
     let (state, from) = derive(st, people, &row, &written, &entries, &evidence, &mut notes);
-    let placed = is_placed(state, &cited);
+    let placed = is_placed(st, state, &cited);
     let cites = if placed {
         None
     } else {
@@ -833,6 +865,19 @@ fn derive(
             "task" => {
                 work = true;
                 tasks.push(e.id.clone());
+            }
+            // An epic with features closes as `kontext plan` closes it; one
+            // without features is decided by its tasks, as before.
+            "epic" if crate::features::has_features(st, &e.id) => {
+                let ts: Vec<String> = st.tasks_of(&e.id).iter().map(|t| t.id.clone()).collect();
+                parts.push(if crate::plan::node(st, e).closed() {
+                    IdeaState::Done
+                } else {
+                    match tasks_state(st, &ts) {
+                        IdeaState::Done => IdeaState::InProgress,
+                        s => s,
+                    }
+                });
             }
             "epic" => {
                 work = true;

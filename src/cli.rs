@@ -2075,7 +2075,7 @@ impl Ctx<'_> {
         let repos = Repos::load(&project, &cwd)?;
         let own = crate::capture::Settings::of(&project).worktrees;
         if mark_audited {
-            return self.mark_audited(&repos, &cwd, own);
+            return self.mark_audited(&repos, own);
         }
         let Some(pm) = crate::ideas::locate(&repos, own) else {
             if self.json {
@@ -2102,14 +2102,22 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// `kontext ideas --mark-audited`: the `.pm/` of the repo it runs in, or
-    /// else the one `kontext ideas` reads.
-    fn mark_audited(&self, repos: &Repos, cwd: &Path, own: bool) -> Result<ExitCode> {
-        let Some(pm) = crate::ideas::pm_dir(cwd, own).or_else(|| crate::ideas::locate(repos, own))
-        else {
-            return Err(Refused(
-                "--mark-audited needs a .pm/: run it in the code repo that has the dumps".into(),
-            )
+    /// `kontext ideas --mark-audited`: in the `.pm/` that `kontext ideas` and
+    /// `kontext tree` read ([`crate::ideas::locate`]).
+    fn mark_audited(&self, repos: &Repos, own: bool) -> Result<ExitCode> {
+        let Some(pm) = crate::ideas::locate(repos, own) else {
+            let looked: Vec<String> = crate::ideas::candidates(repos, own)
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            let looked = if looked.is_empty() {
+                "not in a git repo, and no project repo on this machine".to_string()
+            } else {
+                format!("looked in {}", looked.join(", "))
+            };
+            return Err(Refused(format!(
+                "--mark-audited found no .pm/items.md ({looked}): run it in the code repo that has the PM's memory"
+            ))
             .into());
         };
         let a = crate::ideas::mark_audited(&pm)?;
