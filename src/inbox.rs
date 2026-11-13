@@ -1034,6 +1034,14 @@ fn problemas(st: &State, out: &mut Vec<Draft>) {
                     .collect(),
                 Vec::new(),
             ),
+            Alert::ScopeInvalid { id, reason } => push(
+                format!("scope:{id}"),
+                format!("Scope signature {id} does not count: {reason}"),
+                "what is stored is not what the owner signed; the scope stands on the last \
+                 signature that holds",
+                vec![id.clone()],
+                Vec::new(),
+            ),
             Alert::CharterConflict { active, others } => push(
                 format!("conflict:{active}"),
                 format!("There is more than one signed charter: {active} applies"),

@@ -711,6 +711,41 @@ fn an_idea_on_a_feature_no_signature_covered_is_not_placed_not_discarded() {
 
 
 #[test]
+fn a_scope_signature_that_does_not_count_is_a_problem_for_the_owner() {
+    let t = planned();
+    sign(&t.p);
+    // Its summary_hash is not its summary's.
+    let bad = t
+        .p
+        .append(
+            "{\"kind\":\"scope\",\"title\":\"Plan signed\",\"actor\":{\"type\":\"human\",\"name\":\"omar\"},\"fields\":{\"type\":\"change\",\"covers\":[],\"adds\":[],\"removes\":[],\"summary\":\"x\",\"summary_hash\":\"00\"}}\n",
+        )
+        .remove(0);
+    // Written by an implementer.
+    let x = sha256("x");
+    let imp = t
+        .p
+        .append(&format!(
+            "{{\"kind\":\"scope\",\"title\":\"Plan signed\",\"actor\":{{\"type\":\"agent\",\"name\":\"impl1\",\"role\":\"implementer\"}},\"fields\":{{\"type\":\"change\",\"covers\":[],\"adds\":[],\"removes\":[],\"summary\":\"x\",\"summary_hash\":\"{x}\"}}}}\n"
+        ))
+        .remove(0);
+    let owner: Value =
+        serde_json::from_str(&t.p.kontext_ok(&["--json", "inbox", "--all"])).unwrap();
+    let keys: Vec<&str> = owner["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["key"].as_str().unwrap())
+        .collect();
+    assert!(keys.contains(&format!("scope:{bad}").as_str()), "{keys:?}");
+    assert!(
+        keys.contains(&format!("not-counted:{imp}").as_str()),
+        "{keys:?}"
+    );
+}
+
+
+#[test]
 fn verify_checks_the_summary_hash() {
     let t = planned();
     sign(&t.p);
