@@ -58,24 +58,28 @@ After saving, list back the ideas you took from the message, with the ids you ga
 ```markdown
 | id | idea | source | state | where | evidence |
 |---|---|---|---|---|---|
-| P1 | CSV export of invoices | dumps/2026-11-07.md:14 | in progress | T-4c1 | |
+| P1 | CSV export of invoices | dumps/2026-11-07.md:14 | in progress | U-4c1 | |
 | P2 | drop the old export | dumps/2026-11-07.md:23 | done | T-9a0 | PR #12 |
+| P3 | invoices in PDF | dumps/2026-11-07.md:30 | decided | D-77e | |
 ```
 
-- One row per idea: `id` (`P1`, `P2`…, never reused), the idea in a few words, `source` (`dumps/<file>:<line>`), `state` (pending, in progress, decided, done or discarded; decided: a decision settled it and there is nothing to build), `where` (the kontext task or epic, the decision, the PR or the doc that covers it) and `evidence` (for done: a PR, a commit, a test run or a `shots/` path).
+- One row per idea: `id` (`P1`, `P2`…, never reused), the idea in a few words, `source` (`dumps/<file>:<line>`), `state` (pending, in progress, decided, done or discarded; decided: a decision settled it and there is nothing to build), `where` (the id of the kontext feature, task or decision that covers it; a PR or a doc may follow it) and `evidence` (for done: a PR, a commit, a test run or a `shots/` path).
+- Every row's `where` points to a feature (`U-…`), a task (`T-…`) or a decision (`D-…`), unless the user discarded the idea. An epic, a question or plain text is not enough: `kontext ideas` and `kontext tree` list such a row under "Not placed" until it has one. If the idea is something the human will see working, give it a feature (`kontext feature add "<title>" --epic <name> --acceptance "<what the human sees>"`); if it is a piece of work inside one, a task.
 - `discarded` only when the user says so: cite where in `evidence` (`dumps/<file>:<line>`).
 - When an idea becomes work, create it in kontext as the `kontext-orchestrate` skill says, and write its id under `where`.
 - Do not copy plans, task lists or acceptance criteria into items.md: they live in kontext.
-- `kontext ideas` shows each idea's state as the ledger has it, through the ids in `where`: an open question or a pending proposal is waiting for the user, and tasks or epics are pending, in progress or done by their tasks. Otherwise your `state` stands.
+- `kontext ideas` shows each idea's state as the ledger has it, through the ids in `where`: an open question or a pending proposal is waiting for the user; tasks or epics are pending, in progress or done by their tasks; a feature by its own state. Otherwise your `state` stands. It also lists the rows that are not placed and how many of the user's messages no audit has seen.
 
 ## 5. Coming back: the coverage audit
 
 When the user comes back after time away, or asks where things stand:
 
-1. **Do not read the dumps yourself**: that is the point, your context stays small. Launch the `kontext-pm-reader` subagent (in Claude Code, the `Agent` tool with `subagent_type` `kontext-pm-reader`) and give it the text under "Audit task" below, word for word. It answers with JSON: `ideas` (every idea it found) and `missing` (those not in items.md), each with `quote`, `file` and `line`.
+1. **Do not read the dumps yourself**: that is the point, your context stays small. Run `kontext ideas --mark-audited` right before you launch the reader (it records which messages this audit covers, so the next `kontext ideas` counts only the newer ones). Then launch the `kontext-pm-reader` subagent (in Claude Code, the `Agent` tool with `subagent_type` `kontext-pm-reader`) and give it the text under "Audit task" below, word for word. It answers with JSON: `ideas` (every idea it found) and `missing` (those not in items.md), each with `quote`, `file` and `line`.
 2. **Verify each idea in `missing`** before you believe it: one targeted Grep of items.md (and of the places its rows point to) for that idea, and one Grep of the cited file for a piece of the quote. Drop the ones that are covered: on real data the reader flags an idea that items.md has in other words, and now and then a quote is not verbatim.
-3. **Add the confirmed ones** to items.md as pending, with the reader's citation as their source (`dumps/<file>:<line>`, without the `.pm/` in front).
-4. **Show the user where things stand**, following the `kontext-show` skill for how to show it (do not repeat its rules here). The `.pm` part, each with its evidence: done; in progress; waiting for the user; pending; and newly found missing (the ones from step 3). `kontext ideas` gives the states from the ledger.
+3. **Add the confirmed ones** to items.md as pending, with the reader's citation as their source (`dumps/<file>:<line>`, without the `.pm/` in front), and give each a `where` (section 4) as soon as it has a feature, task or decision.
+4. **Show the user where things stand**, following the `kontext-show` skill for how to show it (do not repeat its rules here). The ideas newly found in step 3 show under "Not placed" in `kontext tree` until they have a `where`.
+
+When the user asks "how are we doing?", answer with the output of `kontext tree` in a code block and at most two sentences of your own (what changed, what you need from them).
 
 If `kontext-pm-reader` is not among your agents (`kontext install` installs it; `kontext install --skills-only` brings only the skills), say so and ask the user before reading the dumps yourself.
 

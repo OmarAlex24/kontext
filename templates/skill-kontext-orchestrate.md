@@ -47,16 +47,19 @@ Count like this: one coordinator per epic; as many implementers as tasks ready a
 
 ## 3. Waves
 
-**Phase 0, no code (XXL).** With the user, in the conversation: the charter (`kontext charter`), the goals (`kontext goal add`), and the architecture decisions (`kontext decide`). The user signs them (`kontext sign`); you only use `--approved-by` once they have approved them in the conversation. Then, the epic map:
+**Phase 0, no code (XXL).** With the user, in the conversation: the charter (`kontext charter`), the goals (`kontext goal add`), and the architecture decisions (`kontext decide`). The user signs them (`kontext sign`); you only use `--approved-by` once they have approved them in the conversation. Then, the epic map, with the features of each epic: what the human will see working, each with its acceptance written as what they see:
 
 ```sh
 kontext epic add "Foundations" --goal <G> --name foundations
 kontext epic add "Payments" --goal <G> --name payments --after foundations
+kontext feature add "Card charge" --epic payments --acceptance "<what the human sees>"
+kontext feature add "Refunds" --epic payments --acceptance "the owner refunds an order from the admin and the customer gets the money back"
 kontext epic add "Integration" --goal <G> --name integration --after payments --after catalog
 kontext plan            # exits with 1 if there is a cycle or an epic that does not exist: fix it before going on
+kontext tree            # the map as the user will see it: waves, epics and features
 ```
 
-`--after` accepts an epic that does not exist yet, so the map can be written in any order.
+`--after` accepts an epic that does not exist yet, so the map can be written in any order. Tasks hang from features (`kontext task add "<title>" --feature <U> --acceptance "<how it is checked>"`); an epic with features closes when all of them are done. Only the pm or an owner adds features.
 
 **Mockup, if there is an interface.** Before any code, make an HTML mockup of the main screens from the charter (a single file, no dependencies), take a screenshot of it, and show it to the user (skill `kontext-show`). Adjust until they say yes. Then register it as the reference, with its signature:
 
@@ -73,7 +76,7 @@ The coordinators build against that reference (it appears in "How it looks" in t
 
 **Within a wave**, the coordinators do not talk to the user: they escalate with `kontext ask --to pm`. You answer what the charter or a decision answers (`kontext answer`), and bundle the rest for the boundary. Only interrupt the user if the whole wave is blocked. If the user has unanswered pending items (`kontext inbox count`), do not add more: the wave keeps going with whatever does not depend on them.
 
-**At every wave boundary:** `kontext plan` (what closed and what comes next), the report with the `kontext-show` skill (status paragraph, what is waiting for them, problems, and screenshots), their answers to what you bundled (`kontext inbox`, `kontext answer`, signed decisions), and their go-ahead for the next wave.
+**At every wave boundary:** `kontext plan` (what closed and what comes next) and `kontext tree`, the report with the `kontext-show` skill (status paragraph, what is waiting for them, problems, and screenshots), their answers to what you bundled (`kontext inbox`, `kontext answer`, signed decisions), and their go-ahead for the next wave.
 
 In XL there is no phase 0 if the charter is already signed: start from the epic map.
 

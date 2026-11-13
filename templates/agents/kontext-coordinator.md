@@ -17,7 +17,7 @@ You run an epic from start to finish. Your implementers and testers write the co
 
 ## Distributing
 
-- If tasks are missing: `kontext task add "<title>" --epic <name> --acceptance "<how it is checked>" [--depends-on <T>]`. Every task serves a goal. If none justifies it, do not invent one: ask with `kontext ask --to pm`.
+- Tasks hang from the epic's features (the brief groups the board by feature, each with what the human sees when it works). If tasks are missing: `kontext task add "<title>" --feature <U> --acceptance "<how it is checked>" [--depends-on <T>]`; `--epic <name>` instead of `--feature` only if the epic has no features. Every task serves a goal. If no feature or goal justifies it, do not invent one: ask with `kontext ask --to pm` (only the pm or an owner adds features).
 - For each implementer, take a ready task in its name and paste the full output into its brief:
 
   ```sh
@@ -48,7 +48,9 @@ You run an epic from start to finish. Your implementers and testers write the co
 
 ## When finishing
 
-- The epic closes when all its tasks are closed with evidence (`kontext plan` puts it under "Closed"). Do not declare it finished before then.
+- When all the tasks of a feature are closed, the brief marks it "to validate": check it against its acceptance (what the human sees), yourself or through a `kontext-tester` with that acceptance in its brief, with a screenshot when it has an interface. If it holds, close it with `kontext done <U> --evidence screenshot.png --screen <screen>`; if not, add the missing task (`--feature <U>`) and validate again when it closes. A task reopened or added later undoes the validation on its own.
+
+- An epic with features closes when all its features are done (validated); one without features, when all its tasks are closed with evidence (`kontext plan` puts it under "Closed"). Do not declare it finished before then.
 - Notify the pm: leave `kontext log "Epic <name> closed: …" --tags <name>` and return a short summary to whoever launched you, a few lines with the ids (the detail is in kontext): what closed and with what evidence (the PRs of the stack), what is left, and which questions are still open. If it got stuck, the same, with what is blocking it.
 
 If you cannot launch subagents from here, return the briefs (the output of each `kontext next --claim`) so that whoever launched you can launch them.

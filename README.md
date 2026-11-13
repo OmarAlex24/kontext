@@ -319,10 +319,10 @@ The agent files follow the wave protocol: the coordinator doesn't talk to the us
 Over days of work you say many things to the session that coordinates (the PM), some in passing, many as short answers to its questions. The skill `kontext-pm` keeps them so none is silently lost, in a `.pm/` folder at the root of the repo:
 
 - `dumps/<date>.md`: what you said, verbatim and append-only (a long day goes on in `<date>-2.md`, `-3`…, so each file can be read whole). An answer is saved with the questions it answers, or the proposal it replies to (`**Coordinator asked:**`), so "2. merge it yourself" or "go" still means something a week later. Secrets become `[secret removed]`; nothing else is changed.
-- `items.md`: one row per idea, with where it went (the kontext task, decision, PR or doc) and its evidence. It points at the work; the plans and tasks stay in kontext.
+- `items.md`: one row per idea, with where it went (the kontext feature, task or decision; a row without one shows as "Not placed" in `kontext ideas` and `kontext tree`) and its evidence. It points at the work; the plans and tasks stay in kontext.
 - `status.md`: where things stand, short. `shots/`: screenshots used as evidence.
 
-Only the PM writes it (and the capture hook below, if it is on), and after each message it lists back the ideas it took and asks whether it missed one. When you come back, or ask where things stand, it runs a coverage audit without reading the dumps itself: the `kontext-pm-reader` subagent (Haiku, read-only) lists every idea in the dumps and reports those missing from `items.md`; the PM checks each one before adding it, and shows you what is done, in progress, waiting for you, pending and newly found. In a public repo it asks before committing `.pm/` (or gitignores it).
+Only the PM writes it (and the capture hook below, if it is on), and after each message it lists back the ideas it took and asks whether it missed one. When you come back, or ask where things stand, it runs `kontext ideas --mark-audited` and then a coverage audit without reading the dumps itself: the `kontext-pm-reader` subagent (Haiku, read-only) lists every idea in the dumps and reports those missing from `items.md`; the PM checks each one before adding it, and shows you what is done, in progress, waiting for you, pending and newly found. In a public repo it asks before committing `.pm/` (or gitignores it).
 
 ### Capture: your messages without the agent remembering them
 
