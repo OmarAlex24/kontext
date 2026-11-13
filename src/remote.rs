@@ -844,6 +844,9 @@ fn pull_all(
 ) -> Result<()> {
     let tails = state.server_tails.clone();
     let seq = f.get("seq").and_then(Value::as_u64).unwrap_or(0);
+    // The tokens' claims first: no line is written under an older registry
+    // than the server's (DESIGN §14.2).
+    ensure_registry(home, conn, f.get("registry"))?;
     let mut local = local_frontier(home)?;
     let behind = tails
         .iter()
@@ -871,6 +874,25 @@ fn pull_all(
     if opts.media {
         pull_media(home, conn, state, report, started, opts)?;
     }
+    Ok(())
+}
+
+/// Brings the server's token registry (`GET registry`: claims only, never a
+/// secret) into `.kontext/tokens.json` if the server's `version` is newer
+/// than the saved one. A failure fails the pull, so no line is applied under
+/// an older registry.
+fn ensure_registry(home: &Path, conn: &Conn, version: Option<&Value>) -> Result<()> {
+    let want = version.and_then(Value::as_u64).unwrap_or(0);
+    if want <= crate::state::Registry::load(home).version {
+        return Ok(());
+    }
+    let v = Conn::ok(conn.get("registry")?, "registry")?;
+    let reg: crate::state::Registry = serde_json::from_value(v).context("the server's registry")?;
+    let path = crate::state::Registry::path(home);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    write_atomic(&path, serde_json::to_string_pretty(&reg)?.as_bytes())?;
     Ok(())
 }
 
@@ -929,6 +951,7 @@ fn pull_lines(
         if lines.is_empty() {
             return Ok(());
         }
+        ensure_registry(home, conn, v.get("registry"))?;
         let (got, forks) = apply_lines(home, &lines)?;
         for (w, n) in got {
             *report.received.entry(w).or_default() += n;
@@ -1799,6 +1822,13 @@ pub fn identity_problem(token: &Token, e: &Entry) -> Option<String> {
                 "this token coordinates as {as_list}, not as agent:{name}"
             ));
         }
+        // Handing out a task is the coordinator's own act: as itself, with its role.
+        if kind == "assign" && (arole != Some("coordinator") || !mine.iter().any(|m| m == name)) {
+            return Some(format!(
+                "a coordinator token assigns only as {as_list} with role coordinator, not as agent:{name}{}",
+                arole.map(|r| format!(" ({r})")).unwrap_or_default()
+            ));
+        }
         if name.starts_with("epic:") && !mine.iter().any(|m| m == name) {
             return Some(format!(
                 "agent:{name} is another epic's coordinator; this token coordinates as {as_list}"
@@ -2613,6 +2643,27 @@ mod tests {
                 "assign",
                 false,
                 true,
+            ),
+            (
+                "coordinator",
+                agent("pay-lead", None),
+                "assign",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("impl-1", Some("implementer")),
+                "assign",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("lead-pay", None),
+                "assign",
+                false,
+                false,
             ),
             (
                 "coordinator",

@@ -340,9 +340,20 @@ pub struct FeatureArgs {
     pub tags: Vec<String>,
 }
 
-/// The rule for adding or superseding a feature: the pm or an owner.
+/// The rule for adding or superseding a feature: the pm or an owner. For a
+/// line this copy is about to write.
 pub fn may_write(st: &State, actor: &Actor) -> std::result::Result<(), String> {
-    if st.policy.manages(actor, None) {
+    feature_rule(st.policy.manages(actor, None), actor)
+}
+
+/// The same rule for a line in the ledger, under the token it was written
+/// with (DESIGN §14.2).
+pub fn may_write_line(st: &State, e: &Entry) -> std::result::Result<(), String> {
+    feature_rule(st.policy.manages_line(e, None), &e.actor)
+}
+
+fn feature_rule(ok: bool, actor: &Actor) -> std::result::Result<(), String> {
+    if ok {
         Ok(())
     } else {
         Err(format!(
@@ -440,6 +451,9 @@ pub fn check_validate(st: &State, actor: &Actor, a: &DoneArgs) -> Result<String>
         ));
     }
     let epic = st.get(&id).and_then(|f| st.epic_of(f));
+    if let Some(why) = st.policy.own_limit(actor, epic) {
+        return refused(format!("{id} is not validated: {why}"));
+    }
     if !st.policy.manages(actor, epic) {
         return refused(format!(
             "only the coordinator of its epic, the pm or an owner can validate {id} ({} is none of them)",

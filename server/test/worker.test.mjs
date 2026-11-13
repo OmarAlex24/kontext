@@ -287,6 +287,9 @@ test("each role writes only as what it is (DESIGN §14.2)", async () => {
     ["pm", { type: "human", name: "omar" }, "journal", undefined, false],
     ["coordinator", agent("epic:payments", "coordinator"), "task", undefined, true],
     ["coordinator", agent("pay-lead", "coordinator"), "assign", undefined, true],
+    ["coordinator", agent("pay-lead"), "assign", undefined, false],
+    ["coordinator", agent("impl-1", "implementer"), "assign", undefined, false],
+    ["coordinator", agent("lead-pay"), "assign", undefined, false],
     ["coordinator", agent("impl-1", "implementer"), "claim", undefined, true],
     ["coordinator", agent("distill"), "proposal", undefined, true],
     ["coordinator", agent("epic:other", "coordinator"), "task", undefined, false],
@@ -368,4 +371,40 @@ test("tokens: list, revoke, expire, and a revoked writer can get a new token", a
   // A coordinator token needs its epic and names.
   r = await call("POST", `/v1/p/${p.name}/tokens`, { token: p.token, body: { person: "ana", role: "coordinator", writer: "c@kontext" } });
   assert.equal(r.status, 400);
+});
+
+test("registry: every token's claims for any token, never a secret, with where each one starts", async () => {
+  const p = await project();
+  let r = await call("GET", `/v1/p/${p.name}/frontier`, { token: p.token });
+  const v0 = r.data.registry;
+  assert.ok(v0 >= 1, JSON.stringify(r.data));
+  // Two lines from w-a under no token of its own yet; its token starts at 3.
+  const a = await mint(p, { person: "ana", role: "owner", writer: "w-a@kontext" });
+  const lines = chain("w-a@kontext", 2, { actor: { type: "agent", name: "x" } });
+  r = await call("POST", `/v1/p/${p.name}/push`, { token: a.token, body: { writer: "w-a@kontext", lines: lines.map((l) => l.line) } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  r = await call("POST", `/v1/p/${p.name}/tokens/${a.id}/revoke`, { token: p.token });
+  assert.equal(r.status, 200);
+  const c = await mint(p, { person: "ana", role: "coordinator", writer: "w-a@kontext", epic: "E-123456", actors: ["epic:pay"] });
+  const imp = await mint(p, { person: "bo", role: "implementer", writer: "w-i@kontext" });
+  r = await call("GET", `/v1/p/${p.name}/registry`, { token: imp.token });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.ok(r.data.version >= v0 + 4, JSON.stringify(r.data));
+  const text = JSON.stringify(r.data);
+  for (const secret of [p.token, a.token, c.token, imp.token, a.id, c.id, "created_by", "hash"]) {
+    assert.ok(!text.includes(secret), `the registry has ${secret}`);
+  }
+  const wa = r.data.writers["w-a@kontext"];
+  assert.deepEqual(wa.map((g) => [g.role, g.first_n, !!g.revoked]), [["owner", 1, true], ["coordinator", 3, false]]);
+  assert.ok(wa[0].ord < wa[1].ord);
+  assert.deepEqual(wa[1].actors, ["epic:pay"]);
+  assert.equal(wa[1].epic, "E-123456");
+  // The frontier and every pull answer say the version.
+  r = await call("GET", `/v1/p/${p.name}/frontier`, { token: imp.token });
+  const v1 = r.data.registry;
+  r = await call("POST", `/v1/p/${p.name}/pull`, { token: imp.token, body: { since: {} } });
+  assert.equal(r.data.registry, v1);
+  // An unknown token gets nothing.
+  r = await call("GET", `/v1/p/${p.name}/registry`, { token: "kxt1.e30.nope" });
+  assert.equal(r.status, 401);
 });

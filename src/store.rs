@@ -105,7 +105,22 @@ impl Store {
     pub fn open(home: &Path, writer: &str) -> Result<Store> {
         validate_writer(writer)?;
         let index = Index::open(home)?;
-        let policy = Policy::load(home)?;
+        let mut policy = Policy::load(home)?;
+        let server = crate::remote::server_for_home(home).is_some();
+        let token = crate::remote::token_for_home(home, writer);
+        // Only with a server: a project without one behaves as before,
+        // whatever is in its internal folder (DESIGN §14.2).
+        if server {
+            policy.registry = Some(crate::state::Registry::load(home));
+            policy.own = token.as_ref().and_then(|t| {
+                Some(crate::state::Grant {
+                    role: t.role.clone()?,
+                    epic: t.epic.clone(),
+                    actors: t.actors.clone(),
+                    ..Default::default()
+                })
+            });
+        }
         let people = if home.join("project.toml").exists() {
             Project::load(home)?.people
         } else {
@@ -118,8 +133,8 @@ impl Store {
             policy,
             signer: None,
             people,
-            server: crate::remote::server_for_home(home).is_some(),
-            token: crate::remote::token_for_home(home, writer),
+            server,
+            token,
         })
     }
 

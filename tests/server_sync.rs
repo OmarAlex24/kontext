@@ -1292,6 +1292,7 @@ struct Sandbox {
     _dir: tempfile::TempDir,
     config: PathBuf,
     env: Vec<(String, String)>,
+    writer: String,
 }
 
 impl Sandbox {
@@ -1311,6 +1312,7 @@ impl Sandbox {
             _dir: dir,
             config,
             env,
+            writer: minted["writer"].as_str().unwrap().to_string(),
         }
     }
 
@@ -1353,6 +1355,32 @@ impl Sandbox {
 
     fn ledger_bytes(&self, writer: &str) -> Vec<u8> {
         fs::read(self.home().join("ledger").join(format!("{writer}.jsonl"))).unwrap_or_default()
+    }
+
+    /// Runs `args` as a copy without a server (its `server` line taken out of
+    /// projects.toml for the command): nothing is checked against the token
+    /// and nothing is pushed. The next command pushes what it wrote.
+    fn offline_ok(&self, args: &[&str]) -> String {
+        let path = self.config.join("projects.toml");
+        let saved = fs::read_to_string(&path).unwrap();
+        // Still as the token's writer, which only a server gives otherwise.
+        let writer = &self.writer;
+        let cut: String = format!("writer = {writer:?}\n")
+            + &saved
+                .lines()
+                .filter(|l| !l.starts_with("server = ") && !l.starts_with("writer = "))
+                .map(|l| format!("{l}\n"))
+                .collect::<String>();
+        assert_ne!(cut, saved);
+        fs::write(&path, cut).unwrap();
+        let out = self.run(args);
+        fs::write(&path, saved).unwrap();
+        assert!(
+            out.status.success(),
+            "[sandbox offline] kontext {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
     }
 }
 
@@ -1658,4 +1686,229 @@ fn a_scout_sandbox_records_a_stale_fact_again() {
         })
         .collect();
     assert_eq!(kinds, ["fact", "fact", "supersede"]);
+}
+
+/// The reviewer's sequence: with an epic whose coordinator has a custom name
+/// (`lead-pay`), a coordinator token of another epic, or an implementer
+/// token, wrote as `agent:lead-pay` and its lines counted as that epic's
+/// coordinator's. Now the binary refuses them (exit 2), the server refuses
+/// what the claims alone decide (a coordinator token's `assign`), and a line
+/// that still reaches the server (written without the checks) does not count
+/// in any copy, with an alert. The coordinator token of the epic itself, and
+/// its subagents, still count.
+#[test]
+fn a_token_never_counts_as_another_epics_coordinator() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar"]);
+    let b = net.machine("b", "ana@b", "ana");
+    net.join(&a, &b);
+    let id = |out: String| -> String {
+        serde_json::from_str::<Value>(&out).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let c = id(a.ok(&["--json", "charter", "--objective", "Charge by card"]));
+    a.ok(&["sign", &c]);
+    let g = id(a.ok(&["--json", "goal", "add", "Recurring charge"]));
+    a.ok(&["sign", &g]);
+    a.ok(&[
+        "epic",
+        "add",
+        "Card payments",
+        "--goal",
+        &g,
+        "--name",
+        "payments",
+        "--coordinator",
+        "lead-pay",
+    ]);
+    a.ok(&["epic", "add", "Other work", "--goal", &g, "--name", "other"]);
+    let task = |m: &Machine, title: &str| {
+        id(m.ok(&["--json", "task", "add", title, "--epic", "payments"]))
+    };
+    let t1 = task(&a, "Charge the card");
+    let t2 = task(&a, "Refund the card");
+    a.ok(&["assign", &t1, "--to", "agent:impl-1"]);
+
+    // As in the reviewer's sequence, without KONTEXT_ROLE: the actor says
+    // only its name.
+    let mut other = Sandbox::new(&mint(&a, &["--role", "coordinator", "--epic", "other"]));
+    other.env.retain(|(k, _)| k != "KONTEXT_ROLE");
+    let imp = Sandbox::new(&mint(&a, &["--role", "implementer", "--epic", "payments"]));
+    let pay = Sandbox::new(&mint(&a, &["--role", "coordinator", "--epic", "payments"]));
+    for s in [&other, &imp, &pay] {
+        s.ok(&["status"]);
+    }
+
+    // The reviewer's commands: refused before anything is written.
+    let as_lead = ["--actor", "agent:lead-pay"];
+    let refused = |s: &Sandbox, args: &[&str]| {
+        let mut all = as_lead.to_vec();
+        all.extend_from_slice(args);
+        let out = s.run(&all);
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(2), "{all:?}: {err}");
+        err
+    };
+    let err = refused(&other, &["assign", &t1, "--to", "agent:impl-9"]);
+    assert!(err.contains("coordinator token of"), "{err}");
+    let err = refused(&other, &["release", &t1]);
+    assert!(err.contains("coordinator token of"), "{err}");
+    let err = refused(&imp, &["release", &t1]);
+    assert!(err.contains("implementer token"), "{err}");
+
+    // Written without the checks (an old binary, a copy offline): the server
+    // takes a release, which the claims alone do not decide, and refuses the
+    // coordinator token's assign.
+    let mut forged = as_lead.to_vec();
+    forged.extend_from_slice(&["release", &t1]);
+    imp.offline_ok(&forged);
+    imp.ok(&["sync"]);
+    other.offline_ok(&forged);
+    other.ok(&["sync"]);
+    let mut assign = as_lead.to_vec();
+    assign.extend_from_slice(&["assign", &t2, "--to", "agent:impl-9"]);
+    other.offline_ok(&assign);
+    let out = other.run(&["sync"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("assigns only as epic:other"), "{text}");
+
+    // Both releases reached the owner and B, and in neither do they count.
+    a.ok(&["sync"]);
+    b.ok(&["sync"]);
+    for m in [&a, &b] {
+        let show = m.ok(&["show", &t1]);
+        assert!(show.contains("agent:impl-1"), "{show}");
+        assert_eq!(show.matches("does not count").count(), 2, "{show}");
+        assert!(show.contains("implementer token"), "{show}");
+        assert!(show.contains("coordinator token of"), "{show}");
+        let next = m.ok(&["--json", "next", "--epic", "payments"]);
+        assert!(!next.contains(&t1), "{t1} was released: {next}");
+    }
+
+    // The epic's own coordinator token: its assign counts, and so do its
+    // subagents' lines.
+    pay.ok(&[
+        "--actor",
+        "agent:lead-pay",
+        "--role",
+        "coordinator",
+        "assign",
+        &t2,
+        "--to",
+        "agent:impl-2",
+    ]);
+    pay.ok(&[
+        "--actor",
+        "agent:impl-2",
+        "--role",
+        "implementer",
+        "log",
+        "starting",
+        "--task",
+        &t2,
+    ]);
+    pay.ok(&[
+        "--actor",
+        "agent:lead-pay",
+        "--role",
+        "coordinator",
+        "release",
+        &t1,
+    ]);
+    a.ok(&["sync"]);
+    let show = a.ok(&["show", &t2]);
+    assert!(show.contains("assigned to agent:impl-2"), "{show}");
+    assert!(!show.contains("does not count"), "{show}");
+    let show = a.ok(&["show", &t1]);
+    assert!(
+        show.contains("released (it was held by agent:impl-1)"),
+        "{show}"
+    );
+}
+
+/// What a project wrote without a server counts the same after it connects,
+/// and after one of its writers later gets a token of another role: a token
+/// governs only the lines its writer writes from the moment it is made.
+#[test]
+fn connecting_and_new_tokens_change_nothing_already_written() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    let out = a.ok(&["init", "demo", "--home", a.home.to_str().unwrap()]);
+    assert!(out.contains("Project demo created"), "{out}");
+    set_owners(&a.home, &["omar"]);
+    plan(&a);
+    let t = serde_json::from_str::<Value>(&a.ok(&[
+        "--json",
+        "task",
+        "add",
+        "Charge the card",
+        "--epic",
+        "payments",
+    ]))
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A coordinator by name, without a role, as the binary has always taken.
+    a.ok(&[
+        "--actor",
+        "agent:epic:payments",
+        "assign",
+        &t,
+        "--to",
+        "agent:impl-1",
+    ]);
+    let before = a.ok(&["show", &t]);
+    assert!(before.contains("assigned to agent:impl-1"), "{before}");
+
+    a.ok_env(
+        &[("KONTEXT_ADMIN_SECRET", ADMIN)],
+        &["server", "connect", net.url()],
+    );
+    assert_eq!(a.ok(&["show", &t]), before);
+
+    // The owner's writer gets a coordinator token of another epic: what it
+    // wrote stays as it was.
+    let list = a.ok(&["--json", "token", "list"]);
+    let mine = serde_json::from_str::<Value>(&list).unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    a.ok(&["token", "revoke", &mine]);
+    let r = post(
+        &format!("{}/v1/p/demo/tokens", net.url()),
+        ADMIN,
+        &json!({ "person": "omar", "role": "implementer", "writer": "omar@a" }),
+    );
+    assert_eq!(r.0, 201, "{}", r.1);
+    fs::write(
+        a.config.join("tokens/demo.token"),
+        r.1["token"].as_str().unwrap(),
+    )
+    .unwrap();
+    a.ok(&["sync"]);
+    assert_eq!(a.ok(&["show", &t]), before);
+    let b = net.machine("b", "ana@b", "ana");
+    let tok = post(
+        &format!("{}/v1/p/demo/tokens", net.url()),
+        ADMIN,
+        &json!({ "person": "ana", "role": "owner", "writer": "ana@b" }),
+    );
+    let out = b.ok_env(
+        &[("KONTEXT_TOKEN", tok.1["token"].as_str().unwrap())],
+        &[
+            "clone",
+            "--server",
+            net.url(),
+            "demo",
+            "--home",
+            b.home.to_str().unwrap(),
+        ],
+    );
+    assert!(out.contains("Project demo cloned"), "{out}");
+    assert_eq!(b.ok(&["show", &t]), before);
 }

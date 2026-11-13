@@ -161,6 +161,10 @@ function actorAllowed(p, e) {
     if (role === "coordinator" && !mine.includes(name)) {
       return `this token coordinates as ${mine.join(" or ")}, not as agent:${name}`;
     }
+    // Handing out a task is the coordinator's own act: as itself, with its role.
+    if (kind === "assign" && (role !== "coordinator" || !mine.includes(name))) {
+      return `a coordinator token assigns only as ${mine.join(" or ")} with role coordinator, not as agent:${name}${role ? ` (${role})` : ""}`;
+    }
     if (name.startsWith("epic:") && !mine.includes(name)) {
       return `agent:${name} is another epic's coordinator; this token coordinates as ${mine.join(" or ")}`;
     }
@@ -257,7 +261,7 @@ export class Project extends DurableObject {
         PRIMARY KEY(name, i)) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT NOT NULL, person TEXT NOT NULL,
         role TEXT NOT NULL, epic TEXT, actors TEXT, writer TEXT NOT NULL, created TEXT NOT NULL, expires INTEGER,
-        revoked TEXT, created_by TEXT) WITHOUT ROWID;
+        revoked TEXT, created_by TEXT, first_n INTEGER NOT NULL DEFAULT 1, ord INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
     `);
   }
 
@@ -304,7 +308,26 @@ export class Project extends DurableObject {
   }
 
   frontier() {
-    return { seq: this.seq(), tails: this.tails(), config: this.configVersions() };
+    return { seq: this.seq(), tails: this.tails(), config: this.configVersions(), registry: this.registryVersion() };
+  }
+
+  /// Bumped whenever a token is made or revoked: clients fetch the registry
+  /// again when it moves (DESIGN §14.2).
+  registryVersion() {
+    return Number(this.meta("registry") || 0);
+  }
+
+  /// The claims of every token, by writer, in the order they were made: what
+  /// each writer's lines may count as. Never an id, a hash or who made it.
+  registry() {
+    const writers = {};
+    for (const t of this.sql.exec("SELECT * FROM tokens ORDER BY ord, id").toArray()) {
+      (writers[t.writer] ||= []).push({
+        person: t.person, role: t.role, epic: t.epic || null, actors: parseActors(t.actors),
+        first_n: t.first_n, ord: t.ord, expires: t.expires || null, revoked: t.revoked || null,
+      });
+    }
+    return { version: this.registryVersion(), writers };
   }
 
   notify() {
@@ -354,11 +377,17 @@ export class Project extends DurableObject {
     const token = mintToken(project, spec);
     const id = "tok_" + b64url(crypto.getRandomValues(new Uint8Array(6)));
     const hash = await sha256Hex(token);
+    // The token governs its writer's lines from the next one on: those below
+    // are on the server already, written under an earlier token or none.
+    const firstN = this.tail(spec.writer).n + 1;
+    const ord = Number(this.meta("token_ord") || 0) + 1;
+    this.setMeta("token_ord", ord);
     this.sql.exec(
-      "INSERT INTO tokens(id, hash, person, role, epic, actors, writer, created, expires, revoked, created_by) VALUES(?,?,?,?,?,?,?,?,?,NULL,?)",
+      "INSERT INTO tokens(id, hash, person, role, epic, actors, writer, created, expires, revoked, created_by, first_n, ord) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?)",
       id, hash, spec.person, spec.role, spec.epic, spec.actors.length ? JSON.stringify(spec.actors) : null,
-      spec.writer, new Date().toISOString(), spec.expires, spec.createdBy,
+      spec.writer, new Date().toISOString(), spec.expires, spec.createdBy, firstN, ord,
     );
+    this.setMeta("registry", this.registryVersion() + 1);
     return {
       token, id, person: spec.person, role: spec.role, epic: spec.epic, actors: spec.actors, writer: spec.writer,
       expires: spec.expires,
@@ -427,6 +456,7 @@ export class Project extends DurableObject {
       });
     }
     if (parts[0] === "frontier" && m === "GET") return json(this.frontier());
+    if (parts[0] === "registry" && m === "GET") return json(this.registry());
     if (parts[0] === "push" && m === "POST") return this.push(req, p);
     if (parts[0] === "pull" && m === "POST") return this.pull(req);
     if (parts[0] === "cursors" && m === "GET") return this.getCursors(url);
@@ -610,7 +640,7 @@ export class Project extends DurableObject {
         bytes += size;
       }
     }
-    return json({ lines, more, seq: this.seq(), tails });
+    return json({ lines, more, seq: this.seq(), tails, registry: this.registryVersion() });
   }
 
   getCursors(url) {
@@ -777,6 +807,7 @@ export class Project extends DurableObject {
       if (!rows.length) throw new HttpError(404, "no_token", `there is no token ${parts[1]}`);
       if (!rows[0].revoked) {
         this.sql.exec("UPDATE tokens SET revoked = ? WHERE id = ?", new Date().toISOString(), parts[1]);
+        this.setMeta("registry", this.registryVersion() + 1);
       }
       const t = this.sql.exec("SELECT * FROM tokens WHERE id = ?", parts[1]).toArray()[0];
       return json({ token: tokenRow(t) });
