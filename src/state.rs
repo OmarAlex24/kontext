@@ -564,7 +564,9 @@ impl State {
             ..State::default()
         };
         for e in all {
-            if st.entries.contains_key(&e.id) {
+            // A kind from a newer version: `kontext verify` lists it, and it
+            // does not count here.
+            if st.entries.contains_key(&e.id) || crate::model::prefix_for(&e.kind).is_none() {
                 continue;
             }
             st.apply(&e);

@@ -47,7 +47,7 @@ KONTEXT_CONFIG_DIR=/tmp/kontext-demo/config KONTEXT_ACTOR=human:omar target/debu
 | Command | What it does |
 |---|---|
 | `kontext init <name> [--home <path>] [--remote <git-url>]` | Creates a `kontext-home` (default `~/kontext-home/<name>`) with `git init`, `project.toml`, `ledger/`, `cursors/` and `.gitignore`, and registers it in `~/.config/kontext/projects.toml` |
-| `kontext verify` | Checks the chain of each ledger file: `n` in sequence, `prev`, `hash` and `id`. Prints `OK: …` or the first problem in each file as `ledger/<writer>.jsonl:<line>: …`, and exits with 1 if there are problems |
+| `kontext verify` | Checks the chain of each ledger file: `n` in sequence, `prev`, `hash` and `id`. Prints `OK: …` or the first problem in each file as `ledger/<writer>.jsonl:<line>: …`, and exits with 1 if there are problems. An entry of a kind from a newer kontext is listed ("… is from a newer kontext version (kind scope): upgrade to read it") but is not a problem; it counts for nothing until you upgrade |
 | `kontext reindex` | Rebuilds `.kontext/index.sqlite` from the ledger files |
 | `kontext import --from-v0 <path> [--force]` | Imports the ledger of the v0 `ctx.py` prototype (`<path>/ledger/entries.jsonl`) into this writer's file. It can be run more than once: it doesn't duplicate anything |
 
@@ -232,7 +232,7 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 
 An epic can have **features** (`U-…`): what you would see working ("Refunds"), with `--acceptance` saying what that is. Tasks hang from them (`task add --feature`). A feature is `pending` (no task started), `in progress` (a task started, reopened, or a validation lost), `to validate` (all its tasks closed), `done` (its coordinator, the pm or an owner checked it against its acceptance with `kontext done <U>`) or `superseded`. If a task is reopened or added after the validation, the feature goes back to in progress on its own, with a note. An epic with features is closed in `kontext plan` when all its features are done and its tasks without a feature are closed; the open tasks of a superseded feature don't keep it open, but each one shows an alert until it is closed or its work moves to a feature in force. A task counts toward its feature only in the feature's own epic. An epic without features works exactly as before. `brief` groups the board by feature, `next` says which feature the task is for, and the pm's line per epic says "2/3 features done, 1 to validate".
 
-**Upgrade every machine first.** A binary from before features reports the ledger's chain as broken as soon as it holds a `feature` entry (`kontext verify` doesn't know the kind) and doesn't count validations. Install the new binary on every machine of the project before anyone runs `kontext feature add`.
+**Upgrade every machine first.** A binary from before features reports the ledger's chain as broken as soon as it holds a `feature` entry (`kontext verify` doesn't know the kind) and doesn't count validations. Install the new binary on every machine of the project before anyone runs `kontext feature add`. From this version on, a kind added later (such as `scope`) no longer breaks the chain: `verify` and `doctor` list those entries and say to upgrade.
 
 ### What each reader sees
 

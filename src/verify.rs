@@ -4,6 +4,12 @@
 //! Per file: `n` runs from 1, `prev` equals the `hash` of the previous line,
 //! `hash` and `id` are recomputed, `writer` equals the file name, and no line is
 //! left half-written at the end. The first problem of each file is reported.
+//!
+//! An entry of a kind this version does not know (written by a newer kontext)
+//! is checked like the rest, except that its `id` only has to be
+//! `<uppercase letters>-<6 hex>` with the hex taken from its content: its
+//! prefix can't be checked. It is not a problem: it goes in
+//! [`Report::newer`], and the state leaves it out.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,7 +20,9 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::hlc::Hlc;
-use crate::model::{FORMAT_VERSION, GENESIS, compute_hash, compute_id, content_digest};
+use crate::model::{
+    FORMAT_VERSION, GENESIS, compute_hash, compute_id, content_digest, is_valid_id, prefix_for,
+};
 use crate::store::ledger_files;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -42,6 +50,10 @@ pub struct Report {
     pub media_problems: Vec<Problem>,
     /// How many cited images were checked.
     pub media: usize,
+    /// Entries of a kind this version does not know (from a newer kontext):
+    /// their chain and hash are fine, they are not a problem, and the state
+    /// leaves them out.
+    pub newer: Vec<Problem>,
 }
 
 impl Report {
@@ -103,7 +115,14 @@ fn run_inner(home: &Path, media: bool) -> Result<Report> {
     for (writer, path) in &files {
         let rel = relative(home, path);
         let bytes = fs::read(path)?;
-        if let Err(p) = check_file(writer, &rel, &bytes, &mut ids, &mut report.entries) {
+        if let Err(p) = check_file(
+            writer,
+            &rel,
+            &bytes,
+            &mut ids,
+            &mut report.entries,
+            &mut report.newer,
+        ) {
             report.problems.push(p);
         }
         if media {
@@ -146,6 +165,7 @@ fn check_file(
     bytes: &[u8],
     ids: &mut HashMap<String, Seen>,
     count: &mut usize,
+    newer: &mut Vec<Problem>,
 ) -> Result<(), Problem> {
     let problem = |line: usize, message: String| Problem {
         file: file.to_string(),
@@ -208,7 +228,31 @@ fn check_file(
                 "the hash does not match the content (the line was edited)".into(),
             ));
         }
-        let id = compute_id(&v).map_err(|e| problem(line, e.to_string()))?;
+        let digest = content_digest(&v);
+        let kind = get_str("kind");
+        let id = if prefix_for(kind).is_some() {
+            compute_id(&v).map_err(|e| problem(line, e.to_string()))?
+        } else {
+            // A kind from a newer version: the prefix is whatever it says, the
+            // hex part still comes from the content.
+            let id = get_str("id");
+            let hex = id.split_once('-').map(|(_, h)| h).unwrap_or_default();
+            if !is_valid_id(id) || hex != &digest[..6] {
+                return Err(problem(
+                    line,
+                    format!(
+                        "the id {id:?} of an entry of kind {kind:?} does not match its content \
+                         (it should be <PREFIX>-{})",
+                        &digest[..6]
+                    ),
+                ));
+            }
+            newer.push(problem(
+                line,
+                format!("{id} is from a newer kontext version (kind {kind}): upgrade to read it"),
+            ));
+            id.to_string()
+        };
         if get_str("id") != id {
             return Err(problem(
                 line,
@@ -221,7 +265,6 @@ fn check_file(
         if let Err(e) = get_str("hlc").parse::<Hlc>() {
             return Err(problem(line, e.to_string()));
         }
-        let digest = content_digest(&v);
         if let Some(seen) = ids.get(&id) {
             let what = if seen.digest == digest {
                 "repeated entry"
@@ -381,6 +424,64 @@ mod tests {
         let mut idx = crate::index::Index::open(dir.path()).unwrap();
         idx.rebuild().unwrap();
         assert_eq!(idx.count().unwrap(), 3);
+    }
+
+    /// A line of kind `kind` with id prefix `prefix` after `prev_line`, with
+    /// its chain and hash right (what a newer kontext would write).
+    fn newer_line(prev_line: &str, kind: &str, prefix: &str) -> String {
+        let last: Value = serde_json::from_str(prev_line).unwrap();
+        let mut v = serde_json::json!({
+            "v": 1, "writer": "omar@mac", "n": last["n"].as_u64().unwrap() + 1,
+            "prev": last["hash"], "hlc": "2026-11-20T10:00:00.000Z.0000",
+            "actor": {"type": "human", "name": "omar"}, "kind": kind,
+            "title": "Checkout scope", "body": "", "why": "", "tags": [], "refs": [],
+            "fields": {"epic": "x"}, "sig": null,
+        });
+        v["id"] = format!("{prefix}-{}", &content_digest(&v)[..6]).into();
+        v["hash"] = compute_hash(&v).into();
+        crate::model::canonical(&v)
+    }
+
+    #[test]
+    fn an_entry_from_a_newer_version_is_listed_not_a_problem() {
+        let (dir, p) = ledger();
+        let mut ls = lines(&p);
+        ls.push(newer_line(ls.last().unwrap(), "scope", "S"));
+        write_lines(&p, &ls);
+        let r = run(dir.path()).unwrap();
+        assert!(r.ok(), "{:?}", r.problems);
+        assert_eq!(r.entries, 5);
+        assert_eq!(r.newer.len(), 1);
+        let n = r.newer[0].to_string();
+        assert!(n.starts_with("ledger/omar@mac.jsonl:5: S-"), "{n}");
+        assert!(
+            n.ends_with("is from a newer kontext version (kind scope): upgrade to read it"),
+            "{n}"
+        );
+        // Its id still has to be `<UPPERCASE>-<6 hex>` with the hex from its
+        // content (the hash stays right, so only the id is wrong).
+        let lowercase = newer_line(&ls[3], "scope", "s");
+        let mut v: Value = serde_json::from_str(&ls[4]).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        let flipped = if id.ends_with('0') { '1' } else { '0' };
+        v["id"] = format!("{}{flipped}", &id[..id.len() - 1]).into();
+        v["hash"] = compute_hash(&v).into();
+        for bad in [lowercase, crate::model::canonical(&v)] {
+            let mut ls = ls.clone();
+            ls[4] = bad;
+            write_lines(&p, &ls);
+            let pr = first_problem(dir.path());
+            assert_eq!(pr.line, 5);
+            assert!(
+                pr.message.contains("of kind \"scope\" does not match"),
+                "{pr}"
+            );
+        }
+        // A known kind with another prefix is still wrong.
+        let mut ls = ls.clone();
+        ls[4] = newer_line(&ls[3], "fact", "S");
+        write_lines(&p, &ls);
+        assert!(first_problem(dir.path()).message.contains("should be F-"));
     }
 
     #[test]

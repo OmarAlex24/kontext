@@ -1494,7 +1494,12 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             let mut store = Store::open(&p.home, &p.writer)?;
             let sigs = store.check_signatures()?;
             let bad: Vec<_> = sigs.iter().filter(|(_, v)| !v.is_valid()).collect();
-            for pr in report.problems.iter().chain(&report.media_problems) {
+            for pr in report
+                .problems
+                .iter()
+                .chain(&report.media_problems)
+                .chain(&report.newer)
+            {
                 println!("{pr}");
             }
             for (e, v) in &bad {

@@ -572,3 +572,77 @@ fn a_feature_that_lost_its_validation_is_in_progress() {
     task_in(&p, "Receipt", &u);
     assert_eq!(fstatus(&p, &u), "in progress");
 }
+
+/// A line of kind `scope` (a kind of a newer version) for `writer`, after
+/// `prev` (`None`: the first line of the file), with its chain and hash right.
+fn scope_line(writer: &str, prev: Option<&Value>) -> (String, String) {
+    use kontext::model::{GENESIS, canonical, compute_hash, content_digest};
+    let (n, prev) = match prev {
+        Some(l) => (l["n"].as_u64().unwrap() + 1, l["hash"].clone()),
+        None => (1, GENESIS.into()),
+    };
+    let mut v = serde_json::json!({
+        "v": 1, "writer": writer, "n": n, "prev": prev,
+        "hlc": "2026-11-20T10:00:00.000Z.0000",
+        "actor": {"type": "human", "name": "omar"}, "kind": "scope",
+        "title": "Checkout scope", "body": "", "why": "", "tags": [], "refs": [],
+        "fields": {}, "sig": null,
+    });
+    let id = format!("S-{}", &content_digest(&v)[..6]);
+    v["id"] = id.clone().into();
+    v["hash"] = compute_hash(&v).into();
+    (id, canonical(&v) + "\n")
+}
+
+#[test]
+fn an_entry_kind_from_a_newer_version_is_listed_and_left_out() {
+    use std::io::Write;
+    let (p, _, _) = with_epic();
+    let before = p.state()["entries"].as_u64().unwrap();
+    // One in this writer's file, one in another machine's.
+    let last = p.entries("omar@test").last().cloned().unwrap();
+    let (mine, line) = scope_line("omar@test", Some(&last));
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(p.ledger("omar@test"))
+        .unwrap()
+        .write_all(line.as_bytes())
+        .unwrap();
+    let (theirs, line) = scope_line("zoe@mac", None);
+    std::fs::write(p.ledger("zoe@mac"), line).unwrap();
+    // Writing on top of it works, and the state leaves both out.
+    p.kontext_ok(&["task", "add", "After", "--epic", "payments"]);
+    assert_eq!(p.state()["entries"].as_u64().unwrap(), before + 1);
+
+    let out = p.kontext(&["verify"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    for id in [&mine, &theirs] {
+        let line = format!("{id} is from a newer kontext version (kind scope): upgrade to read it");
+        assert_eq!(text.matches(&line).count(), 1, "{text}");
+    }
+    let doctor = String::from_utf8_lossy(&p.kontext(&["doctor"]).stdout).to_string();
+    for id in [&mine, &theirs] {
+        assert_eq!(
+            doctor
+                .matches(&format!(
+                    "{id} is from a newer kontext version (kind scope)"
+                ))
+                .count(),
+            1,
+            "{doctor}"
+        );
+    }
+    assert!(doctor.contains("chains: OK"), "{doctor}");
+    let resume = p.kontext_ok(&["resume", "--as", "pm", "--peek"]);
+    assert!(!resume.contains("CHAIN BROKEN"), "{resume}");
+    let standup = p.kontext_ok(&["standup", "--peek"]);
+    assert!(!standup.contains(&mine), "{standup}");
+    // Writing an unknown kind is still refused.
+    let out = p
+        .spawn_append(&p.config, "{\"kind\":\"scope\",\"title\":\"x\"}\n", 0)
+        .wait_with_output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown entry kind"));
+}
