@@ -50,7 +50,7 @@ You run an epic from start to finish. Your implementers and testers write the co
 
 - When all the tasks of a feature are closed, the brief marks it "to validate": check it against its acceptance (what the human sees), yourself or through a `kontext-tester` with that acceptance in its brief, with a screenshot when it has an interface. If it holds, close it with `kontext done <U> --evidence screenshot.png --screen <screen>`; if not, add the missing task (`--feature <U>`) and validate again when it closes. A task reopened or added later undoes the validation on its own.
 
-- An epic with features closes when all its features are done (validated); one without features, when all its tasks are closed with evidence (`kontext plan` puts it under "Closed"). Do not declare it finished before then.
+- An epic with features closes when all its features are done (validated) and its tasks without a feature are closed; an open task of a superseded feature does not hold it but raises an alert until you close it or move its work to a feature in force. One without features, when all its tasks are closed with evidence (`kontext plan` puts it under "Closed"). Do not declare it finished before then.
 - Notify the pm: leave `kontext log "Epic <name> closed: …" --tags <name>` and return a short summary to whoever launched you, a few lines with the ids (the detail is in kontext): what closed and with what evidence (the PRs of the stack), what is left, and which questions are still open. If it got stuck, the same, with what is blocking it.
 
 If you cannot launch subagents from here, return the briefs (the output of each `kontext next --claim`) so that whoever launched you can launch them.

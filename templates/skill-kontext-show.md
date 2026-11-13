@@ -18,7 +18,7 @@ The human also loses the thread. Rule: **if they have not answered, they have no
 
 ## How, depending on where you run
 
-1. First `kontext tree`, pasted as it is in a code block: the waves, the epics and their features, what waits for them, and their ideas that are not placed yet.
+1. First `kontext tree`, pasted as it is in a code block: the closed epics under "Done", the waves still to go (the same as `kontext plan`), the open epics and their features, what waits for them, and their ideas that are not placed yet.
 2. Then the status paragraph (below), logged with `kontext log --status "…"`.
 3. Then, with the first option you have:
 
