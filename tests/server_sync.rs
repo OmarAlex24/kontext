@@ -2105,3 +2105,70 @@ fn the_sandbox_variables_never_take_over_a_registered_project() {
     assert!(trap.accept().is_err(), "a token went to KONTEXT_SERVER");
     assert_eq!(a.server_tail(&net), a.lines("omar@a").len() as u64);
 }
+
+/// A socket bound to a token that is revoked is closed at once, and one whose
+/// token expired is closed at the next change instead of hearing it: they
+/// went on receiving the frontier before.
+#[test]
+fn a_revoked_or_expired_tokens_socket_is_closed() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar"]);
+    let mint_raw = |writer: &str, ttl: Option<u64>| {
+        let mut body = json!({ "person": "ana", "role": "implementer", "writer": writer });
+        if let Some(t) = ttl {
+            body["ttl_ms"] = json!(t);
+        }
+        let r = post(
+            &format!("{}/v1/p/demo/tokens", net.url()),
+            &a.token(),
+            &body,
+        );
+        assert_eq!(r.0, 201, "{}", r.1);
+        (
+            r.1["id"].as_str().unwrap().to_string(),
+            r.1["token"].as_str().unwrap().to_string(),
+        )
+    };
+    // Watches with `raw` until the server closes the socket; says how many
+    // frontiers it heard.
+    let watch = |raw: String| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let remote = kontext::remote::Remote {
+            url: net.url().to_string(),
+            token: kontext::config::Token::parse(&raw).unwrap(),
+        };
+        std::thread::spawn(move || {
+            let mut heard = 0;
+            let r = kontext::remote::watch(&remote, |_| {
+                heard += 1;
+                true
+            });
+            let _ = tx.send((heard, r.is_ok()));
+        });
+        rx
+    };
+
+    let (id, raw) = mint_raw("w-r@kontext", None);
+    let revoked = watch(raw);
+    std::thread::sleep(Duration::from_millis(500));
+    let r = post(
+        &format!("{}/v1/p/demo/tokens/{id}/revoke", net.url()),
+        &a.token(),
+        &json!({}),
+    );
+    assert_eq!(r.0, 200, "{}", r.1);
+    let (heard, _) = revoked
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the revoked token's socket stayed open");
+    assert_eq!(heard, 1);
+
+    let (_, raw) = mint_raw("w-x@kontext", Some(600));
+    let expired = watch(raw);
+    std::thread::sleep(Duration::from_millis(900));
+    a.ok(&["log", "a change after the token expired"]);
+    let (heard, _) = expired
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the expired token's socket stayed open");
+    assert_eq!(heard, 1, "the expired token heard the change");
+}

@@ -333,11 +333,41 @@ export class Project extends DurableObject {
   notify() {
     const msg = JSON.stringify({ type: "frontier", ...this.frontier() });
     for (const ws of this.ctx.getWebSockets()) {
+      if (!this.socketMayListen(ws)) continue;
       try {
         ws.send(msg);
       } catch {
         // A socket that is closing; the client reconnects and pulls.
       }
+    }
+  }
+
+  /// A socket keeps hearing the frontier only while its token is valid: the
+  /// token is checked again (from the socket's attachment, which survives
+  /// hibernation) before each send, and a socket whose token was revoked or
+  /// expired is closed instead.
+  socketMayListen(ws) {
+    let a = null;
+    try {
+      a = ws.deserializeAttachment();
+    } catch {
+      a = null;
+    }
+    let ok = false;
+    if (a && a.admin) ok = true;
+    else if (a && a.id) {
+      const rows = this.sql.exec("SELECT revoked, expires FROM tokens WHERE id = ?", a.id).toArray();
+      ok = rows.length === 1 && !rows[0].revoked && !(rows[0].expires && Date.now() > rows[0].expires);
+    }
+    if (!ok) this.closeSocket(ws, "the token was revoked or expired");
+    return ok;
+  }
+
+  closeSocket(ws, why) {
+    try {
+      ws.close(4001, why);
+    } catch {
+      // Already closed.
     }
   }
 
@@ -448,7 +478,7 @@ export class Project extends DurableObject {
     if (parts[0] === "create" && m === "POST") return this.create(req, p, project);
     this.requireProject();
 
-    if (parts[0] === "ws") return this.websocket(req);
+    if (parts[0] === "ws") return this.websocket(req, p);
     if (parts[0] === "whoami" && m === "GET") {
       return json({
         project, role: p.role, person: p.person, epic: p.epic, actors: p.actors || [], writer: p.writer, admin: p.admin,
@@ -488,15 +518,18 @@ export class Project extends DurableObject {
     return json({ project, ...t }, 201);
   }
 
-  websocket(req) {
+  websocket(req, p) {
     if ((req.headers.get("upgrade") || "").toLowerCase() !== "websocket") {
       throw new HttpError(426, "upgrade_required", "this route is a WebSocket");
     }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     // Hibernatable: the object can be evicted while the socket stays open, and
-    // no duration is billed while it is idle.
-    this.ctx.acceptWebSocket(server);
+    // no duration is billed while it is idle. Tagged with its token, so a
+    // revoke closes it at once; the token's id goes in the attachment, which
+    // survives hibernation, and is checked before every send.
+    this.ctx.acceptWebSocket(server, [p.admin ? "admin" : `tok:${p.id}`]);
+    server.serializeAttachment(p.admin ? { admin: true } : { id: p.id });
     server.send(JSON.stringify({ type: "frontier", ...this.frontier() }));
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -504,7 +537,7 @@ export class Project extends DurableObject {
   webSocketMessage(ws, message) {
     // Clients only listen; "ping" gets the frontier back (a way to check the
     // connection without waiting for a change).
-    if (message === "ping") ws.send(JSON.stringify({ type: "frontier", ...this.frontier() }));
+    if (message === "ping" && this.socketMayListen(ws)) ws.send(JSON.stringify({ type: "frontier", ...this.frontier() }));
   }
 
   webSocketClose(ws, code) {
@@ -809,6 +842,7 @@ export class Project extends DurableObject {
         this.sql.exec("UPDATE tokens SET revoked = ? WHERE id = ?", new Date().toISOString(), parts[1]);
         this.setMeta("registry", this.registryVersion() + 1);
       }
+      for (const ws of this.ctx.getWebSockets(`tok:${parts[1]}`)) this.closeSocket(ws, "the token was revoked");
       const t = this.sql.exec("SELECT * FROM tokens WHERE id = ?", parts[1]).toArray()[0];
       return json({ token: tokenRow(t) });
     }

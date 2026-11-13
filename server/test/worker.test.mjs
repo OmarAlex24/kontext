@@ -408,3 +408,68 @@ test("registry: every token's claims for any token, never a secret, with where e
   r = await call("GET", `/v1/p/${p.name}/registry`, { token: "kxt1.e30.nope" });
   assert.equal(r.status, 401);
 });
+
+/// A socket and what it heard: frontiers, and how it was closed.
+async function listen(p, token) {
+  const res = await mf.dispatchFetch(`http://localhost/v1/p/${p.name}/ws`, {
+    headers: { upgrade: "websocket", authorization: `Bearer ${token}` },
+  });
+  assert.equal(res.status, 101);
+  const ws = res.webSocket;
+  const s = { ws, frontiers: [], closed: null };
+  let wake = () => {};
+  s.wait = (cond, what = "", ms = 3000) =>
+    new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`timed out waiting for ${what}: ${JSON.stringify({ n: s.frontiers.length, closed: s.closed })}`)), ms);
+      const check = () => {
+        if (cond()) {
+          clearTimeout(t);
+          resolve();
+        } else wake = check;
+      };
+      check();
+    });
+  ws.addEventListener("message", (ev) => {
+    s.frontiers.push(JSON.parse(ev.data));
+    wake();
+  });
+  ws.addEventListener("close", (ev) => {
+    s.closed = ev.code;
+    wake();
+  });
+  ws.accept();
+  await s.wait(() => s.frontiers.length === 1);
+  return s;
+}
+
+test("a revoked or expired token's socket hears nothing more", async () => {
+  // Closing is tested over TCP in tests/server_sync.rs: through
+  // dispatchFetch, Miniflare hands a server-side close to the client only
+  // when it is disposed.
+  const p = await project();
+  const owner = await listen(p, p.token);
+  const r = await mint(p, { person: "ana", role: "implementer", writer: "w-r@kontext" });
+  const x = await mint(p, { person: "bo", role: "implementer", writer: "w-x@kontext", ttl_ms: 300 });
+  const revoked = await listen(p, r.token);
+  const expiring = await listen(p, x.token);
+  let res = await call("POST", `/v1/p/${p.name}/tokens/${r.id}/revoke`, { token: p.token });
+  assert.equal(res.status, 200);
+  await new Promise((done) => setTimeout(done, 400));
+  // A change: the owner hears it, the revoked and the expired token do not,
+  // and a ping from them gets nothing either.
+  res = await call("POST", `/v1/p/${p.name}/push`, { token: p.token, body: { writer: p.writer, lines: chain(p.writer, 1).map((l) => l.line) } });
+  assert.equal(res.status, 200);
+  await owner.wait(() => owner.frontiers.length === 2, "the owner's frontier");
+  for (const s of [revoked, expiring]) {
+    try {
+      s.ws.send("ping");
+    } catch {
+      // Already closing.
+    }
+  }
+  owner.ws.send("ping");
+  await owner.wait(() => owner.frontiers.length === 3, "the owner's ping");
+  assert.equal(revoked.frontiers.length, 1, "the revoked token heard more");
+  assert.equal(expiring.frontiers.length, 1, "the expired token heard more");
+  owner.ws.close();
+});
