@@ -195,6 +195,9 @@ pub enum Alert {
     /// Phase 5: a pending proposal that says it supersedes a decision in force
     /// (`fields.supersedes`). It shows until it is accepted or rejected.
     ProposalSupersedes { proposal: String, decision: String },
+    /// An open task of a superseded feature: it no longer keeps its epic open,
+    /// so the work would be lost unless it is closed or moved.
+    SupersededFeatureTask { task: String, feature: String },
     /// Phase 4: a fact whose fingerprint no longer matches `HEAD` (it is not
     /// written; [`crate::facts::annotate`] adds it when reading).
     FactStale {
@@ -231,6 +234,7 @@ impl Alert {
             Alert::BadSignature { id, .. } => vec![id],
             Alert::ClaimLost { task, record, .. } => vec![task, record],
             Alert::ProposalSupersedes { proposal, decision } => vec![proposal, decision],
+            Alert::SupersededFeatureTask { task, feature } => vec![task, feature],
         }
     }
 
@@ -250,6 +254,7 @@ impl Alert {
                     | Alert::FactStale { .. }
                     | Alert::ClaimLost { .. }
                     | Alert::ProposalSupersedes { .. }
+                    | Alert::SupersededFeatureTask { .. }
             )
     }
 
@@ -335,6 +340,10 @@ impl fmt::Display for Alert {
             Alert::ProposalSupersedes { proposal, decision } => write!(
                 f,
                 "{proposal} proposes to supersede {decision}, which is in force: `kontext accept {proposal}` or `kontext reject {proposal} --why …`"
+            ),
+            Alert::SupersededFeatureTask { task, feature } => write!(
+                f,
+                "open task {task} of superseded feature {feature}: close it with evidence or move the work to a feature in force"
             ),
             Alert::FactStale {
                 id,
@@ -934,7 +943,7 @@ impl State {
                 self.tasks.insert(e.id.clone(), TaskInfo::default());
                 // A task added to a feature after it was validated: the
                 // validation no longer covers all its work.
-                if let Some(f) = crate::features::feature_of(e).map(str::to_string) {
+                if let Some(f) = crate::features::counted_feature(self, e).map(str::to_string) {
                     self.unvalidate(&f, e, format!("{} was added after the validation", e.id));
                 }
             }
@@ -1295,7 +1304,7 @@ impl State {
                 self.event(task, e, true, "reopened".into());
                 let feature = self
                     .get(task)
-                    .and_then(crate::features::feature_of)
+                    .and_then(|t| crate::features::counted_feature(self, t))
                     .map(str::to_string);
                 if let Some(f) = feature {
                     self.unvalidate(&f, e, format!("{task} was reopened after the validation"));
@@ -1418,6 +1427,33 @@ impl State {
             info.status = crate::features::derive(self, &id, &info);
             self.features.insert(id, info);
         }
+        // Tasks that name a feature they don't count toward (another epic's),
+        // and open tasks of a superseded feature.
+        let mut alerts = Vec::new();
+        for t in self.of_kind("task") {
+            if let Some((feature, reason)) = crate::features::foreign_feature(self, t) {
+                alerts.push(Alert::TaskRecordIgnored {
+                    id: t.id.clone(),
+                    task: feature,
+                    kind: t.kind.clone(),
+                    actor: t.actor.short(),
+                    reason,
+                });
+                continue;
+            }
+            let Some(f) = crate::features::counted_feature(self, t) else {
+                continue;
+            };
+            if self.status_of(f) == Some(Status::Superseded)
+                && self.task_status(&t.id) != Some(TaskStatus::Closed)
+            {
+                alerts.push(Alert::SupersededFeatureTask {
+                    task: t.id.clone(),
+                    feature: f.to_string(),
+                });
+            }
+        }
+        self.alerts.extend(alerts);
     }
 
     fn hold(&mut self, task: &str, c: Claim, ms: i64) {

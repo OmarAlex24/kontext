@@ -592,7 +592,7 @@ fn feature_board(st: &State, epic: &Entry, ts: &[&Entry], lv: Level, l: &mut Vec
         }
         let of: Vec<&&Entry> = ts
             .iter()
-            .filter(|t| features::feature_of(t) == Some(f.id.as_str()))
+            .filter(|t| features::counted_feature(st, t) == Some(f.id.as_str()))
             .collect();
         if of.is_empty() {
             l.push(format!(
@@ -612,7 +612,7 @@ fn feature_board(st: &State, epic: &Entry, ts: &[&Entry], lv: Level, l: &mut Vec
     let in_force: Vec<&str> = fs.iter().map(|f| f.id.as_str()).collect();
     let loose: Vec<&&Entry> = ts
         .iter()
-        .filter(|t| features::feature_of(t).is_none_or(|f| !in_force.contains(&f)))
+        .filter(|t| features::counted_feature(st, t).is_none_or(|f| !in_force.contains(&f)))
         .collect();
     if !loose.is_empty() {
         l.push(format!("### No feature ({})", loose.len()));
@@ -853,7 +853,7 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
                 .into(),
         ),
     }
-    if let Some(f) = features::feature_of(t).and_then(|f| st.get(f)) {
+    if let Some(f) = features::counted_feature(st, t).and_then(|f| st.get(f)) {
         let status = st.feature(&f.id).map(|i| i.status.label()).unwrap_or("?");
         let sees = features::acceptance(f).unwrap_or("(not stated)");
         l.push(format!(
@@ -1000,7 +1000,7 @@ pub fn next_json(st: &State, task: &str, o: &NextOpts) -> Value {
         "actor": o.actor,
         "lost_claims": lost_claims(st, &o.actor),
     });
-    if let Some(f) = features::feature_of(t).and_then(|f| st.get(f)) {
+    if let Some(f) = features::counted_feature(st, t).and_then(|f| st.get(f)) {
         v["feature"] = features::json(st, f);
     }
     v

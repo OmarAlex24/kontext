@@ -441,6 +441,7 @@ fn alert_category(a: &Alert) -> (&'static str, &'static str) {
             ("ignored", "Does not count")
         }
         Alert::ProposalSupersedes { .. } => ("conflict", "Proposal against a decision"),
+        Alert::SupersededFeatureTask { .. } => ("drift", "Task of a superseded feature"),
     }
 }
 

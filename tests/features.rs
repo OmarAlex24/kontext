@@ -476,3 +476,76 @@ fn views_with_and_without_features() {
     assert!(show.contains(&format!("- {t} [closed] Endpoint")), "{show}");
     assert!(show.contains("(not validated yet)"), "{show}");
 }
+
+fn plan_json(p: &Project) -> Value {
+    serde_json::from_str(&p.kontext_ok(&["--json", "plan"])).unwrap()
+}
+
+fn closed_epics(p: &Project) -> Vec<String> {
+    plan_json(p)["closed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn an_epic_with_features_also_waits_for_its_tasks_without_a_feature() {
+    let (p, _, _) = with_epic();
+    // A task without a feature keeps its meaning: open, it keeps the epic open.
+    let loose = p.id_of(&[], &["task", "add", "Loose", "--epic", "payments"]);
+    let u = feature(&p, "Refunds", &[]);
+    let t = task_in(&p, "Endpoint", &u);
+    close(&p, &t);
+    p.kontext_ok(&["done", &u, "--evidence", "url:https://x"]);
+    assert_eq!(fstatus(&p, &u), "done");
+    assert!(closed_epics(&p).is_empty(), "{}", plan_json(&p));
+    close(&p, &loose);
+    assert_eq!(closed_epics(&p), ["payments"]);
+
+    // Open tasks of a superseded feature don't block it, but each one raises
+    // an alert until it is closed or moved.
+    let old = feature(&p, "Old refunds", &[]);
+    let stuck = task_in(&p, "Old endpoint", &old);
+    assert!(closed_epics(&p).is_empty());
+    p.run_as_ok(&pm(), &["supersede", &old, &u, "--why", "merged"]);
+    assert_eq!(closed_epics(&p), ["payments"]);
+    let alert = format!(
+        "open task {stuck} of superseded feature {old}: close it with evidence or move the work to a feature in force"
+    );
+    let standup = p.kontext_ok(&["standup", "--peek"]);
+    assert!(standup.contains(&alert), "{standup}");
+    close(&p, &stuck);
+    let standup = p.kontext_ok(&["standup", "--peek"]);
+    assert!(!standup.contains("of superseded feature"), "{standup}");
+}
+
+#[test]
+fn a_task_of_another_epic_does_not_count_toward_a_feature() {
+    let (p, g, _) = with_epic();
+    let u = feature(&p, "Refunds", &[]);
+    let t = task_in(&p, "Endpoint", &u);
+    close(&p, &t);
+    p.kontext_ok(&["done", &u, "--evidence", "url:https://x"]);
+    let other = p.id_of(
+        &[],
+        &["epic", "add", "Other", "--goal", &g, "--name", "other"],
+    );
+    // Only another machine writes this: the CLI refuses it.
+    let fields = format!("{{\"epic\":\"{other}\",\"feature\":\"{u}\",\"goals\":[\"{g}\"]}}");
+    let stray = p.append(&raw("task", "human:omar", &format!("\"{other}\""), &fields))[0].clone();
+    assert_eq!(fstatus(&p, &u), "done");
+    let info = show_json(&p, &u)["feature"].clone();
+    assert_eq!(info["tasks"], serde_json::json!([t]));
+    assert!(closed_epics(&p).contains(&"payments".to_string()));
+    let standup = p.kontext_ok(&["standup", "--peek"]);
+    assert!(
+        standup.contains(&format!("{stray} (task for {u}")),
+        "{standup}"
+    );
+    // In its own epic it is a task without a feature, as before.
+    assert!(!closed_epics(&p).contains(&"other".to_string()));
+    let next = p.run_as_ok(&implementer("impl-1"), &["next", "--epic", "other"]);
+    assert!(!next.contains("- Feature:"), "{next}");
+}

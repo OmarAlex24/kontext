@@ -5,7 +5,9 @@
 //! - An epic is **closed** if it has at least one task and all of them are
 //!   closed; otherwise it is **open**. Only epics in force count. An epic
 //!   with at least one feature in force is closed instead when all its
-//!   features in force are done (validated).
+//!   features in force are done (validated) and all its tasks without a
+//!   feature are closed (a superseded feature's open tasks don't count; they
+//!   raise an alert).
 //! - A dependency is looked up by `id` or by name (`epic:<name>`). A closed
 //!   dependency is already met. One that doesn't exist, or that is no longer in
 //!   force, is a problem.
@@ -37,12 +39,14 @@ pub struct Node {
     /// Its features in force, and how many are done (0 and 0: no features).
     pub features: usize,
     pub done_features: usize,
+    /// Its open tasks without a feature (they keep an epic with features open).
+    pub open_loose: usize,
 }
 
 impl Node {
     pub fn closed(&self) -> bool {
         if self.features > 0 {
-            return self.done_features == self.features;
+            return self.done_features == self.features && self.open_loose == 0;
         }
         self.tasks > 0 && self.closed_tasks == self.tasks
     }
@@ -127,6 +131,13 @@ pub fn nodes(st: &State) -> Vec<Node> {
                     .count(),
                 features,
                 done_features,
+                open_loose: tasks
+                    .iter()
+                    .filter(|t| {
+                        crate::features::counted_feature(st, t).is_none()
+                            && st.task_status(&t.id) != Some(TaskStatus::Closed)
+                    })
+                    .count(),
             }
         })
         .collect()
@@ -520,6 +531,7 @@ mod tests {
             closed_tasks: 0,
             features: 0,
             done_features: 0,
+            open_loose: 0,
         }
     }
 

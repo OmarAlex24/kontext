@@ -99,6 +99,43 @@ pub fn feature_of(task: &Entry) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// The feature a task counts toward: its `fields.feature`, if that is a
+/// feature of the task's own epic that counts (in force or superseded). A
+/// task whose feature is in another epic (only from another machine: the CLI
+/// refuses it), missing, or not counted has no feature: it is one of its
+/// epic's tasks without a feature, as before features existed.
+pub fn counted_feature<'a>(st: &State, task: &'a Entry) -> Option<&'a str> {
+    let id = feature_of(task)?;
+    let f = st.get(id)?;
+    (f.kind == "feature"
+        && f.fields.get("epic").and_then(Value::as_str)
+            == task.fields.get("epic").and_then(Value::as_str)
+        && st.status_of(id) != Some(Status::Ignored))
+    .then_some(id)
+}
+
+/// A task whose `fields.feature` names a feature of another epic: that
+/// feature, and the reason it does not count toward it.
+pub fn foreign_feature(st: &State, task: &Entry) -> Option<(String, String)> {
+    let id = feature_of(task)?;
+    let f = st.get(id).filter(|f| f.kind == "feature")?;
+    let theirs = f.fields.get("epic").and_then(Value::as_str).unwrap_or("?");
+    let ours = task
+        .fields
+        .get("epic")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    (theirs != ours).then(|| {
+        (
+            id.to_string(),
+            format!(
+                "it is in the epic {ours} and {id} in {theirs}, so it does not count toward {id} \
+                 (in {ours} it is a task without a feature)"
+            ),
+        )
+    })
+}
+
 /// The features of an epic that are in force, in ledger order.
 pub fn of_epic<'a>(st: &'a State, epic: &str) -> Vec<&'a Entry> {
     st.of_kind("feature")
@@ -144,7 +181,7 @@ pub fn task_ids(st: &State, feature: &str) -> Vec<String> {
     st.order
         .iter()
         .filter_map(|id| st.get(id))
-        .filter(|t| t.kind == "task" && feature_of(t) == Some(feature))
+        .filter(|t| t.kind == "task" && counted_feature(st, t) == Some(feature))
         .map(|t| t.id.clone())
         .collect()
 }

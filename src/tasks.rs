@@ -685,6 +685,7 @@ fn resolve_after(
             closed_tasks: 0,
             features: 0,
             done_features: 0,
+            open_loose: 0,
         });
         let plan = crate::plan::compute(&nodes);
         if let Some(c) = plan.cycles.iter().find(|c| c.iter().any(|n| n == own)) {
@@ -1169,7 +1170,7 @@ pub fn question_fields(
         epic_name_of_task = epic_of_task(st, &id).map(epic_name);
         task_feature = st
             .get(&id)
-            .and_then(crate::features::feature_of)
+            .and_then(|t| crate::features::counted_feature(st, t))
             .map(str::to_string);
         f.insert("task".into(), json!(id));
     }
