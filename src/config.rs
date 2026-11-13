@@ -780,14 +780,25 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// A kontext server token: `kxt1.<base64url of {"p": project, "w": writer}>.<secret>`.
-/// The project and the writer are readable without the network.
+/// A kontext server token: `kxt1.<base64url of its claims>.<secret>`. The
+/// claims (DESIGN §14.1) are readable without the network: the project, the
+/// writer, and who the token is (person, role, epic, the names a coordinator
+/// writes as, expiry). The binary uses them to pick the writer and to refuse
+/// a line the server would refuse; the server decides from its own copy.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Token {
     pub raw: String,
     /// The project's name on the server.
     pub project: String,
     pub writer: String,
+    pub person: Option<String>,
+    /// `None` in a token without claims: then nothing is checked before writing.
+    pub role: Option<String>,
+    pub epic: Option<String>,
+    /// The actor names a coordinator token writes as.
+    pub actors: Vec<String>,
+    /// Expiry, in ms since the epoch.
+    pub expires: Option<i64>,
 }
 
 impl std::fmt::Debug for Token {
@@ -825,10 +836,29 @@ impl Token {
             bail!("the token names no project");
         }
         validate_writer(&writer)?;
+        let text = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        };
         Ok(Token {
             raw: raw.to_string(),
             project,
             writer,
+            person: text("n"),
+            role: text("r"),
+            epic: text("e"),
+            actors: v
+                .get("c")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            expires: v.get("x").and_then(|x| x.as_i64()),
         })
     }
 
@@ -942,6 +972,9 @@ mod tests {
         assert_eq!(t.project, "demo");
         assert_eq!(t.writer, "ana.coordinator.payments.3fa9c1@kontext");
         assert!(!format!("{t:?}").contains("c2VjcmV0"));
+        // A token without claims: nothing to check before writing.
+        assert_eq!(t.role, None);
+        assert!(t.actors.is_empty());
         assert!(Token::parse("kxt1.x").is_err());
         assert!(Token::parse("ghp_abc").is_err());
         assert!(Token::parse(&format!("kxt1.{head}.")).is_err());

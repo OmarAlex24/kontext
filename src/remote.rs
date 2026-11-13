@@ -546,11 +546,14 @@ pub fn refused_hint(r: &Problem) -> String {
             r.n.unwrap_or(0),
             r.writer
         ),
-        "identity" | "writer" => {
-            "This token may not write that line: write it with the right role, \
-             or with a token for that role (`kontext token create`)."
-                .into()
-        }
+        "identity" | "writer" => format!(
+            "This copy's token may not write that line, and it stays unpushed (so does everything \
+             after it from {}). An owner can revoke the token (`kontext token revoke <id>`) and make \
+             one for the same writer with a role that may write it (`kontext token create --writer {} \
+             --role …`); `KONTEXT_TOKEN=<new token> kontext server connect <url>` on this copy takes it \
+             and pushes everything.",
+            r.writer, r.writer
+        ),
         "too_large" => format!(
             "The line is over the server's limit of 4 MiB per line, so it can never be pushed, and nothing \
              after it from {} can either (this binary refuses such a line before writing it in a project \
@@ -1719,6 +1722,111 @@ pub fn ensure_media<I: IntoIterator<Item = String>>(home: &Path, names: I) -> Ve
     warnings
 }
 
+/// What only an owner or the pm writes: the plan and the decisions.
+const GOVERNANCE: &[&str] = &[
+    "charter",
+    "goal",
+    "epic",
+    "feature",
+    "scope",
+    "sign",
+    "accept",
+    "reject",
+    "decision",
+    "supersede",
+];
+/// What a coordinator hands out, and an implementer or tester may not.
+const COORDINATION: &[&str] = &["task", "assign"];
+/// All a scout writes.
+const SCOUT_KINDS: &[&str] = &["fact", "journal", "question", "confirm", "proposal"];
+
+/// The roles a token can have.
+pub const ROLES: &[&str] = &[
+    "owner",
+    "pm",
+    "coordinator",
+    "implementer",
+    "tester",
+    "scout",
+];
+
+/// Would the server refuse this entry from this token? The same rules as
+/// `actorAllowed` in `server/worker.js` (DESIGN §14.2): only identity, never
+/// the project's state. `None` if it may be written (or the token carries no
+/// role to check against).
+pub fn identity_problem(token: &Token, e: &Entry) -> Option<String> {
+    let role = token.role.as_deref()?;
+    if role == "owner" {
+        return None;
+    }
+    let a = &e.actor;
+    let name = a.name.as_str();
+    let arole = a.role.as_deref();
+    let kind = e.kind.as_str();
+    if a.kind != "agent" {
+        return Some(format!(
+            "a {role} token writes only as agents, not as {}:{name}",
+            a.kind
+        ));
+    }
+    if role == "pm" {
+        return None;
+    }
+    if arole == Some("pm") {
+        return Some("only a pm or owner token writes as role pm".into());
+    }
+    if e.fields.get("approved_by").is_some_and(|v| !v.is_null()) {
+        return Some("only a pm or owner token writes approved_by".into());
+    }
+    if GOVERNANCE.contains(&kind) {
+        return Some(format!(
+            "a {role} token does not write {kind} (only an owner or the pm)"
+        ));
+    }
+    if role == "coordinator" {
+        let mine = &token.actors;
+        let as_list = mine.join(" or ");
+        if arole == Some("coordinator") && !mine.iter().any(|m| m == name) {
+            return Some(format!(
+                "this token coordinates as {as_list}, not as agent:{name}"
+            ));
+        }
+        if name.starts_with("epic:") && !mine.iter().any(|m| m == name) {
+            return Some(format!(
+                "agent:{name} is another epic's coordinator; this token coordinates as {as_list}"
+            ));
+        }
+        return None;
+    }
+    if arole == Some("coordinator") || name.starts_with("epic:") {
+        return Some(format!(
+            "a {role} token does not write as a coordinator (agent:{name})"
+        ));
+    }
+    if COORDINATION.contains(&kind) {
+        return Some(format!(
+            "a {role} token does not write {kind} (the coordinator does)"
+        ));
+    }
+    if role == "scout" && !SCOUT_KINDS.contains(&kind) {
+        return Some(format!(
+            "a scout token writes only {}, not {kind}",
+            SCOUT_KINDS.join(", ")
+        ));
+    }
+    None
+}
+
+/// The token that binds what this machine writes in `home` as `writer`: the
+/// project registered with that home has a server and a token for that
+/// writer. `None` otherwise (git sync, or no token).
+pub fn token_for_home(home: &Path, writer: &str) -> Option<Token> {
+    let (machine, name) = project_for_home(home)?;
+    machine.server_for(&name)?;
+    let t = config::token_for(&name).ok()??;
+    (t.writer == writer).then_some(t)
+}
+
 /// For `kontext status`: the server, without the network.
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
@@ -1946,6 +2054,9 @@ pub struct CloneArgs {
     pub project: String,
     pub home: Option<PathBuf>,
     pub name: Option<String>,
+    /// Short timeouts and a 20 s budget (a sandbox setting itself up); what
+    /// does not fit comes with the next commands.
+    pub quick: bool,
 }
 
 /// `kontext clone --server <url> <project>`: brings a project down from its
@@ -1994,7 +2105,16 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
         url: url.clone(),
         token,
     };
-    let conn = Conn::of(&remote, Duration::from_secs(30));
+    let opts = if a.quick {
+        Options {
+            timeout: Duration::from_secs(10),
+            budget: Duration::from_secs(20),
+            ..Options::full(false)
+        }
+    } else {
+        Options::full(false)
+    };
+    let conn = Conn::of(&remote, opts.timeout);
     let config_files = Conn::ok(conn.get("config")?, "config")?;
     let Some(project_toml) = config_files
         .get("files")
@@ -2033,7 +2153,7 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
     Machine::register(&name, &home).map_err(undo)?;
     Machine::set_server(&name, Some(&url))?;
     remote.token.save(&name)?;
-    let report = sync(&home, &remote, &Options::full(false))?;
+    let report = sync(&home, &remote, &opts)?;
     let writer = remote.token.writer.clone();
     let mut warnings = Vec::new();
     if report.received.contains_key(&writer) {
@@ -2057,4 +2177,554 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
         warnings,
     };
     Ok((cloned, report))
+}
+
+// ------------------------------------------------------------ tokens
+
+/// `kontext token create`.
+#[derive(Debug, Clone)]
+pub struct TokenArgs {
+    pub role: String,
+    pub epic: Option<String>,
+    pub person: Option<String>,
+    pub ttl: Option<String>,
+    pub writer: Option<String>,
+}
+
+/// A token just made: the server's answer and how a sandbox uses it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Minted {
+    pub id: String,
+    pub token: String,
+    pub project: String,
+    pub server: String,
+    pub person: String,
+    pub role: String,
+    pub epic: Option<String>,
+    pub actors: Vec<String>,
+    pub writer: String,
+    pub expires: Option<i64>,
+    /// `KEY=value` lines for a sandbox.
+    pub env: Vec<String>,
+}
+
+/// Letters, digits, `_` and `-`, lowercase, at most 24: a part of a writer id.
+fn writer_part(s: &str) -> String {
+    let out: String = s
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut out = out.trim_matches('-').to_string();
+    out.truncate(24);
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() { "x".into() } else { out }
+}
+
+/// A writer id for a new token: `<person>.<role>[.<epic>].<random>@kontext`.
+pub fn mint_writer(person: &str, role: &str, epic: Option<&str>) -> Result<String> {
+    let mut parts = vec![writer_part(person), writer_part(role)];
+    if let Some(e) = epic {
+        parts.push(writer_part(e));
+    }
+    parts.push(config::random_hex(3)?);
+    let w = format!("{}@kontext", parts.join("."));
+    validate_writer(&w)?;
+    Ok(w)
+}
+
+fn owner_conn(project: &str) -> Result<(Remote, Conn)> {
+    let remote = match Link::of(project)? {
+        Link::Ready(r) => r,
+        Link::NoToken(url) => bail!(
+            "project {project} has server {url} but no token on this machine (set KONTEXT_TOKEN)"
+        ),
+        Link::None => bail!(
+            "project {project} has no kontext server (`kontext server connect <url>` attaches one)"
+        ),
+    };
+    let conn = Conn::of(&remote, Duration::from_secs(20));
+    Ok((remote, conn))
+}
+
+/// Makes a token on the project's server, with this machine's owner token.
+pub fn token_create(project: &str, home: &Path, a: &TokenArgs) -> Result<Minted> {
+    let role = a.role.trim().to_lowercase();
+    if !ROLES.contains(&role.as_str()) {
+        bail!("--role is one of {}", ROLES.join(", "));
+    }
+    let (remote, conn) = owner_conn(project)?;
+    let proj = config::Project::load(home)?;
+    let person = match a.person.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => p.to_string(),
+        None => config::human_name_in(&proj, home),
+    };
+    // The epic by id or name, and for a coordinator the names it writes as:
+    // its `coordinator` and `epic:<name>` (both count as the coordinator).
+    let mut epic_label = None;
+    let (epic, actors) = match a.epic.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        None if role == "coordinator" => bail!("a coordinator token needs --epic <id or name>"),
+        None => (None, Vec::new()),
+        Some(e) => {
+            let mut store = crate::store::Store::open(home, &remote.token.writer)?;
+            let st = store.state()?;
+            let id = st.find_epic(e)?;
+            let entry = st
+                .get(&id)
+                .with_context(|| format!("epic {id} is not in this copy"))?;
+            let name = crate::tasks::epic_name(entry);
+            let coord = crate::tasks::coordinator_of(entry);
+            let coord = coord.strip_prefix("agent:").unwrap_or(&coord).to_string();
+            let mut names = vec![coord];
+            let default = format!("epic:{name}");
+            if !names.contains(&default) {
+                names.push(default);
+            }
+            epic_label = Some(name);
+            let names = if role == "coordinator" {
+                names
+            } else {
+                Vec::new()
+            };
+            (Some(id), names)
+        }
+    };
+    let writer = match &a.writer {
+        Some(w) => {
+            validate_writer(w)?;
+            w.clone()
+        }
+        None => mint_writer(&person, &role, epic_label.as_deref())?,
+    };
+    let ttl_ms = match &a.ttl {
+        Some(t) => Some(crate::tasks::parse_duration_ms(t).context("--ttl")?),
+        None => None,
+    };
+    let mut body = json!({ "person": person, "role": role, "writer": writer, "actors": actors });
+    if let Some(e) = &epic {
+        body["epic"] = json!(e);
+    }
+    if let Some(t) = ttl_ms {
+        body["ttl_ms"] = json!(t);
+    }
+    let v = Conn::ok(conn.json("POST", "tokens", &body)?, "token create")?;
+    let token = v
+        .get("token")
+        .and_then(Value::as_str)
+        .context("the server sent no token")?
+        .to_string();
+    let actors: Vec<String> = v
+        .get("actors")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut env = vec![
+        format!("KONTEXT_SERVER={}", remote.url),
+        format!("KONTEXT_PROJECT={}", remote.token.project),
+        format!("KONTEXT_TOKEN={token}"),
+    ];
+    match role.as_str() {
+        "owner" => env.push(format!("KONTEXT_ACTOR=human:{person}")),
+        "pm" => env.push("KONTEXT_ACTOR=agent:pm".into()),
+        "coordinator" if !actors.is_empty() => {
+            env.push(format!("KONTEXT_ACTOR=agent:{}", actors[0]))
+        }
+        _ => {}
+    }
+    if role != "owner" {
+        env.push(format!("KONTEXT_ROLE={role}"));
+    }
+    Ok(Minted {
+        id: v
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        token,
+        project: remote.token.project.clone(),
+        server: remote.url.clone(),
+        person,
+        role,
+        epic,
+        actors,
+        writer,
+        expires: v.get("expires").and_then(Value::as_i64),
+        env,
+    })
+}
+
+impl Minted {
+    pub fn text(&self) -> String {
+        let mut what = format!("{} as {}", self.person, self.role);
+        if let Some(e) = &self.epic {
+            what.push_str(&format!(" of epic {e}"));
+        }
+        if !self.actors.is_empty() {
+            let names: Vec<String> = self.actors.iter().map(|a| format!("agent:{a}")).collect();
+            what.push_str(&format!(" (writes as {})", names.join(" or ")));
+        }
+        let expires = match self.expires {
+            Some(ms) => jiff::Timestamp::from_millisecond(ms)
+                .map(|t| format!(", expires {t}"))
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        let mut l = vec![
+            format!(
+                "Token {}: {what}, writer {}{expires}.",
+                self.id, self.writer
+            ),
+            "It is shown only this once; keep it out of every repo. For a sandbox, set:".into(),
+        ];
+        for e in &self.env {
+            l.push(format!("  {e}"));
+        }
+        l.push(format!(
+            "There, the first kontext command sets the project up from the server. On a machine: \
+             KONTEXT_TOKEN=<token> kontext clone --server {} {}",
+            self.server, self.project
+        ));
+        l.join("\n") + "\n"
+    }
+}
+
+/// `kontext token list`.
+pub fn token_list(project: &str) -> Result<Vec<Value>> {
+    let (_, conn) = owner_conn(project)?;
+    let v = Conn::ok(conn.get("tokens")?, "token list")?;
+    Ok(v.get("tokens")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// `kontext token revoke <id>`.
+pub fn token_revoke(project: &str, id: &str) -> Result<Value> {
+    let (_, conn) = owner_conn(project)?;
+    let v = Conn::ok(
+        conn.json("POST", &format!("tokens/{id}/revoke"), &json!({}))?,
+        "token revoke",
+    )?;
+    Ok(v.get("token").cloned().unwrap_or(Value::Null))
+}
+
+/// The lines of `kontext token list`.
+pub fn token_lines(tokens: &[Value]) -> Vec<String> {
+    let s = |t: &Value, k: &str| t.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    tokens
+        .iter()
+        .map(|t| {
+            let mut state = String::new();
+            if !s(t, "revoked").is_empty() {
+                state = format!(" · revoked {}", s(t, "revoked"));
+            } else if let Some(ms) = t.get("expires").and_then(Value::as_i64) {
+                let when = jiff::Timestamp::from_millisecond(ms)
+                    .map(|x| x.to_string())
+                    .unwrap_or_default();
+                let past = ms < now_ms();
+                state = format!(" · {} {when}", if past { "expired" } else { "expires" });
+            }
+            let epic = match s(t, "epic") {
+                e if e.is_empty() => String::new(),
+                e => format!(" of {e}"),
+            };
+            format!(
+                "{}  {} as {}{epic}  writer {}  (created {}){state}",
+                s(t, "id"),
+                s(t, "person"),
+                s(t, "role"),
+                s(t, "writer"),
+                s(t, "created")
+            )
+        })
+        .collect()
+}
+
+// ------------------------------------------------------------ sandboxes
+
+/// A sandbox with `KONTEXT_SERVER` and `KONTEXT_TOKEN` and no project yet: the
+/// first command clones the token's project into the config folder
+/// (`<config>/homes/<project>`) and registers it. Under a lock, so a
+/// coordinator and its subagents starting at once set it up once. `None` if
+/// there is nothing to do; otherwise what was done (empty if another process
+/// did it), or why it failed (the command then goes on, and says there is no
+/// project).
+pub fn bootstrap() -> Option<Result<String>> {
+    let raw = std::env::var("KONTEXT_TOKEN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
+    let url = std::env::var("KONTEXT_SERVER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
+    let token = Token::parse(&raw).ok()?;
+    if let Ok(p) = std::env::var("KONTEXT_PROJECT")
+        && !p.is_empty()
+        && p != token.project
+    {
+        return None;
+    }
+    let machine = Machine::load().ok()?;
+    if machine.projects.contains_key(&token.project) {
+        return None;
+    }
+    Some(bootstrap_project(&url, &token))
+}
+
+fn bootstrap_project(url: &str, token: &Token) -> Result<String> {
+    let dir = config::config_dir()?;
+    let lock_dir = dir.join("locks");
+    fs::create_dir_all(&lock_dir)?;
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_dir.join(format!("bootstrap-{}.lock", token.project)))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while f.try_lock().is_err() {
+        if Instant::now() > deadline {
+            bail!(
+                "another kontext process is setting up {} and took too long",
+                token.project
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Another process did it while this one waited.
+    if Machine::load()?.projects.contains_key(&token.project) {
+        return Ok(String::new());
+    }
+    let home = dir.join("homes").join(&token.project);
+    // Not registered, and this process holds the lock: what is there is a
+    // setup that did not finish.
+    if home.exists() {
+        fs::remove_dir_all(&home)?;
+    }
+    fs::create_dir_all(dir.join("homes"))?;
+    let (c, r) = clone(CloneArgs {
+        url: url.to_string(),
+        project: token.project.clone(),
+        home: Some(home),
+        name: None,
+        quick: true,
+    })?;
+    drop(f);
+    Ok(format!(
+        "set up project {} from {} in {} (writer {}, {} entries{})",
+        c.name,
+        r.url,
+        c.home,
+        c.writer,
+        c.entries,
+        if r.partial {
+            "; the rest comes with the next commands"
+        } else {
+            ""
+        }
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Actor;
+
+    fn token(role: Option<&str>, actors: &[&str]) -> Token {
+        Token {
+            raw: "kxt1.x.y".into(),
+            project: "demo".into(),
+            writer: "w@kontext".into(),
+            person: Some("omar".into()),
+            role: role.map(str::to_string),
+            epic: None,
+            actors: actors.iter().map(|a| a.to_string()).collect(),
+            expires: None,
+        }
+    }
+
+    fn entry(actor: Actor, kind: &str, approved: bool) -> Entry {
+        let mut v = json!({
+            "v": 1, "id": "J-000001", "writer": "w@kontext", "n": 1,
+            "prev": "0".repeat(64), "hlc": "2026-11-13T10:00:00.000Z.0000",
+            "actor": actor, "kind": kind, "title": "t", "hash": "0".repeat(64),
+        });
+        if approved {
+            v["fields"] = json!({ "approved_by": "omar" });
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn agent(name: &str, role: Option<&str>) -> Actor {
+        let mut a = Actor::agent(name);
+        a.role = role.map(str::to_string);
+        a
+    }
+
+    /// The same cases as `server/test/worker.test.mjs` ("each role writes
+    /// only as what it is"): the binary refuses what the server would.
+    #[test]
+    fn the_identity_rules_match_the_server() {
+        let human = Actor::human("ana");
+        let cases: Vec<(&str, Actor, &str, bool, bool)> = vec![
+            ("owner", human.clone(), "decision", false, true),
+            ("owner", agent("pm", Some("pm")), "accept", true, true),
+            ("pm", agent("pm", Some("pm")), "accept", true, true),
+            (
+                "pm",
+                agent("epic:payments", Some("coordinator")),
+                "task",
+                false,
+                true,
+            ),
+            ("pm", Actor::human("omar"), "journal", false, false),
+            (
+                "coordinator",
+                agent("epic:payments", Some("coordinator")),
+                "task",
+                false,
+                true,
+            ),
+            (
+                "coordinator",
+                agent("pay-lead", Some("coordinator")),
+                "assign",
+                false,
+                true,
+            ),
+            (
+                "coordinator",
+                agent("impl-1", Some("implementer")),
+                "claim",
+                false,
+                true,
+            ),
+            (
+                "coordinator",
+                agent("distill", None),
+                "proposal",
+                false,
+                true,
+            ),
+            (
+                "coordinator",
+                agent("epic:other", Some("coordinator")),
+                "task",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("epic:other", None),
+                "journal",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("pm", Some("pm")),
+                "journal",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("epic:payments", Some("coordinator")),
+                "decision",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("epic:payments", Some("coordinator")),
+                "journal",
+                true,
+                false,
+            ),
+            ("coordinator", Actor::human("omar"), "journal", false, false),
+            (
+                "implementer",
+                agent("impl-1", Some("implementer")),
+                "done",
+                false,
+                true,
+            ),
+            (
+                "implementer",
+                agent("impl-1", Some("implementer")),
+                "question",
+                false,
+                true,
+            ),
+            (
+                "implementer",
+                agent("impl-1", Some("implementer")),
+                "task",
+                false,
+                false,
+            ),
+            (
+                "implementer",
+                agent("epic:payments", Some("coordinator")),
+                "journal",
+                false,
+                false,
+            ),
+            (
+                "implementer",
+                agent("epic:payments", None),
+                "journal",
+                false,
+                false,
+            ),
+            (
+                "implementer",
+                agent("impl-1", Some("implementer")),
+                "sign",
+                false,
+                false,
+            ),
+            (
+                "tester",
+                agent("t-1", Some("tester")),
+                "reopen",
+                false,
+                true,
+            ),
+            ("scout", agent("s-1", Some("scout")), "fact", false, true),
+            ("scout", agent("s-1", Some("scout")), "done", false, false),
+        ];
+        for (role, actor, kind, approved, allowed) in cases {
+            let t = token(Some(role), &["pay-lead", "epic:payments"]);
+            let label = format!("{role} as {} writing {kind}", actor.short());
+            let got = identity_problem(&t, &entry(actor, kind, approved));
+            assert_eq!(got.is_none(), allowed, "{label}: {got:?}");
+        }
+        // A token without claims: nothing to check here (the server still does).
+        let e = entry(Actor::human("x"), "decision", false);
+        assert_eq!(identity_problem(&token(None, &[]), &e), None);
+    }
+
+    #[test]
+    fn minted_writers_are_valid() {
+        let w = mint_writer("Ana María", "coordinator", Some("Card payments: v2")).unwrap();
+        assert!(
+            w.starts_with("ana-mar-a.coordinator.card-payments--v2."),
+            "{w}"
+        );
+        validate_writer(&w).unwrap();
+        let w = mint_writer(&"x".repeat(200), "scout", Some("...")).unwrap();
+        assert!(w.len() <= 128, "{w}");
+        validate_writer(&w).unwrap();
+        assert!(mint_writer("", "pm", None).unwrap().starts_with("x.pm."));
+    }
 }

@@ -1253,3 +1253,339 @@ fn a_clone_says_nothing_about_config_the_server_has() {
     let out = b.ok(&["sync"]);
     assert!(!out.contains("project.toml"), "{out}");
 }
+
+// ------------------------------------------------------------ tokens (§14.2)
+
+/// A charter, a goal and the epic `payments` on `a` (an owner).
+fn plan(a: &Machine) {
+    let id = |out: String| -> String {
+        serde_json::from_str::<Value>(&out).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let c = id(a.ok(&["--json", "charter", "--objective", "Charge by card"]));
+    a.ok(&["sign", &c]);
+    let g = id(a.ok(&["--json", "goal", "add", "Recurring charge"]));
+    a.ok(&["sign", &g]);
+    a.ok(&[
+        "epic",
+        "add",
+        "Card payments",
+        "--goal",
+        &g,
+        "--name",
+        "payments",
+    ]);
+}
+
+/// `kontext --json token create …` on `a`.
+fn mint(a: &Machine, args: &[&str]) -> Value {
+    let mut all = vec!["--json", "token", "create"];
+    all.extend_from_slice(args);
+    serde_json::from_str(&a.ok(&all)).unwrap()
+}
+
+/// A sandbox: an empty config folder and only the variables the token
+/// printed. Nothing is registered there.
+struct Sandbox {
+    _dir: tempfile::TempDir,
+    config: PathBuf,
+    env: Vec<(String, String)>,
+}
+
+impl Sandbox {
+    fn new(minted: &Value) -> Sandbox {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let env = minted["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| {
+                let (k, v) = l.as_str().unwrap().split_once('=').unwrap();
+                (k.to_string(), v.to_string())
+            })
+            .collect();
+        Sandbox {
+            _dir: dir,
+            config,
+            env,
+        }
+    }
+
+    fn cmd(&self, args: &[&str]) -> Command {
+        let mut c = Command::new(BIN);
+        c.args(args)
+            .env("KONTEXT_CONFIG_DIR", &self.config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("KONTEXT_ACTOR")
+            .env_remove("KONTEXT_ROLE")
+            .env_remove("KONTEXT_ADMIN_SECRET")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .current_dir(self._dir.path());
+        for (k, v) in &self.env {
+            c.env(k, v);
+        }
+        c
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.cmd(args).output().unwrap()
+    }
+
+    fn ok(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert!(
+            out.status.success(),
+            "[sandbox] kontext {args:?} failed ({:?}): {}\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn home(&self) -> PathBuf {
+        self.config.join("homes/demo")
+    }
+
+    fn ledger_bytes(&self, writer: &str) -> Vec<u8> {
+        fs::read(self.home().join("ledger").join(format!("{writer}.jsonl"))).unwrap_or_default()
+    }
+}
+
+#[test]
+fn a_coordinator_sandbox_sets_itself_up_and_writes_only_as_its_role() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar"]);
+    plan(&a);
+    let m = mint(&a, &["--role", "coordinator", "--epic", "payments"]);
+    let writer = m["writer"].as_str().unwrap().to_string();
+    assert!(
+        writer.starts_with("omar.coordinator.payments.") && writer.ends_with("@kontext"),
+        "{writer}"
+    );
+    assert_eq!(m["actors"], json!(["epic:payments"]));
+    let env: Vec<&str> = m["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        env.contains(&"KONTEXT_ACTOR=agent:epic:payments"),
+        "{env:?}"
+    );
+    assert!(env.contains(&"KONTEXT_ROLE=coordinator"), "{env:?}");
+    assert!(env.contains(&"KONTEXT_PROJECT=demo"), "{env:?}");
+
+    // The first command sets the project up (several at once: only once).
+    let s = Sandbox::new(&m);
+    let kids: Vec<Child> = (0..3)
+        .map(|_| {
+            s.cmd(&["status"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let mut set_up = 0;
+    for k in kids {
+        let out = k.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{err}");
+        set_up += err.matches("set up project demo").count();
+    }
+    assert_eq!(set_up, 1);
+    let projects = fs::read_to_string(s.config.join("projects.toml")).unwrap();
+    assert_eq!(projects.matches("[projects.demo]").count(), 1, "{projects}");
+    assert!(s.home().join("project.toml").exists());
+
+    // What a coordinator does: its brief, tasks, a claim on behalf of an
+    // implementer, the implementer's journal and done, a question.
+    let out = s.ok(&["brief", "payments"]);
+    assert!(out.contains("payments"), "{out}");
+    let t = serde_json::from_str::<Value>(&s.ok(&[
+        "--json",
+        "task",
+        "add",
+        "Charge the card",
+        "--epic",
+        "payments",
+    ]))
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.ok(&[
+        "--actor",
+        "agent:impl-1",
+        "--role",
+        "implementer",
+        "next",
+        "--epic",
+        "payments",
+        "--claim",
+    ]);
+    s.ok(&[
+        "--actor",
+        "agent:impl-1",
+        "--role",
+        "implementer",
+        "log",
+        "SDK wired",
+    ]);
+    s.ok(&[
+        "--actor",
+        "agent:impl-1",
+        "--role",
+        "implementer",
+        "done",
+        &t,
+        "--run",
+        "true",
+        "--since",
+        "-",
+    ]);
+    s.ok(&["ask", "Which currency?", "--to", "pm"]);
+
+    // What it may not write is refused before it is in the file (exit 2):
+    // a decision by the project's own rule, the rest by the token's.
+    let before = s.ledger_bytes(&writer);
+    let out = s.run(&["decide", "Use Stripe", "--why", "fast"]);
+    assert_eq!(out.status.code(), Some(2));
+    for args in [
+        vec!["charter", "--objective", "Something else"],
+        vec!["--actor", "human:omar", "log", "pretending"],
+        vec!["--actor", "agent:epic:other", "log", "another epic"],
+        vec!["--actor", "agent:pm", "--role", "pm", "log", "as the pm"],
+    ] {
+        let out = s.run(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(
+            err.contains("the server") && err.contains("would refuse"),
+            "{err}"
+        );
+    }
+    assert_eq!(
+        s.ledger_bytes(&writer),
+        before,
+        "a refused line was written"
+    );
+
+    // Everything it wrote reached the owner.
+    let out = a.ok(&["sync"]);
+    assert!(out.contains(&format!("{writer}: ")), "{out}");
+    assert_eq!(
+        a.lines(&writer),
+        String::from_utf8(before)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    );
+    let board = a.ok(&["brief", "payments"]);
+    assert!(board.contains("Charge the card"), "{board}");
+    assert!(a.ok(&["verify"]).contains("OK"));
+    let status = s.ok(&["status"]);
+    assert!(status.contains("Own entries not pushed: 0"), "{status}");
+
+    // Tokens: listed without secrets, and a revoked one stops at once.
+    let list = a.ok(&["token", "list"]);
+    assert!(
+        list.contains("omar as owner") && list.contains("omar as coordinator"),
+        "{list}"
+    );
+    assert!(!list.contains("kxt1."), "{list}");
+    a.ok(&["token", "revoke", m["id"].as_str().unwrap()]);
+    let out = s.run(&["sync"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("revoked"), "{text}");
+}
+
+#[test]
+fn a_line_the_role_may_not_write_waits_until_the_writer_gets_a_token_that_may() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar"]);
+    // B wrote as itself before it had a token: a decision, as a human.
+    let b = net.machine("b", "ana@b", "ana");
+    net.join(&a, &b);
+    let impl_token = |a: &Machine| {
+        mint(
+            a,
+            &[
+                "--role",
+                "implementer",
+                "--person",
+                "ana",
+                "--writer",
+                "ana@laptop",
+            ],
+        )
+    };
+    let c = net.machine("c", "ana@laptop", "ana");
+    let out = c.ok(&["init", "demo", "--home", c.home.to_str().unwrap()]);
+    assert!(out.contains("Project demo created"), "{out}");
+    c.ok(&["--actor", "agent:helper", "log", "an ordinary note"]);
+    c.ok(&["decide", "Ana decides", "--why", "she was here first"]);
+    // Now it gets an implementer token for its writer and the server: the
+    // agent's note goes up, the human's decision is refused, and it waits there.
+    let m = impl_token(&a);
+    let token = m["token"].as_str().unwrap();
+    let out = c.run(
+        &[("KONTEXT_TOKEN", token)],
+        &["server", "connect", net.url()],
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("REFUSED by the server"), "{text}");
+    assert!(text.contains("identity"), "{text}");
+    assert!(
+        text.contains("kontext token create --writer ana@laptop"),
+        "{text}"
+    );
+    let f = frontier(&net, &a.token());
+    assert_eq!(f["tails"]["ana@laptop"]["n"], 1, "{f}");
+    let status = c.ok(&["status"]);
+    assert!(status.contains("REFUSED by the server"), "{status}");
+    // With that token, nothing more can be written as a human here.
+    let out = c.run(&[], &["log", "more"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    // The owner revokes it and makes one for the same writer that may: the
+    // rest goes up and nothing was lost.
+    a.ok(&["token", "revoke", m["id"].as_str().unwrap()]);
+    let m = mint(
+        &a,
+        &[
+            "--role",
+            "owner",
+            "--person",
+            "ana",
+            "--writer",
+            "ana@laptop",
+        ],
+    );
+    let token = m["token"].as_str().unwrap();
+    let out = c.ok_env(
+        &[("KONTEXT_TOKEN", token)],
+        &["server", "connect", net.url()],
+    );
+    assert!(out.contains("Pushed 1 entry (ana@laptop: 1)"), "{out}");
+    let status = c.ok(&["status"]);
+    assert!(!status.contains("REFUSED"), "{status}");
+    b.ok(&["sync"]);
+    assert_eq!(b.lines("ana@laptop"), c.lines("ana@laptop"));
+    assert_eq!(b.lines("ana@laptop").len(), 2);
+}

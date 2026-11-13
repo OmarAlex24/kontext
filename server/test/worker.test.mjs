@@ -44,11 +44,12 @@ async function project(writer = "omar@mac") {
 }
 
 /// A chain of ledger lines for a writer, like the binary writes them.
-function chain(writer, count, { from = 1, prev = GENESIS, actor = { type: "human", name: "omar" }, tag = "" } = {}) {
+function chain(writer, count, { from = 1, prev = GENESIS, actor = { type: "human", name: "omar" }, tag = "", kind = "journal", fields } = {}) {
   const out = [];
   for (let i = 0; i < count; i++) {
     const nn = from + i;
-    const body = { v: 1, id: `J-${sha(writer + nn + tag).slice(0, 6)}`, writer, n: nn, prev, hlc: "2026-11-13T10:00:00.000Z.0000", actor, kind: "journal", title: `entry ${nn}${tag}` };
+    const body = { v: 1, id: `J-${sha(writer + nn + tag).slice(0, 6)}`, writer, n: nn, prev, hlc: "2026-11-13T10:00:00.000Z.0000", actor, kind, title: `entry ${nn}${tag}` };
+    if (fields) body.fields = fields;
     const hash = sha(JSON.stringify(body));
     const line = JSON.stringify({ ...body, hash });
     out.push({ line, hash });
@@ -65,9 +66,9 @@ test("info and auth", async () => {
   assert.equal((await call("GET", `/v1/p/${p.name}/frontier`, { token: "kxt1.bad.bad" })).status, 401);
   const who = await call("GET", `/v1/p/${p.name}/whoami`, { token: p.token });
   assert.deepEqual([who.data.role, who.data.person, who.data.writer], ["owner", "omar", "omar@mac"]);
-  // The token carries the project and the writer.
+  // The token carries its claims: project, writer, person and role.
   const head = JSON.parse(Buffer.from(p.token.split(".")[1], "base64url").toString());
-  assert.deepEqual(head, { p: p.name, w: "omar@mac" });
+  assert.deepEqual(head, { p: p.name, w: "omar@mac", n: "omar", r: "owner" });
   // Only the admin secret creates projects, and only once.
   assert.equal((await call("POST", `/v1/p/${p.name}/create`, { token: p.token, body: { person: "x", writer: "x@y" } })).status, 403);
   assert.equal((await call("POST", `/v1/p/${p.name}/create`, { token: ADMIN, body: { person: "x", writer: "x@y" } })).status, 409);
@@ -252,4 +253,113 @@ test("long lines: up to 4 MiB, stored in chunks, back byte for byte; one byte mo
   }
   assert.equal(got.length, 2);
   assert.ok(got[0] === a.line && got[1] === b.line, "the long lines came back changed");
+});
+
+/// Pushes one line as `actor` (with `kind` and `fields`) with this token, and
+/// returns the refusal's reason or null.
+async function tryLine(p, token, writer, opts) {
+  const [l] = chain(writer, 1, opts);
+  const r = await call("POST", `/v1/p/${p.name}/push`, { token, body: { writer, lines: [l.line] } });
+  if (r.data.refused) {
+    assert.equal(r.status, 403, JSON.stringify(r.data));
+    return r.data.refused.reason + ": " + r.data.refused.message;
+  }
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  return null;
+}
+
+async function mint(p, body) {
+  const r = await call("POST", `/v1/p/${p.name}/tokens`, { token: p.token, body });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  return r.data;
+}
+
+test("each role writes only as what it is (DESIGN §14.2)", async () => {
+  const p = await project();
+  const agent = (name, role) => ({ type: "agent", name, ...(role ? { role } : {}) });
+  const cases = [
+    // [role, actor, kind, fields, allowed]
+    ["owner", { type: "human", name: "ana" }, "decision", undefined, true],
+    ["owner", agent("pm", "pm"), "accept", { approved_by: "omar" }, true],
+    ["pm", agent("pm", "pm"), "accept", { approved_by: "omar" }, true],
+    ["pm", agent("epic:payments", "coordinator"), "task", undefined, true],
+    ["pm", { type: "human", name: "omar" }, "journal", undefined, false],
+    ["coordinator", agent("epic:payments", "coordinator"), "task", undefined, true],
+    ["coordinator", agent("pay-lead", "coordinator"), "assign", undefined, true],
+    ["coordinator", agent("impl-1", "implementer"), "claim", undefined, true],
+    ["coordinator", agent("distill"), "proposal", undefined, true],
+    ["coordinator", agent("epic:other", "coordinator"), "task", undefined, false],
+    ["coordinator", agent("epic:other"), "journal", undefined, false],
+    ["coordinator", agent("pm", "pm"), "journal", undefined, false],
+    ["coordinator", agent("epic:payments", "coordinator"), "decision", undefined, false],
+    ["coordinator", agent("epic:payments", "coordinator"), "journal", { approved_by: "omar" }, false],
+    ["coordinator", { type: "human", name: "omar" }, "journal", undefined, false],
+    ["implementer", agent("impl-1", "implementer"), "done", undefined, true],
+    ["implementer", agent("impl-1", "implementer"), "question", undefined, true],
+    ["implementer", agent("impl-1", "implementer"), "task", undefined, false],
+    ["implementer", agent("epic:payments", "coordinator"), "journal", undefined, false],
+    ["implementer", agent("epic:payments"), "journal", undefined, false],
+    ["implementer", agent("impl-1", "implementer"), "sign", undefined, false],
+    ["tester", agent("t-1", "tester"), "reopen", undefined, true],
+    ["scout", agent("s-1", "scout"), "fact", undefined, true],
+    ["scout", agent("s-1", "scout"), "done", undefined, false],
+  ];
+  const tokens = {};
+  for (const role of ["pm", "coordinator", "implementer", "tester", "scout"]) {
+    const body = { person: "omar", role, writer: `w-${role}@kontext` };
+    if (role === "coordinator") Object.assign(body, { epic: "E-123456", actors: ["pay-lead", "epic:payments"] });
+    tokens[role] = { ...(await mint(p, body)), n: 0, prev: GENESIS };
+  }
+  tokens.owner = { token: p.token, writer: p.writer, n: 0, prev: GENESIS };
+  for (const [role, actor, kind, fields, allowed] of cases) {
+    const t = tokens[role];
+    const opts = { from: t.n + 1, prev: t.prev, actor, kind, fields, tag: `-${kind}-${actor.name}` };
+    const why = await tryLine(p, t.token, t.writer, opts);
+    const label = `${role} as ${actor.type}:${actor.name} (${actor.role || "-"}) writing ${kind}`;
+    if (allowed) {
+      assert.equal(why, null, label);
+      const [l] = chain(t.writer, 1, opts);
+      t.n += 1;
+      t.prev = l.hash;
+    } else {
+      assert.match(why || "", /^identity: /, label);
+    }
+  }
+  // The claims in a coordinator's token say what it coordinates as.
+  const head = JSON.parse(Buffer.from(tokens.coordinator.token.split(".")[1], "base64url").toString());
+  assert.deepEqual(head.c, ["pay-lead", "epic:payments"]);
+  assert.equal(head.e, "E-123456");
+});
+
+test("tokens: list, revoke, expire, and a revoked writer can get a new token", async () => {
+  const p = await project();
+  const t = await mint(p, { person: "ana", role: "implementer", writer: "ana.impl@kontext" });
+  // One active token per writer.
+  let r = await call("POST", `/v1/p/${p.name}/tokens`, { token: p.token, body: { person: "ana", role: "implementer", writer: "ana.impl@kontext" } });
+  assert.equal(r.status, 409);
+  // Only an owner manages tokens.
+  r = await call("GET", `/v1/p/${p.name}/tokens`, { token: t.token });
+  assert.equal(r.status, 403);
+  r = await call("GET", `/v1/p/${p.name}/tokens`, { token: p.token });
+  assert.deepEqual(r.data.tokens.map((x) => [x.role, x.writer, x.revoked]), [["owner", "omar@mac", null], ["implementer", "ana.impl@kontext", null]]);
+  assert.ok(!("hash" in r.data.tokens[0]));
+  r = await call("POST", `/v1/p/${p.name}/tokens/${t.id}/revoke`, { token: p.token });
+  assert.equal(r.status, 200);
+  assert.ok(r.data.token.revoked);
+  r = await call("GET", `/v1/p/${p.name}/frontier`, { token: t.token });
+  assert.equal(r.status, 401);
+  assert.equal(r.data.error, "revoked");
+  // The same writer again, with a new token: its lines can still go up.
+  const again = await mint(p, { person: "ana", role: "implementer", writer: "ana.impl@kontext" });
+  assert.equal((await call("GET", `/v1/p/${p.name}/frontier`, { token: again.token })).status, 200);
+  // A token with a TTL carries its expiry and stops working after it.
+  const short = await mint(p, { person: "ana", role: "scout", writer: "ana.scout@kontext", ttl_ms: 1 });
+  assert.ok(short.expires > 0);
+  assert.equal(JSON.parse(Buffer.from(short.token.split(".")[1], "base64url").toString()).x, short.expires);
+  await new Promise((res) => setTimeout(res, 20));
+  r = await call("GET", `/v1/p/${p.name}/frontier`, { token: short.token });
+  assert.equal(r.data.error, "expired");
+  // A coordinator token needs its epic and names.
+  r = await call("POST", `/v1/p/${p.name}/tokens`, { token: p.token, body: { person: "ana", role: "coordinator", writer: "c@kontext" } });
+  assert.equal(r.status, 400);
 });

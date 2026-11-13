@@ -515,6 +515,7 @@ So `install --local` in the main checkout is what reaches every worktree session
 | `kontext changelog [--since <ref>]` | 4 | Technical changelog from the closed tasks and the merged PRs (`gh`). Always comes out the same |
 | `kontext sync` | 5 | `git pull --rebase` and `push` of the `kontext-home` |
 | `kontext server deploy [--name] [--account-id] [--subdomain] [--replace]` | sync server | Uploads the kontext server to your Cloudflare account (§14.1) and prints its URL; running it again updates it. It refuses a Worker of the same name that kontext did not deploy, unless `--replace` |
+| `kontext token create --role <r> [--epic] [--person] [--ttl] [--writer]` / `list` / `revoke <id>` | sync server | An owner's tokens for the project's server (§14.2): one per machine, person or sandbox, with the variables a sandbox needs |
 | `kontext ui` | 6 | Local read-only page: the tree at `/`, the ledger at `/ledger`, the report at `/report` |
 | `kontext inbox [count\|sign\|answer\|dismiss\|confirm]` / `kontext inbox --everyone` / `kontext report [--html]` | human | The human's inbox, everyone's inbox and the report (§20) |
 | `kontext ideas [--mark-audited]` | human | The user's ideas in `.pm/items.md` and the state of each one, from the ledger; which are not placed and how many messages no audit has seen. `--mark-audited` writes `.pm/audited.json` (§12.3) |
@@ -791,11 +792,33 @@ The first refused line stops the batch; the answer carries what was accepted, th
 
 **Notifications.** `GET ws` opens a hibernatable WebSocket (`ctx.acceptWebSocket`): while nothing changes the object can be evicted and no duration is billed. After each change the server sends `{"type": "frontier", seq, tails, config}` to every socket of the project: the frontier, never the lines. Clients pull what they lack.
 
-**Tokens** are `kxt1.<base64url of {"p": project, "w": writer}>.<secret>`: the binary reads the project and the writer from the token without the network, and the server keeps only its sha256. A token is bound to a person, a role, optionally an epic, and one writer; no two active tokens share a writer.
+**Tokens** are `kxt1.<base64url of the claims>.<secret>`, with the claims `{"p": project, "w": writer, "n": person, "r": role, "e"?: epic, "c"?: [names a coordinator writes as], "x"?: expiry in ms}`. The binary reads them without the network: it writes as the token's writer, and it refuses (exit 2) a line the server would refuse (§14.2). The server keeps only the token's sha256 and decides from its own row, never from the claims. A token is bound to a person, a role, optionally an epic, and one writer; no two active tokens share a writer (a revoked or expired one does not count, so a writer can get a new token).
 
 **Limits** (Cloudflare's, 2026-11-13; [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): on the Workers Free plan a Worker gets 10 ms of CPU per request and a Durable Object 30 s, so the Worker only routes and all the work is in the object; 100,000 requests and 100,000 rows written per day, 5 GB stored; a row, string or BLOB holds at most 8 MB, and a statement 100 KB. A push takes at most 1,000 lines per request. **A line holds at most 4 MiB** (`MAX_LINE_BYTES`, the same constant in `server/worker.js` and `src/server.rs`, pinned by a test; a longer one is refused as `too_large`): about a thousand times the largest entry kontext writes (an entry carries text; images go to `media/`), and a push of one such line, JSON-escaped (at most twice its size), stays far below the 100 MB request body and the 128 MB of an isolate. In a project with a server the binary refuses to write a longer line (exit 2, nothing written), so every line it writes can be pushed; without a server there is no such limit. An index adds a row written per indexed write ([D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)), so the tables have no secondary index (the few tokens are looked up by scanning their hashes).
 
 **Deploying.** `kontext server deploy` uploads the Worker with the Cloudflare REST API (§10), with the tag `kontext-server` in the upload's metadata, which the script list returns (`tags`). A Worker with the same name and without that tag is somebody else's: deploy refuses it (exit 2) and changes nothing, unless `--replace`. For the tests, `server/dev.mjs` runs the same file in workerd through Miniflare, a dev dependency under `server/` that only CI and development need.
+
+### 14.2 Tokens and roles
+
+Every machine, person and sandbox that syncs with the server has its own token, and with it its own writer. An owner makes them with `kontext token create`; the admin secret (set when the server is deployed, kept in `servers.json` of the config folder, mode 0600) only creates projects, and `kontext server connect` and `init --server` use it once to get the first owner token.
+
+**What each role may write.** The server checks every pushed line against its token: only identity (who the actor is, and which kinds its role writes), never the project's state. That stays where it was: the binary computes it from the ledger, and an entry that does not count is still stored and shows up as an alert (§4.3).
+
+| Token's role | Writes as | May not write |
+|---|---|---|
+| `owner` | anyone (an owner can make a token for anyone anyway) | — |
+| `pm` | agents (any role, `approved_by` included) | as a human |
+| `coordinator` (of an epic) | agents; as a coordinator only with the epic's coordinator names (its `coordinator` and `epic:<name>`, fixed when the token is made) | as a human; as the pm; another epic's coordinator; `approved_by`; `charter`, `goal`, `epic`, `feature`, `scope`, `sign`, `accept`, `reject`, `decision`, `supersede` |
+| `implementer`, `tester` | agents | the above, and as a coordinator (role `coordinator`, or a name `epic:…`); `task`, `assign` |
+| `scout` | agents | the above; anything but `fact`, `journal`, `question`, `confirm`, `proposal` |
+
+A coordinator's subagents write through its token: `--actor agent:impl-1 --role implementer next --claim` is allowed, and so are agents with no role (the distill). The epic of an implementer's or tester's token is noted, not enforced (that would need the project's state).
+
+**Refusing before writing.** A line the server refuses can never be pushed, and nothing after it from that writer can either. So the binary runs the same rules (from the token's claims) under the writer's lock, before the line is in the file, and refuses with exit code 2, naming the token. The server's check is the backstop for a line written before the token, by an old binary, or with a token without claims. If it happens, `kontext status` says so and how to get out: an owner revokes the token and makes one for the same writer with a role that may write the line (`kontext token create --writer <w> --role …`); with it, `kontext sync` pushes everything.
+
+**Sandboxes.** `kontext token create` prints the variables a sandbox needs: `KONTEXT_SERVER`, `KONTEXT_PROJECT`, `KONTEXT_TOKEN`, and its actor and role (`KONTEXT_ACTOR=agent:epic:<name>` and `KONTEXT_ROLE=coordinator` for a coordinator). In the sandbox, the first kontext command (the start hook included) sees the token for a project that is not registered and clones it into the config folder (`<config>/homes/<project>`), under a lock so that a coordinator and its subagents starting at once set it up once, in at most 20 s; what does not fit comes with the next commands. Nothing goes in the repo: no token, no server URL, no ledger. A token can expire (`--ttl 8h`) and be revoked (`kontext token revoke <id>`), and it stops working at once.
+
+**A second machine of the same person** gets its own token, normally with its own writer; `--writer` reuses one (only one copy at a time may write as a writer: the server refuses the second copy's lines as a fork).
 
 ## 15. Benchmark
 

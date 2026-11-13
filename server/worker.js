@@ -88,11 +88,18 @@ function b64url(bytes) {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/// A token: `kxt1.<base64url of {"p":project,"w":writer}>.<secret>`. The
-/// binary reads the project and the writer from it without the network; the
-/// server keeps only its sha256.
-function mintToken(project, writer) {
-  const head = b64url(enc.encode(JSON.stringify({ p: project, w: writer })));
+/// A token: `kxt1.<base64url of its claims>.<secret>`. The claims are
+/// `{p: project, w: writer, n: person, r: role, e?: epic, c?: [coordinator
+/// names], x?: expiry in ms}`: the binary reads them without the network (to
+/// pick the writer and to refuse, before writing, a line the server would
+/// refuse). The server keeps only the sha256 and decides from its own row,
+/// never from the claims.
+function mintToken(project, spec) {
+  const claims = { p: project, w: spec.writer, n: spec.person, r: spec.role };
+  if (spec.epic) claims.e = spec.epic;
+  if (spec.actors && spec.actors.length) claims.c = spec.actors;
+  if (spec.expires) claims.x = spec.expires;
+  const head = b64url(enc.encode(JSON.stringify(claims)));
   const secret = b64url(crypto.getRandomValues(new Uint8Array(32)));
   return `kxt1.${head}.${secret}`;
 }
@@ -121,10 +128,66 @@ class HttpError extends Error {
   }
 }
 
-/// Does this token's identity allow a line with this actor? (PR 4 fills in the
-/// role rules; until then every token may write any actor in its own file.)
-function actorAllowed(_principal, _entry) {
+/// What only an owner or the pm writes: the plan and the decisions.
+const GOVERNANCE = ["charter", "goal", "epic", "feature", "scope", "sign", "accept", "reject", "decision", "supersede"];
+/// What a coordinator hands out, and an implementer or tester may not.
+const COORDINATION = ["task", "assign"];
+/// All a scout writes.
+const SCOUT_KINDS = ["fact", "journal", "question", "confirm", "proposal"];
+
+/// Does this token's identity allow this line? `null` if it does, otherwise
+/// why not (DESIGN §14.2). Only identity: who the actor is and which kinds
+/// its role writes, never the project's state. The binary runs the same rules
+/// before writing (`src/remote.rs`, `identity_problem`), so a refused line is
+/// never in a ledger file; these are the backstop.
+function actorAllowed(p, e) {
+  if (p.admin || p.role === "owner") return null;
+  const a = e.actor && typeof e.actor === "object" ? e.actor : {};
+  const name = String(a.name || "");
+  const role = a.role == null ? null : String(a.role);
+  const fields = e.fields && typeof e.fields === "object" ? e.fields : {};
+  const kind = String(e.kind || "");
+  if (a.type !== "agent") return `a ${p.role} token writes only as agents, not as ${a.type}:${name}`;
+  if (p.role === "pm") return null;
+  if (role === "pm") return `only a pm or owner token writes as role pm`;
+  if (fields.approved_by != null) return `only a pm or owner token writes approved_by`;
+  if (GOVERNANCE.includes(kind)) return `a ${p.role} token does not write ${kind} (only an owner or the pm)`;
+  if (p.role === "coordinator") {
+    const mine = p.actors || [];
+    if (role === "coordinator" && !mine.includes(name)) {
+      return `this token coordinates as ${mine.join(" or ")}, not as agent:${name}`;
+    }
+    if (name.startsWith("epic:") && !mine.includes(name)) {
+      return `agent:${name} is another epic's coordinator; this token coordinates as ${mine.join(" or ")}`;
+    }
+    return null;
+  }
+  if (role === "coordinator" || name.startsWith("epic:")) {
+    return `a ${p.role} token does not write as a coordinator (agent:${name})`;
+  }
+  if (COORDINATION.includes(kind)) return `a ${p.role} token does not write ${kind} (the coordinator does)`;
+  if (p.role === "scout" && !SCOUT_KINDS.includes(kind)) {
+    return `a scout token writes only ${SCOUT_KINDS.join(", ")}, not ${kind}`;
+  }
   return null;
+}
+
+function parseActors(v) {
+  if (!v) return [];
+  try {
+    const a = JSON.parse(v);
+    return Array.isArray(a) ? a.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function tokenRow(t) {
+  return {
+    id: t.id, person: t.person, role: t.role, epic: t.epic || null, actors: parseActors(t.actors),
+    writer: t.writer, created: t.created, expires: t.expires || null, revoked: t.revoked || null,
+    created_by: t.created_by || null,
+  };
 }
 
 async function drain(req) {
@@ -189,7 +252,7 @@ export class Project extends DurableObject {
       CREATE TABLE IF NOT EXISTS media_chunks(name TEXT NOT NULL, i INTEGER NOT NULL, data BLOB NOT NULL,
         PRIMARY KEY(name, i)) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT NOT NULL, person TEXT NOT NULL,
-        role TEXT NOT NULL, epic TEXT, writer TEXT NOT NULL, created TEXT NOT NULL, expires INTEGER,
+        role TEXT NOT NULL, epic TEXT, actors TEXT, writer TEXT NOT NULL, created TEXT NOT NULL, expires INTEGER,
         revoked TEXT, created_by TEXT) WITHOUT ROWID;
     `);
   }
@@ -263,32 +326,39 @@ export class Project extends DurableObject {
     const t = rows[0];
     if (t.revoked) throw new HttpError(401, "revoked", `token ${t.id} was revoked`);
     if (t.expires && Date.now() > t.expires) throw new HttpError(401, "expired", `token ${t.id} expired`);
-    return { admin: false, id: t.id, role: t.role, person: t.person, writer: t.writer, epic: t.epic || null };
+    return {
+      admin: false, id: t.id, role: t.role, person: t.person, writer: t.writer, epic: t.epic || null,
+      actors: parseActors(t.actors),
+    };
   }
 
   requireProject() {
     if (!this.meta("name")) throw new HttpError(404, "no_project", "this project does not exist on the server");
   }
 
-  insertToken({ person, role, epic, writer, expires, createdBy }) {
+  insertToken({ person, role, epic, actors, writer, expires, createdBy }) {
     const active = this.sql
       .exec("SELECT id FROM tokens WHERE writer = ? AND revoked IS NULL AND (expires IS NULL OR expires > ?)", writer, Date.now())
       .toArray();
     if (active.length) {
       throw new HttpError(409, "writer_taken", `writer ${writer} already has an active token (${active[0].id}); revoke it first`);
     }
-    return { person, role, epic: epic || null, writer, expires: expires || null, createdBy };
+    return { person, role, epic: epic || null, actors: actors || [], writer, expires: expires || null, createdBy };
   }
 
   async storeToken(spec, project) {
-    const token = mintToken(project, spec.writer);
+    const token = mintToken(project, spec);
     const id = "tok_" + b64url(crypto.getRandomValues(new Uint8Array(6)));
     const hash = await sha256Hex(token);
     this.sql.exec(
-      "INSERT INTO tokens(id, hash, person, role, epic, writer, created, expires, revoked, created_by) VALUES(?,?,?,?,?,?,?,?,NULL,?)",
-      id, hash, spec.person, spec.role, spec.epic, spec.writer, new Date().toISOString(), spec.expires, spec.createdBy,
+      "INSERT INTO tokens(id, hash, person, role, epic, actors, writer, created, expires, revoked, created_by) VALUES(?,?,?,?,?,?,?,?,?,NULL,?)",
+      id, hash, spec.person, spec.role, spec.epic, spec.actors.length ? JSON.stringify(spec.actors) : null,
+      spec.writer, new Date().toISOString(), spec.expires, spec.createdBy,
     );
-    return { token, id, person: spec.person, role: spec.role, epic: spec.epic, writer: spec.writer, expires: spec.expires };
+    return {
+      token, id, person: spec.person, role: spec.role, epic: spec.epic, actors: spec.actors, writer: spec.writer,
+      expires: spec.expires,
+    };
   }
 
   /// A line as received. One longer than LINE_CHUNK bytes goes in
@@ -347,7 +417,10 @@ export class Project extends DurableObject {
 
     if (parts[0] === "ws") return this.websocket(req);
     if (parts[0] === "whoami" && m === "GET") {
-      return json({ project, role: p.role, person: p.person, epic: p.epic, writer: p.writer, admin: p.admin, protocol: PROTOCOL });
+      return json({
+        project, role: p.role, person: p.person, epic: p.epic, actors: p.actors || [], writer: p.writer, admin: p.admin,
+        protocol: PROTOCOL,
+      });
     }
     if (parts[0] === "frontier" && m === "GET") return json(this.frontier());
     if (parts[0] === "push" && m === "POST") return this.push(req, p);
@@ -659,22 +732,50 @@ export class Project extends DurableObject {
     return json({ name, stored: true }, 201);
   }
 
-  /// `POST tokens` {person, role, epic?, writer}: a token for another writer,
-  /// from an owner token or the admin.
+  /// Tokens, for an owner token or the admin:
+  /// - `POST tokens` {person, role, writer, epic?, actors?, ttl_ms?}: a new one.
+  ///   A coordinator needs its epic and the actor names it coordinates as.
+  /// - `GET tokens`: all of them, without their hashes.
+  /// - `POST tokens/<id>/revoke`.
   async tokens(req, p, parts, project) {
-    if (parts.length === 1 && req.method === "POST") {
-      if (!p.admin && p.role !== "owner") throw new HttpError(403, "forbidden", "only an owner makes tokens");
+    if (!p.admin && p.role !== "owner") throw new HttpError(403, "forbidden", "only an owner manages tokens");
+    const m = req.method;
+    if (parts.length === 1 && m === "GET") {
+      const rows = this.sql.exec("SELECT * FROM tokens ORDER BY created, id").toArray();
+      return json({ tokens: rows.map(tokenRow) });
+    }
+    if (parts.length === 1 && m === "POST") {
       const body = await readJson(req, 4096);
       const role = String(body.role || "");
       const person = String(body.person || "").trim();
       const writer = String(body.writer || "").trim();
       const epic = body.epic == null ? null : String(body.epic).trim() || null;
+      const actors = Array.isArray(body.actors) ? body.actors.map((a) => String(a).trim()).filter(Boolean) : [];
+      const ttl = body.ttl_ms == null ? null : Number(body.ttl_ms);
       if (!ROLES.includes(role)) throw new HttpError(400, "bad_role", `role is one of ${ROLES.join(", ")}`);
-      if (!person) throw new HttpError(400, "bad_person", "person is required");
+      if (!person || person.length > 128) throw new HttpError(400, "bad_person", "person is required (at most 128 characters)");
       if (!WRITER_RE.test(writer)) throw new HttpError(400, "bad_writer", `invalid writer ${JSON.stringify(writer)}`);
-      const spec = this.insertToken({ person, role, epic, writer, expires: null, createdBy: p.admin ? "admin" : p.id });
+      if (role === "coordinator" && (!epic || !actors.length)) {
+        throw new HttpError(400, "bad_epic", "a coordinator token needs its epic and the names it coordinates as");
+      }
+      if (actors.length > 8 || actors.some((a) => a.length > 128)) throw new HttpError(400, "bad_actors", "at most 8 names");
+      if (ttl != null && !(Number.isFinite(ttl) && ttl > 0)) throw new HttpError(400, "bad_ttl", "ttl_ms must be a positive number");
+      const spec = this.insertToken({
+        person, role, epic, actors: role === "coordinator" ? actors : [], writer,
+        expires: ttl ? Date.now() + Math.floor(ttl) : null, createdBy: p.admin ? "admin" : p.id,
+      });
       const t = await this.storeToken(spec, project);
       return json({ project, ...t }, 201);
+    }
+    if (parts.length === 3 && parts[2] === "revoke" && m === "POST") {
+      await drain(req);
+      const rows = this.sql.exec("SELECT * FROM tokens WHERE id = ?", parts[1]).toArray();
+      if (!rows.length) throw new HttpError(404, "no_token", `there is no token ${parts[1]}`);
+      if (!rows[0].revoked) {
+        this.sql.exec("UPDATE tokens SET revoked = ? WHERE id = ?", new Date().toISOString(), parts[1]);
+      }
+      const t = this.sql.exec("SELECT * FROM tokens WHERE id = ?", parts[1]).toArray()[0];
+      return json({ token: tokenRow(t) });
     }
     throw new HttpError(404, "not_found", "no such token route");
   }

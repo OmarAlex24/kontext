@@ -87,6 +87,10 @@ pub struct Store {
     /// The project has a kontext server: a line it could never push (over
     /// `MAX_LINE_BYTES`) is refused before it is written (DESIGN §14.1).
     server: bool,
+    /// The kontext server token this writer writes under, if the project has
+    /// a server (DESIGN §14.2): what it may not write is refused here, before
+    /// it is in the file, because the server would refuse it forever.
+    token: Option<crate::config::Token>,
 }
 
 /// What [`Batch::push`] returned.
@@ -115,6 +119,7 @@ impl Store {
             signer: None,
             people,
             server: crate::remote::server_for_home(home).is_some(),
+            token: crate::remote::token_for_home(home, writer),
         })
     }
 
@@ -316,6 +321,22 @@ impl Store {
             written_hlc,
             ..
         } = batch;
+        if let Some(t) = &self.token {
+            for e in &pending {
+                if let Some(why) = crate::remote::identity_problem(t, e) {
+                    return Err(Refused(format!(
+                        "{why}. This copy writes as {} with a {} token of {}, and the server \
+                         would refuse the line; nothing was written. Write as what the token \
+                         allows (--actor, --role), or with a token for that role \
+                         (`kontext token create`).",
+                        t.writer,
+                        t.role.as_deref().unwrap_or("?"),
+                        t.person.as_deref().unwrap_or("?")
+                    ))
+                    .into());
+                }
+            }
+        }
 
         if !pending.is_empty() {
             let created = !path.exists();

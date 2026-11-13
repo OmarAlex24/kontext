@@ -324,6 +324,12 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: ServerCmd,
     },
+    /// Tokens for the project's kontext server (an owner's): one per machine, person or sandbox,
+    /// each bound to a role and its own writer
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
     /// Checks the chain of each ledger file (and any signatures)
     Verify,
     /// Rebuilds the index from the ledger files
@@ -762,6 +768,38 @@ pub enum Cmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum TokenCmd {
+    /// Makes a token and prints it once, with the variables a sandbox needs (KONTEXT_SERVER,
+    /// KONTEXT_PROJECT, KONTEXT_TOKEN, and its actor and role). The server refuses what the
+    /// role may not write (DESIGN §14.2)
+    Create {
+        /// owner, pm, coordinator, implementer, tester or scout
+        #[arg(long)]
+        role: String,
+        /// The epic (id or name); a coordinator needs it, and writes as its coordinator
+        #[arg(long)]
+        epic: Option<String>,
+        /// Whose token it is (default: this machine's human, as in standup)
+        #[arg(long)]
+        person: Option<String>,
+        /// It stops working after this long (`8h`, `7d`)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// The writer it writes as (default: a new one, `<person>.<role>[.<epic>].<random>@kontext`).
+        /// Use an existing one for a second machine of the same person, or to replace a revoked token
+        #[arg(long)]
+        writer: Option<String>,
+    },
+    /// Lists the project's tokens (never their secrets)
+    List,
+    /// Revokes a token: it stops working at once
+    Revoke {
+        /// Its id (`tok_…`, from `kontext token list`)
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ServerCmd {
     /// Uploads the kontext server (a Worker with one SQLite Durable Object per project) to your
     /// Cloudflare account and prints its URL. Needs CLOUDFLARE_API_TOKEN (or the token on stdin)
@@ -1063,6 +1101,22 @@ fn signer(forced: bool) -> Result<Option<crate::sign::Signer>> {
 /// pushes what it wrote afterwards (DESIGN §14.1), quietly and with short
 /// timeouts: the network never blocks or breaks it.
 pub fn run(cli: Cli) -> Result<ExitCode> {
+    // A sandbox with KONTEXT_SERVER and KONTEXT_TOKEN sets its project up on
+    // the first command (quietly in the hook, which must stay silent).
+    if !matches!(
+        cli.cmd,
+        Cmd::Init { .. } | Cmd::Clone { .. } | Cmd::Server { .. } | Cmd::Measure { .. }
+    ) && let Some(r) = crate::remote::bootstrap()
+        && !matches!(cli.cmd, Cmd::Hook { .. })
+    {
+        match r {
+            Ok(msg) if !msg.is_empty() => eprintln!("kontext: {msg}"),
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("kontext: warning: could not set the project up from the server: {e:#}")
+            }
+        }
+    }
     let auto = auto_sync_target(&cli);
     let warn = |r: Option<crate::remote::Report>| {
         for w in r.iter().flat_map(crate::remote::auto_warnings) {
@@ -1090,6 +1144,7 @@ fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
         | Cmd::Clone { .. }
         | Cmd::Sync { .. }
         | Cmd::Server { .. }
+        | Cmd::Token { .. }
         | Cmd::Ui { .. } => return None,
         Cmd::Install {
             skills_only: true, ..
@@ -1612,6 +1667,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 project: url,
                 home,
                 name,
+                quick: false,
             })?;
             if cx.json {
                 print_json(&json!({ "clone": c, "sync": r }))?;
@@ -1818,6 +1874,63 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                     "v0 references that could not be translated: {}",
                     r.unresolved.join(", ")
                 );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Token { cmd } => {
+            let p = config::resolve_project(project)?;
+            match cmd {
+                TokenCmd::Create {
+                    role,
+                    epic,
+                    person,
+                    ttl,
+                    writer,
+                } => {
+                    let m = crate::remote::token_create(
+                        &p.name,
+                        &p.home,
+                        &crate::remote::TokenArgs {
+                            role,
+                            epic,
+                            person,
+                            ttl,
+                            writer,
+                        },
+                    )?;
+                    if cx.json {
+                        print_json(&m)?;
+                    } else {
+                        print!("{}", m.text());
+                    }
+                }
+                TokenCmd::List => {
+                    let t = crate::remote::token_list(&p.name)?;
+                    if cx.json {
+                        print_json(&t)?;
+                    } else if t.is_empty() {
+                        println!("No tokens.");
+                    } else {
+                        for l in crate::remote::token_lines(&t) {
+                            println!("{l}");
+                        }
+                    }
+                }
+                TokenCmd::Revoke { id } => {
+                    let t = crate::remote::token_revoke(&p.name, &id)?;
+                    if cx.json {
+                        print_json(&t)?;
+                    } else {
+                        println!(
+                            "Revoked {id} ({} as {}, writer {}). Its writer's lines stay; a new token \
+                             for that writer (`kontext token create --writer {}`) can push the rest.",
+                            t["person"].as_str().unwrap_or("?"),
+                            t["role"].as_str().unwrap_or("?"),
+                            t["writer"].as_str().unwrap_or("?"),
+                            t["writer"].as_str().unwrap_or("?")
+                        );
+                    }
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
