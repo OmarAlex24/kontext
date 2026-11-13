@@ -625,17 +625,21 @@ impl Status {
             }
             _ => l.push("Remote: none (`kontext sync` only commits)".into()),
         }
-        l.push(format!(
-            "Last sync: {}",
-            self.last_sync
-                .as_deref()
-                .unwrap_or("never from this machine")
-        ));
-        let mut pending = format!("Own entries not committed: {}", self.uncommitted);
-        if let Some(u) = self.unpushed {
-            pending.push_str(&format!("; not pushed: {u} (according to the last fetch)"));
+        // Git's last sync and commits mean nothing for a project that syncs
+        // only through its server: its own lines below say what is pending.
+        if self.server.is_none() || self.remote.is_some() {
+            l.push(format!(
+                "Last sync: {}",
+                self.last_sync
+                    .as_deref()
+                    .unwrap_or("never from this machine")
+            ));
+            let mut pending = format!("Own entries not committed: {}", self.uncommitted);
+            if let Some(u) = self.unpushed {
+                pending.push_str(&format!("; not pushed: {u} (according to the last fetch)"));
+            }
+            l.push(pending);
         }
-        l.push(pending);
         l.push(format!(
             "Index: {} entries{}",
             self.index_entries,
