@@ -514,6 +514,7 @@ So `install --local` in the main checkout is what reaches every worktree session
 | `kontext distill --transcript <path>` | 4 | Manual distill |
 | `kontext changelog [--since <ref>]` | 4 | Technical changelog from the closed tasks and the merged PRs (`gh`). Always comes out the same |
 | `kontext sync` | 5 | `git pull --rebase` and `push` of the `kontext-home` |
+| `kontext server deploy [--name] [--account-id] [--subdomain]` | sync server | Uploads the kontext server to your Cloudflare account (§14.1) and prints its URL; running it again updates it |
 | `kontext ui` | 6 | Local read-only page: the tree at `/`, the ledger at `/ledger`, the report at `/report` |
 | `kontext inbox [count\|sign\|answer\|dismiss\|confirm]` / `kontext inbox --everyone` / `kontext report [--html]` | human | The human's inbox, everyone's inbox and the report (§20) |
 | `kontext ideas [--mark-audited]` | human | The user's ideas in `.pm/items.md` and the state of each one, from the ledger; which are not placed and how many messages no audit has seen. `--mark-audited` writes `.pm/audited.json` (§12.3) |
@@ -747,6 +748,54 @@ One thing changes: the model's command is configurable (`[distill].command`) ins
 > - **Verifying:** `ssh-keygen -Y verify -n kontext -f <allowed_signers> -I <person> -s <signature>` with the `hash` on stdin; `allowed_signers` is built from the keys in `[people]` in `.kontext/tmp/`. A key that doesn't belong to that person doesn't verify, even if it belongs to someone else on the project.
 > - **`require_signatures = true`:** those types only count if the signature verifies for the person, and the owners rule is the same (§4.3). Those that don't are stored, don't count, and show up as an alert. What was imported from v0 doesn't need a signature (the v0 rule had already accepted it). So as not to write something that wouldn't count, `kontext` refuses (exit code 2) if the machine has no key or if its signature doesn't verify for that person.
 > - `kontext verify` checks the signatures in the files (not in the index) and exits with 1 if any doesn't verify; with `require_signatures` it also reports the missing ones.
+
+### 14.1 The server protocol
+
+The server relays ledger lines. It stores them and hands them out; it never derives state. Each project gets its own server, which its owner runs: a Cloudflare Worker (`server/worker.js`, plain JavaScript with no build step, embedded in the binary) with one SQLite-backed Durable Object per project. The local `kontext-home` stays the working copy, and the binary computes everything from it, as before.
+
+**What the Durable Object stores** (tables `WITHOUT ROWID`, keyed by what is looked up, so each stored line is one row written):
+
+| Table | What |
+|---|---|
+| `lines(writer, n, hash, line)` | Each writer's ledger lines, in order, exactly as the binary wrote them (`line` is the text of the line, without the `\n`) |
+| `tails(writer, n, hash)` | The last line of each writer: the server's frontier |
+| `cursors(reader, writer, body, stamp, seq)` | The cursor files `cursors/<reader>/<writer>.json`, with their text; last write wins by `stamp` (the file's time in ms) |
+| `config(name, version, sha256, body, by, at)` | `project.toml` and `synonyms.toml`, versioned |
+| `media(name, sha256, bytes, chunks, seq)` and `media_chunks(name, i, data)` | The files of `media/`, by `<sha256>.<ext>`, in 1 MiB chunks (a row holds at most 8 MB) |
+| `tokens(id, hash, person, role, epic, writer, …)` | The tokens, by their sha256 |
+| `meta(k, v)` | The project's name, its creation time, and `seq`, a counter that goes up with every change |
+
+**Requests.** Everything is JSON under `/v1/p/<project>/`, with `Authorization: Bearer <token>`; the Worker only routes (it checks that a token is there, so a request without one is never billed to the Durable Object), and the Durable Object authenticates.
+
+| Request | Who | What |
+|---|---|---|
+| `GET /v1/info` | anyone | `{"kontext_server": 1}` |
+| `POST create` `{person, writer}` | the admin secret | Creates the project and its first owner token, bound to `writer`. 409 if it exists |
+| `GET whoami` | a token | Its person, role, epic and writer |
+| `GET frontier` | a token | `{seq, tails: {writer: {n, hash}}, config: {name: {version, sha256}}}` |
+| `POST push` `{writer, lines: [text…]}` | the writer's token, or the admin | Appends (below) |
+| `POST pull` `{since: {writer: n}, limit}` | a token | The lines beyond `since`, writer by writer and in order, up to 2,000 lines or 4 MB, and `more` if there is more |
+| `GET cursors?since=<seq>` / `POST cursors` `{cursors: [{reader, writer, body, stamp}]}` | a token (only its writer's files) | Cursor files |
+| `GET config` / `PUT config/<name>` `{base, body}` | an owner token or the admin to write | The new version only on top of the one the client saw (`base`; 409 with the current one otherwise) |
+| `GET media?since=<seq>` / `GET media/<name>` / `PUT media/<name>` | a token | Files by content; the server checks the sha256 in the name |
+| `GET ws` (WebSocket) | a token | The frontier when it connects and after every change |
+
+**Appending.** The lines go one by one, in order, and each one must continue the server's chain for its writer:
+- same `n` and same `hash` as a line the server has: skipped (`duplicates`), so a retry is always safe;
+- a different line at an `n` the server has, or `prev` that is not the hash of the server's last line: refused as `fork`;
+- `n` beyond the next one: refused as `gap`;
+- `writer` that is not the token's (or a line inside that says another writer): refused as `writer`;
+- what the token's role may not write (§14.2): refused as `identity`.
+
+The first refused line stops the batch; the answer carries what was accepted, the server's tail and the refusal (`{index, n, reason, message}`), with 409 for `fork` and `gap` and 403 for `writer` and `identity`. So a fork is never stored. The server reads `writer`, `n`, `prev`, `hash` and `actor` from a copy of the line and stores the text it received; it does not recompute the hash (the binary does that when it pulls).
+
+**Notifications.** `GET ws` opens a hibernatable WebSocket (`ctx.acceptWebSocket`): while nothing changes the object can be evicted and no duration is billed. After each change the server sends `{"type": "frontier", seq, tails, config}` to every socket of the project: the frontier, never the lines. Clients pull what they lack.
+
+**Tokens** are `kxt1.<base64url of {"p": project, "w": writer}>.<secret>`: the binary reads the project and the writer from the token without the network, and the server keeps only its sha256. A token is bound to a person, a role, optionally an epic, and one writer; no two active tokens share a writer.
+
+**Limits** (Cloudflare's, 2026-11-13; [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): on the Workers Free plan a Worker gets 10 ms of CPU per request and a Durable Object 30 s, so the Worker only routes and all the work is in the object; 100,000 requests and 100,000 rows written per day, 5 GB stored; a row, string or BLOB holds at most 8 MB, and a statement 100 KB. A push takes at most 1,000 lines per request. An index adds a row written per indexed write ([D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)), so the tables have no secondary index (the few tokens are looked up by scanning their hashes).
+
+**Deploying.** `kontext server deploy` uploads the Worker with the Cloudflare REST API (§10). For the tests, `server/dev.mjs` runs the same file in workerd through Miniflare, a dev dependency under `server/` that only CI and development need.
 
 ## 15. Benchmark
 

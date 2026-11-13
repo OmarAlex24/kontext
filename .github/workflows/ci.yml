@@ -45,11 +45,30 @@ jobs:
           key: cargo-${{ runner.os }}-1.98.1-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-1.98.1-
 
+      # The kontext server's tests run server/worker.js in workerd through
+      # Miniflare, a dev dependency under server/. Only CI and development need
+      # Node; the binary does not.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: npm ci (server)
+        run: npm ci --prefix server --no-audit --no-fund
+
       - name: cargo fmt
         run: cargo fmt --check
 
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: server tests (Miniflare)
+        run: npm test --prefix server
+
+      # With KONTEXT_REQUIRE_SERVER_TESTS=1 the Rust tests that need the local
+      # server fail instead of skipping when it cannot start.
       - name: cargo test
+        env:
+          KONTEXT_REQUIRE_SERVER_TESTS: "1"
         run: cargo test --locked

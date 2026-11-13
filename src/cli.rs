@@ -310,6 +310,11 @@ pub enum Cmd {
     },
     /// Project, writer, remote, last sync, what's left to upload, index and chains
     Status,
+    /// The kontext server: a Cloudflare Worker you own that relays the ledger between machines
+    Server {
+        #[command(subcommand)]
+        cmd: ServerCmd,
+    },
     /// Checks the chain of each ledger file (and any signatures)
     Verify,
     /// Rebuilds the index from the ledger files
@@ -744,6 +749,28 @@ pub enum Cmd {
     Debug {
         #[command(subcommand)]
         cmd: DebugCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerCmd {
+    /// Uploads the kontext server (a Worker with one SQLite Durable Object per project) to your
+    /// Cloudflare account and prints its URL. Needs CLOUDFLARE_API_TOKEN (or the token on stdin)
+    /// with the account permission "Workers Scripts: Edit". Running it again updates the Worker
+    /// and keeps its admin secret (saved in servers.json in the kontext config folder, mode 0600)
+    Deploy {
+        /// The Worker's name: https://<name>.<subdomain>.workers.dev
+        #[arg(long, default_value = "kontext")]
+        name: String,
+        /// Cloudflare account id (default: $CLOUDFLARE_ACCOUNT_ID, or the token's only account)
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Registers this workers.dev subdomain for the account, if it has none yet
+        #[arg(long)]
+        subdomain: Option<String>,
+        /// Does not wait for the URL to answer
+        #[arg(long)]
+        no_check: bool,
     },
 }
 
@@ -1640,6 +1667,28 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                     "v0 references that could not be translated: {}",
                     r.unresolved.join(", ")
                 );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Server {
+            cmd:
+                ServerCmd::Deploy {
+                    name,
+                    account_id,
+                    subdomain,
+                    no_check,
+                },
+        } => {
+            let d = crate::server::deploy(&crate::server::DeployArgs {
+                name,
+                account_id,
+                subdomain,
+                no_check,
+            })?;
+            if cx.json {
+                print_json(&d)?;
+            } else {
+                print!("{}", d.text());
             }
             Ok(ExitCode::SUCCESS)
         }

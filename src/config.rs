@@ -724,9 +724,75 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Writes a file only its owner can read (0600), in one go, creating its folder
+/// (0700) if needed: secrets and tokens.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = path.parent().context("path without a folder")?;
+    if !dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("could not create {}", dir.display()))?;
+    }
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&tmp);
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("could not write {}", tmp.display()))?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(&tmp, path).with_context(|| format!("could not write {}", path.display()))?;
+    Ok(())
+}
+
+/// `n` random bytes from the system, in hex.
+pub fn random_hex(n: usize) -> Result<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .context("could not read /dev/urandom")?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_files_are_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub").join("secret");
+        write_private(&p, b"x").unwrap();
+        write_private(&p, b"y").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"y");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(p.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(random_hex(16).unwrap().len(), 32);
+        assert_ne!(random_hex(16).unwrap(), random_hex(16).unwrap());
+    }
 
     #[test]
     fn writer_validation() {
