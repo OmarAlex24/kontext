@@ -2612,7 +2612,7 @@ impl Ctx<'_> {
         };
         for k in &plan.kept {
             println!(
-                "Kept {}: it already exists with different content (did you change it?). `kontext install --force` replaces it.",
+                "Kept {}: it was changed by hand (it matches no kontext version). `kontext install --force` replaces it.",
                 k.display()
             );
         }

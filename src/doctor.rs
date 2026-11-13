@@ -1217,7 +1217,11 @@ fn check_skills(
                 ),
                 None => "kontext install".into(),
             };
-            r.note("skills", outdated("skills", &missing, &old), Some(fix));
+            r.note(
+                "skills",
+                outdated("skills", &missing, ("not this version", &old)),
+                Some(fix),
+            );
         }
     }
     if project.is_none() {
@@ -1261,30 +1265,38 @@ fn check_skills(
                  loads the main checkout's)",
                 m.display()
             ),
-            None => "kontext install".into(),
+            None if old.is_empty() => "kontext install".into(),
+            None => "`kontext install` updates them".into(),
         };
-        r.note("skills", outdated("agent files", &missing, &old), Some(fix));
+        r.note(
+            "skills",
+            outdated(
+                "agent files",
+                &missing,
+                ("from an older kontext version", &old),
+            ),
+            Some(fix),
+        );
     }
+    // Content that matches no released version (`install::is_released_agent`).
     if !plan.kept.is_empty() {
         let kept: Vec<String> = plan.kept.iter().map(|p| rel(p)).collect();
         r.note(
             "skills",
-            format!(
-                "agent files that differ from this version (changed by hand, or from another version): {}",
-                kept.join(", ")
-            ),
+            format!("agent files changed by hand: {}", kept.join(", ")),
             Some("`kontext install --force` replaces them".into()),
         );
     }
 }
 
-fn outdated(what: &str, missing: &[String], old: &[String]) -> String {
+/// `old` is how to call the files that differ, and which they are.
+fn outdated(what: &str, missing: &[String], (label, old): (&str, &[String])) -> String {
     let mut parts = Vec::new();
     if !missing.is_empty() {
         parts.push(format!("missing: {}", missing.join(", ")));
     }
     if !old.is_empty() {
-        parts.push(format!("not this version: {}", old.join(", ")));
+        parts.push(format!("{label}: {}", old.join(", ")));
     }
     format!("{what} not current ({})", parts.join("; "))
 }

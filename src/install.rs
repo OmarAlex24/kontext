@@ -30,9 +30,10 @@
 //!   `~/.claude/skills/` ([`plan_skills`]).
 //! - The agent files `.claude/agents/kontext-*.md` (from `templates/agents/`),
 //!   among them `kontext-pm-reader.md`, the reader the `kontext-pm` skill
-//!   launches. If one already exists with different content (you changed it
-//!   by hand, or it comes from another version), it is kept and a warning is
-//!   shown; `--force` replaces it.
+//!   launches. One that matches, byte for byte, an earlier released version
+//!   of its template ([`AGENT_VERSIONS`]) is replaced. One with any other
+//!   content was changed by hand: it is kept and a warning is shown;
+//!   `--force` replaces it.
 //! - The `Bash(kontext:*)` permission in `permissions.allow` of the same
 //!   settings file as the hooks, if it is missing.
 //! - The repo in `[[repos]]` of `project.toml`, if it is missing: named after
@@ -106,6 +107,30 @@ pub const AGENTS: &[(&str, &str)] = &[
         include_str!("../templates/agents/kontext-pm-reader.md"),
     ),
 ];
+
+/// The sha256 of every released version of each agent file, the current one
+/// included: `<sha256>  <file>` per line, `#` for comments. Append-only.
+pub const AGENT_VERSIONS: &str = include_str!("../templates/agent-versions.txt");
+
+/// The `(file, sha256)` pairs of [`AGENT_VERSIONS`].
+pub fn agent_versions() -> impl Iterator<Item = (&'static str, &'static str)> {
+    AGENT_VERSIONS
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let (hash, file) = l.split_once(char::is_whitespace)?;
+            Some((file.trim(), hash))
+        })
+}
+
+/// Whether `content` is, byte for byte, a version of the agent file `name`
+/// that some kontext release installed (older binaries wrote the template
+/// verbatim). Anything else was changed by hand.
+pub fn is_released_agent(name: &str, content: &str) -> bool {
+    let hash = crate::model::sha256_hex(content.as_bytes());
+    agent_versions().any(|(f, h)| f == name && h == hash)
+}
 
 /// JSON that preserves key order.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -523,7 +548,7 @@ pub struct Options<'a> {
     /// Also installs `UserPromptSubmit`, `Stop` and `SessionEnd` (the capture
     /// is on).
     pub capture: bool,
-    /// Replaces the agent files even if they have changes.
+    /// Replaces the agent files even if they were changed by hand.
     pub force: bool,
     /// The hooks and the permission go in `.claude/settings.local.json`, and
     /// kontext's own entries leave `.claude/settings.json`.
@@ -764,7 +789,8 @@ pub fn plan(o: &Options) -> Result<Plan> {
         let path = agents.join(name);
         let before = read_opt(&path)?;
         match &before {
-            Some(b) if b != text && !o.force => kept.push(path),
+            // From an older version: replaced. Changed by hand: kept.
+            Some(b) if b != text && !o.force && !is_released_agent(name, b) => kept.push(path),
             _ => changes.push(Change {
                 path,
                 before,

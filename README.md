@@ -247,7 +247,7 @@ An epic can have **features** (`U-…`): what you would see working ("Refunds"),
 
 ### Agent files
 
-`kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. It also writes `kontext-pm-reader.md`, the reader of the PM's memory (below, "The PM's memory of your ideas"), the one that sets its model: `haiku`. If one already exists with different content (you changed it by hand), it is kept and you are warned; `kontext install --force` replaces it.
+`kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. It also writes `kontext-pm-reader.md`, the reader of the PM's memory (below, "The PM's memory of your ideas"), the one that sets its model: `haiku`. One left as an older kontext version wrote it is replaced. If one was changed by hand (its content matches no kontext version), it is kept and you are warned; `kontext install --force` replaces it. `kontext doctor` says which is which.
 
 The skills and agent files also keep the conversation you talk to small, since every request re-reads it: bulk reading goes to a subagent, delegated agents hand back about five lines and put the detail in kontext, long output is trimmed, and at the end of a phase the PM tells you it is a good moment to `/compact`. These are instructions, not yet measured ([DESIGN.md §9.6](./DESIGN.md)).
 

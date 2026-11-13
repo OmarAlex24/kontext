@@ -1,0 +1,20 @@
+# sha256 of every released version of each file in templates/agents/,
+# exactly as `kontext install` wrote it (the template bytes, verbatim).
+# `kontext install` replaces an agent file whose content matches one of
+# these without --force; anything else was changed by hand and is kept.
+# Append-only: when a template changes, add the new version's hash; never
+# remove a line (the test in tests/install.rs fails until it is added).
+# Generated from git: git show <rev>:templates/agents/<file> | shasum -a 256
+d2d1328359d0cf1ae6fe629a3cd8983888a6be9ca9aa5793068afb20ef127823  kontext-coordinator.md
+0ca6b1da6caa604ec62cde6e171ec8d896c6bfd22d7863980dc595f06c504ebe  kontext-coordinator.md
+961210274557606307ed53fbc00a7e97a576bf64022687d71b52dc2eda0e3cf7  kontext-coordinator.md
+6035b7200daf61c68839fae2fed86fff2dc79ea4f21911c190f2656c7cbccdbd  kontext-coordinator.md
+625ffd40d9500edd6d56257918f7087479ad6882595ff42e1b49a8c2ed05286e  kontext-coordinator.md
+fb319df6211f4f292d8ac473a9d5ed70d7f8b0098810317a1df8e438bc6b89ec  kontext-coordinator.md
+3c69e65dd3a066ef4e0922953c626885aaa581e79635044959a28f9ecaa18b74  kontext-implementer.md
+34d5c969de73a3da5bb8538b9b0f70e5bf500ee9922bf27e56895b1030ca13c0  kontext-implementer.md
+9962549527061101f4ef8af372a2d1c390ecdcf1d3568642bb491c5bde81896b  kontext-tester.md
+45f9a76eb5d1db4c2ebb3d16a3b76f4502458298b5d1f01473187f8addfd2bc1  kontext-tester.md
+2ca536f28ea51039f127ab2e612f81c4d2c44232494de05d07de539bb74b3bc5  kontext-scout.md
+e7970a32bfbc43e12fb133a84b5c5d95daf44d30f314d174b740b8c5d8d29c2d  kontext-scout.md
+f5c9223904d31508623825da965bffb3d05027324180bb92619367b25c3e8c61  kontext-pm-reader.md
