@@ -84,6 +84,13 @@ pub struct Store {
     signer: Option<Signer>,
     /// Phase 5: `[people]` from `project.toml`, to verify signatures.
     people: BTreeMap<String, Person>,
+    /// The project has a kontext server: a line it could never push (over
+    /// `MAX_LINE_BYTES`) is refused before it is written (DESIGN §14.1).
+    server: bool,
+    /// The kontext server token this writer writes under, if the project has
+    /// a server (DESIGN §14.2): what it may not write is refused here, before
+    /// it is in the file, because the server would refuse it forever.
+    token: Option<crate::config::Token>,
 }
 
 /// What [`Batch::push`] returned.
@@ -98,7 +105,22 @@ impl Store {
     pub fn open(home: &Path, writer: &str) -> Result<Store> {
         validate_writer(writer)?;
         let index = Index::open(home)?;
-        let policy = Policy::load(home)?;
+        let mut policy = Policy::load(home)?;
+        let server = crate::remote::server_for_home(home).is_some();
+        let token = crate::remote::token_for_home(home, writer);
+        // Only with a server: a project without one behaves as before,
+        // whatever is in its internal folder (DESIGN §14.2).
+        if server {
+            policy.registry = Some(crate::state::Registry::load(home));
+            policy.own = token.as_ref().and_then(|t| {
+                Some(crate::state::Grant {
+                    role: t.role.clone()?,
+                    epic: t.epic.clone(),
+                    actors: t.actors.clone(),
+                    ..Default::default()
+                })
+            });
+        }
         let people = if home.join("project.toml").exists() {
             Project::load(home)?.people
         } else {
@@ -111,6 +133,8 @@ impl Store {
             policy,
             signer: None,
             people,
+            server,
+            token,
         })
     }
 
@@ -312,12 +336,39 @@ impl Store {
             written_hlc,
             ..
         } = batch;
+        if let Some(t) = &self.token {
+            for e in &pending {
+                if let Some(why) = crate::remote::identity_problem(t, e) {
+                    return Err(Refused(format!(
+                        "{why}. This copy writes as {} with a {} token of {}, and the server \
+                         would refuse the line; nothing was written. Write as what the token \
+                         allows (--actor, --role), or with a token for that role \
+                         (`kontext token create`).",
+                        t.writer,
+                        t.role.as_deref().unwrap_or("?"),
+                        t.person.as_deref().unwrap_or("?")
+                    ))
+                    .into());
+                }
+            }
+        }
 
         if !pending.is_empty() {
             let created = !path.exists();
             let mut buf = String::new();
             for e in &pending {
-                buf.push_str(&e.to_line());
+                let line = e.to_line();
+                if self.server && line.len() > crate::server::MAX_LINE_BYTES {
+                    return Err(Refused(format!(
+                        "the entry would be a ledger line of {} bytes, and the project's kontext server takes \
+                         at most {} (4 MiB): it could never be pushed, so nothing was written. Make it shorter \
+                         (a long text or output goes in a file, an image with --attach)",
+                        line.len(),
+                        crate::server::MAX_LINE_BYTES
+                    ))
+                    .into());
+                }
+                buf.push_str(&line);
                 buf.push('\n');
             }
             let mut file = OpenOptions::new()

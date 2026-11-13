@@ -1,0 +1,16 @@
+{
+  "name": "kontext-server",
+  "private": true,
+  "description": "The kontext server Worker. Node and Miniflare are only for its tests and local runs; the release binary does not need them.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "dev": "node dev.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260730.0"
+  }
+}

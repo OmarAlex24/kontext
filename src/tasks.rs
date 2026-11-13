@@ -840,7 +840,11 @@ pub fn assign(store: &mut Store, actor: &Actor, task: &str, to: &str) -> Result<
     write(store, |b| {
         let st = b.state()?;
         let id = open_task(st, task)?;
-        if !st.policy.manages(actor, epic_of_task(st, &id)) {
+        let epic = epic_of_task(st, &id);
+        if let Some(why) = st.policy.own_limit(actor, epic) {
+            return refused(format!("{id} is not assigned: {why}"));
+        }
+        if !st.policy.manages(actor, epic) {
             return refused(format!(
                 "only the epic's coordinator, the pm or an owner can assign it ({} is not one of them). \
                  To work on it yourself, claim it with `kontext next --epic <epic> --claim`",
@@ -877,7 +881,11 @@ pub fn release(store: &mut Store, actor: &Actor, task: &str, why: &str) -> Resul
         let Some(h) = info.holder else {
             return refused(format!("{id} has no owner ({})", info.status));
         };
-        if !holder_matches(&h.actor, actor) && !st.policy.manages(actor, epic_of_task(st, &id)) {
+        let epic = epic_of_task(st, &id);
+        if !holder_matches(&h.actor, actor) && !st.policy.manages(actor, epic) {
+            if let Some(why) = st.policy.own_limit(actor, epic) {
+                return refused(format!("{id} is held by {}: {why}", h.actor));
+            }
             return refused(format!(
                 "{id} is held by {}; only the holder, the epic's coordinator, the pm or an owner can release it",
                 h.actor
@@ -1132,7 +1140,11 @@ pub fn check_done(st: &State, actor: &Actor, a: &DoneArgs) -> Result<String> {
         .holder
         .as_ref()
         .is_some_and(|h| holder_matches(&h.actor, actor));
-    if !holds && !st.policy.manages(actor, epic_of_task(st, &id)) {
+    let epic = epic_of_task(st, &id);
+    if !holds && !st.policy.manages(actor, epic) {
+        if let Some(why) = st.policy.own_limit(actor, epic) {
+            return refused(format!("{id} is not closed: {why}"));
+        }
         let who = match &info.holder {
             Some(h) => format!("held by {}", h.actor),
             None => "nobody holds it: claim it with `kontext next --epic <epic> --claim` \

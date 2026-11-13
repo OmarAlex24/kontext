@@ -493,8 +493,8 @@ So `install --local` in the main checkout is what reaches every worktree session
 
 | Command | Phase | What it does |
 |---|---|---|
-| `kontext init <name> [--remote <git-url>]` | 1 | Creates a `kontext-home` and registers it in `~/.config/kontext/projects.toml` |
-| `kontext clone <git-url>` | 5 | Brings in an existing `kontext-home` |
+| `kontext init <name> [--remote <git-url> \| --server <url>]` | 1 | Creates a `kontext-home` and registers it in `~/.config/kontext/projects.toml`; with `--server`, also on the kontext server (§14.1) |
+| `kontext clone <git-url>` / `clone --server <url> <project>` | 5 | Brings in an existing `kontext-home`, from git or from its server (with `KONTEXT_TOKEN`) |
 | `kontext install [--dry-run] [--local] [--link-only] [--worktree-role <role>]` | 2 | See 9.3 and 9.7 |
 | `kontext verify` | 1 | Checks the chain of each file and that there are no repeated `id`s with different content. An entry of a kind from a newer version is listed, not a problem (§4.3). It also checks that `writer` matches the file name and that there is no incomplete line at the end. If the last lines are deleted, the chain is still valid: that only shows up against another copy (git) |
 | `kontext reindex` | 1 | Rebuilds the index |
@@ -513,7 +513,10 @@ So `install --local` in the main checkout is what reaches every worktree session
 | `kontext find <topic>` / `--show <path:line>` / `--check` | 4 | Searches the docs of the project's repos, with ranking, synonyms and status in force or historical |
 | `kontext distill --transcript <path>` | 4 | Manual distill |
 | `kontext changelog [--since <ref>]` | 4 | Technical changelog from the closed tasks and the merged PRs (`gh`). Always comes out the same |
-| `kontext sync` | 5 | `git pull --rebase` and `push` of the `kontext-home` |
+| `kontext sync` | 5 | `git pull --rebase` and `push` of the `kontext-home`; with a server, push and pull now, media included |
+| `kontext server connect <url>` | sync server | Attaches an existing project to a kontext server: with the admin secret it creates the project there and uploads all of it; with only a token (`KONTEXT_TOKEN`) it uploads this machine's own lines |
+| `kontext server deploy [--name] [--account-id] [--subdomain] [--replace]` | sync server | Uploads the kontext server to your Cloudflare account (§14.1) and prints its URL; running it again updates it. It refuses a Worker of the same name that kontext did not deploy, unless `--replace` |
+| `kontext token create --role <r> [--epic] [--person] [--ttl] [--writer]` / `list` / `revoke <id>` | sync server | An owner's tokens for the project's server (§14.2): one per machine, person or sandbox, with the variables a sandbox needs |
 | `kontext ui` | 6 | Local read-only page: the tree at `/`, the ledger at `/ledger`, the report at `/report` |
 | `kontext inbox [count\|sign\|answer\|dismiss\|confirm]` / `kontext inbox --everyone` / `kontext report [--html]` | human | The human's inbox, everyone's inbox and the report (§20) |
 | `kontext ideas [--mark-audited]` | human | The user's ideas in `.pm/items.md` and the state of each one, from the ledger; which are not placed and how many messages no audit has seen. `--mark-audited` writes `.pm/audited.json` (§12.3) |
@@ -735,11 +738,21 @@ One thing changes: the model's command is configurable (`[distill].command`) ins
 
 ## 14. Several people
 
-- **Transport:** the `kontext-home` is a git repo. `kontext sync` does pull and push. Since each writer has its own file, merging never conflicts.
+- **Transport:** a kontext server (§14.1), or git: the `kontext-home` is a git repo, and `kontext sync` does pull and push. Since each writer has its own file, merging never conflicts either way.
 - **Identity:** the writer is `<user>@<machine>`. The human name comes from `git config user.email`, mapped through `project.toml`.
 - **Permissions:** only the `owners` can `sign`, `accept`, `reject` and `decide`. An entry of those types written by someone who is not an owner is stored, but doesn't count, and appears as an alert.
 - **Signatures (optional):** with `require_signatures = true`, `sign`, `decide` and `accept` need an SSH signature that can be verified against the keys in `project.toml`.
-- **Later:** `kontext serve` with the same protocol (joining files), for anyone who doesn't want to use git. It is not in these phases.
+- **Without git:** a kontext server that relays the ledger lines (§14.1), with a token per machine, person or sandbox (§14.2).
+
+> **Implemented: the sync server.** A project with `server = "<url>"` in its `[projects.<name>]` of `projects.toml` syncs through it, and git sync stays as it was for the rest. A registered project always uses its own configuration: `KONTEXT_SERVER` and `KONTEXT_TOKEN` only set up a sandbox's project that this machine does not have yet (§14.2), and a token is sent only to its own project's configured server:
+> - **Push and pull.** Every command except `init`, `clone`, `sync`, `server`, `token`, `ui`, `doctor`, `measure` and `hook` pulls before it runs and pushes what it wrote after it, outside the writer's lock and even if the command failed (what it wrote is in the file). Push and pull are independent: the push goes first, each direction keeps its own error and its own 30 s backoff, and a failed pull never holds back the push. Each request has 2.5 s and the whole of it 6 s; after a network failure there is no automatic attempt in that direction for 30 s, so offline commands cost nothing. The start hook pulls too (quietly; `hooks.log` says what it did). `kontext sync` does the same with longer timeouts and says what happened.
+> - **What a pull writes.** A line is appended to its writer's file, byte for byte as the server has it, under that writer's lock, only if it continues the local chain (`n`, `prev`) and its hash is right (recomputed here; the server does not). One that does not is never written: it is kept as a fork in `.kontext/server.json`, and `kontext status` shows it. A local file that ends at the same `n` as the server's with another hash (two copies wrote as the same writer) is a fork too, and nothing is pushed for that writer. So the local ledger is always the authority, and the chain verifies on every copy.
+> - **Cursors, config and media.** A copy pushes only its own writer's cursor files (and pulls the rest, keeping the stamp as the file's time). `project.toml` and `synonyms.toml` go up only with `--include-config`, from an owner, on top of the version that copy saw; a pulled version replaces the local file only if it was not changed here, otherwise it waits in `.kontext/server-config/` with a warning. Media go up by their hash with every push. The automatic pull brings none: a view that needs a file (`verify`, `report --html`, `kontext ui`) brings it from the server when it is missing (10 s a file, 30 s in all, skipped while the pull backs off), and `kontext sync` brings them all.
+> - **`kontext status`** shows the server, the last contact or the last error, the own entries not pushed, and the refused line and the forks, if any.
+> - **`kontext ui`** listens to the project's WebSocket and pulls when the frontier changes (never pushes); a thread checks the files every second, and `/api/events` (Server-Sent Events, same Host check and CSP as the rest) tells both pages to read again. The 5-second poll stays as the fallback.
+> - **`kontext server connect`** uploads an existing project with the admin secret, which may push every writer's file and cursors (a token pushes only its own). It is the one place the admin pushes lines; it is batched and resumable, and running it again uploads nothing more. A writer the server refuses (a line over 4 MiB, a fork) does not stop it: it goes on with the rest, names each refused writer with the reason, and exits non-zero only if something was left out. Without the admin secret, a token in `KONTEXT_TOKEN` connects a copy that started without a server, with its own lines.
+> - **§9.5 holds:** what a pull brings is only appended to the ledger files and shows up through the views and the start hook of a new session, as with git; nothing rewrites what a session already received.
+> - **Old binaries** (e2cd98f) read a synced kontext-home: `verify`, `standup` and `status` work, and they ignore `server =` in `projects.toml`.
 
 > **Implemented in phase 5:**
 > - **Identity:** the machine's human name is the person in `[people]` matching the `git config user.email` of the `kontext-home`, or if there is none, the previous one (`git config user.name`). It is used as the default reader for `standup`. If someone writes as `human:<name>` and that email doesn't belong to that person, a warning is shown on stderr; without `[people]` or with `require_signatures`, no warning.
@@ -747,6 +760,79 @@ One thing changes: the model's command is configurable (`[distill].command`) ins
 > - **Verifying:** `ssh-keygen -Y verify -n kontext -f <allowed_signers> -I <person> -s <signature>` with the `hash` on stdin; `allowed_signers` is built from the keys in `[people]` in `.kontext/tmp/`. A key that doesn't belong to that person doesn't verify, even if it belongs to someone else on the project.
 > - **`require_signatures = true`:** those types only count if the signature verifies for the person, and the owners rule is the same (§4.3). Those that don't are stored, don't count, and show up as an alert. What was imported from v0 doesn't need a signature (the v0 rule had already accepted it). So as not to write something that wouldn't count, `kontext` refuses (exit code 2) if the machine has no key or if its signature doesn't verify for that person.
 > - `kontext verify` checks the signatures in the files (not in the index) and exits with 1 if any doesn't verify; with `require_signatures` it also reports the missing ones.
+
+### 14.1 The server protocol
+
+The server relays ledger lines. It stores them and hands them out; it never derives state. Each project gets its own server, which its owner runs: a Cloudflare Worker (`server/worker.js`, plain JavaScript with no build step, embedded in the binary) with one SQLite-backed Durable Object per project. The local `kontext-home` stays the working copy, and the binary computes everything from it, as before.
+
+**What the Durable Object stores** (tables `WITHOUT ROWID`, keyed by what is looked up, so each stored line is one row written):
+
+| Table | What |
+|---|---|
+| `lines(writer, n, hash, line)` and `line_chunks(writer, n, i, data)` | Each writer's ledger lines, in order, exactly as the binary wrote them (`line` is the text of the line, without the `\n`). A line over 512 KiB is kept in `line_chunks`, by its UTF-8 bytes in 512 KiB rows, with `line` empty |
+| `tails(writer, n, hash)` | The last line of each writer: the server's frontier |
+| `cursors(reader, writer, body, stamp, seq)` | The cursor files `cursors/<reader>/<writer>.json`, with their text; last write wins by `stamp` (the file's time in ms) |
+| `config(name, version, sha256, body, by, at)` | `project.toml` and `synonyms.toml`, versioned |
+| `media(name, sha256, bytes, chunks, seq)` and `media_chunks(name, i, data)` | The files of `media/`, by `<sha256>.<ext>`, in 1 MiB chunks (a row holds at most 8 MB) |
+| `tokens(id, hash, person, role, epic, writer, …)` | The tokens, by their sha256 |
+| `meta(k, v)` | The project's name, its creation time, and `seq`, a counter that goes up with every change |
+
+**Requests.** Everything is JSON under `/v1/p/<project>/`, with `Authorization: Bearer <token>`; the Worker only routes (it checks that a token is there, so a request without one is never billed to the Durable Object), and the Durable Object authenticates.
+
+| Request | Who | What |
+|---|---|---|
+| `GET /v1/info` | anyone | `{"kontext_server": 1}` |
+| `POST create` `{person, writer}` | the admin secret | Creates the project and its first owner token, bound to `writer`. 409 if it exists |
+| `GET whoami` | a token | Its person, role, epic and writer |
+| `GET frontier` | a token | `{seq, tails: {writer: {n, hash}}, config: {name: {version, sha256}}, registry}` (`registry` is the registry's version) |
+| `POST push` `{writer, lines: [text…]}` | the writer's token, or the admin | Appends (below) |
+| `POST pull` `{since: {writer: n}, limit}` | a token | The lines beyond `since`, writer by writer and in order, up to 2,000 lines or 4 MB, `more` if there is more, and the registry's version |
+| `GET registry` | a token | Every token's claims by writer, in the order they were made: `{version, writers: {writer: [{person, role, epic, actors, first_n, ord, expires, revoked}]}}`; never an id, a hash, a secret or who made it (§14.2) |
+| `GET cursors?since=<seq>` / `POST cursors` `{cursors: [{reader, writer, body, stamp}]}` | a token (only its writer's files) | Cursor files |
+| `GET config` / `PUT config/<name>` `{base, body}` | an owner token or the admin to write | The new version only on top of the one the client saw (`base`; 409 with the current one otherwise) |
+| `GET media?since=<seq>` / `GET media/<name>` / `PUT media/<name>` | a token | Files by content; the server checks the sha256 in the name |
+| `GET ws` (WebSocket) | a token | The frontier when it connects and after every change |
+
+**Appending.** The lines go one by one, in order, and each one must continue the server's chain for its writer:
+- same `n` and same `hash` as a line the server has: skipped (`duplicates`), so a retry is always safe;
+- a different line at an `n` the server has, or `prev` that is not the hash of the server's last line: refused as `fork`;
+- `n` beyond the next one: refused as `gap`;
+- `writer` that is not the token's (or a line inside that says another writer): refused as `writer`;
+- what the token's role may not write (§14.2): refused as `identity`.
+
+The first refused line stops the batch; the answer carries what was accepted, the server's tail and the refusal (`{index, n, reason, message}`), with 409 for `fork` and `gap` and 403 for `writer` and `identity`. So a fork is never stored. The server reads `writer`, `n`, `prev`, `hash` and `actor` from a copy of the line and stores the text it received; it does not recompute the hash (the binary does that when it pulls).
+
+**Notifications.** `GET ws` opens a hibernatable WebSocket (`ctx.acceptWebSocket`): while nothing changes the object can be evicted and no duration is billed. After each change the server sends `{"type": "frontier", seq, tails, config, registry}` to every socket of the project: the frontier, never the lines. Clients pull what they lack. A socket is tagged with its token, whose id is kept in the socket's attachment (both survive hibernation). Before every send, the token is checked again: a socket whose token was revoked or expired is closed (code 4001) instead of hearing the change, and revoking a token closes its sockets at once.
+
+**Tokens** are `kxt1.<base64url of the claims>.<secret>`, with the claims `{"p": project, "w": writer, "n": person, "r": role, "e"?: epic, "c"?: [names a coordinator writes as], "x"?: expiry in ms}`. The binary reads them without the network: it writes as the token's writer, and it refuses (exit 2) a line the server would refuse (§14.2). The server keeps only the token's sha256 and decides from its own row, never from the claims. A token is bound to a person, a role, optionally an epic, and one writer; no two active tokens share a writer (a revoked or expired one does not count, so a writer can get a new token).
+
+**Limits** (Cloudflare's, 2026-11-13; [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): on the Workers Free plan a Worker gets 10 ms of CPU per request and a Durable Object 30 s, so the Worker only routes and all the work is in the object; 100,000 requests and 100,000 rows written per day, 5 GB stored; a row, string or BLOB holds at most 8 MB, and a statement 100 KB. A push takes at most 1,000 lines per request. **A line holds at most 4 MiB** (`MAX_LINE_BYTES`, the same constant in `server/worker.js` and `src/server.rs`, pinned by a test; a longer one is refused as `too_large`): about a thousand times the largest entry kontext writes (an entry carries text; images go to `media/`), and a push of one such line, JSON-escaped (at most twice its size), stays far below the 100 MB request body and the 128 MB of an isolate. In a project with a server the binary refuses to write a longer line (exit 2, nothing written), so every line it writes can be pushed; without a server there is no such limit. An index adds a row written per indexed write ([D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)), so the tables have no secondary index (the few tokens are looked up by scanning their hashes).
+
+**Deploying.** `kontext server deploy` uploads the Worker with the Cloudflare REST API (§10), with the tag `kontext-server` in the upload's metadata, which the script list returns (`tags`). A Worker with the same name and without that tag is somebody else's: deploy refuses it (exit 2) and changes nothing, unless `--replace`. For the tests, `server/dev.mjs` runs the same file in workerd through Miniflare, a dev dependency under `server/` that only CI and development need.
+
+### 14.2 Tokens and roles
+
+Every machine, person and sandbox that syncs with the server has its own token, and with it its own writer. An owner makes them with `kontext token create`; the admin secret (set when the server is deployed, kept in `servers.json` of the config folder, mode 0600) only creates projects, and `kontext server connect` and `init --server` use it once to get the first owner token. A copy that started without a server joins one with a token alone (`KONTEXT_TOKEN=<token> kontext server connect <url>`): it uploads its own writer's lines, and the token is saved only once the server takes it. A token goes only to its own project's server: a project that already syncs with one sends neither its saved token nor `$KONTEXT_TOKEN` to another URL.
+
+**What each role may write.** The server checks every pushed line against its token: only identity (who the actor is, and which kinds its role writes), never the project's state. That stays where it was: the binary computes it from the ledger, and an entry that does not count is still stored and shows up as an alert (§4.3).
+
+| Token's role | Writes as | May not write |
+|---|---|---|
+| `owner` | anyone (an owner can make a token for anyone anyway) | — |
+| `pm` | agents (any role, `approved_by` included) | as a human |
+| `coordinator` (of an epic) | agents; as a coordinator only with the epic's coordinator names (its `coordinator` and `epic:<name>`, fixed when the token is made) | as a human; as the pm; another epic's coordinator; `approved_by`; `charter`, `goal`, `epic`, `feature`, `scope`, `sign`, `accept`, `reject`, `decision`, `supersede`; `assign` except as one of its names with role `coordinator` |
+| `implementer`, `tester` | agents | the above, and as a coordinator (role `coordinator`, or a name `epic:…`); `task`, `assign` |
+| `scout` | agents | the above; anything but `fact`, `journal`, `question`, `confirm`, `proposal` |
+
+A `supersede` whose ids are all facts (`F-…`) counts as a fact: it is what any agent writes when it records a stale fact again (§4.3), and the ids say so without the project's state. A coordinator's subagents write through its token: `--actor agent:impl-1 --role implementer next --claim` is allowed, and so are agents with no role (the distill). The epic of an implementer's or tester's token is noted, not enforced (that would need the project's state).
+
+**Whose powers a line has.** A name is not an identity: an epic's coordinator can have any name (`--coordinator lead-pay`), and any token may write as an agent of that name. So with a server, the binary counts a line as the coordinator's (assign, release or close another's task, validate a feature) only if the token it was written under allows it. The server serves every token's claims (`GET registry`; never a secret), and the binary keeps them in `.kontext/tokens.json`, fetched before any pulled line is applied whenever the registry's version moves. Each token records where it starts: `first_n`, its writer's tail on the server when it was made, plus one. Line `n` of a writer is governed by that writer's latest token with `first_n <= n`; everything below was on the server before the token existed. The walk reads only the line's writer and `n` and the registry, never a clock, an expiry or this copy's token, so every copy counts the same. Under no token, or an owner or pm token, the names decide as without a server. Under a coordinator token, the line has the powers only for that token's epic, as one of its names with role `coordinator`. Under any other token it has none. A line that loses powers that way is stored, does not count, and raises an alert that names the token. The binary refuses it first (exit 2) from this copy's own token; the server refuses what the claims alone decide (a coordinator token's `assign`). The epic's own coordinator token and its subagents work as before. Lines written before a token, and a project that started without a server, keep counting as they did: `server connect` creates the owner token before it uploads, so all of that writer's lines fall under it, and the other writers' lines fall under no token. A copy that joins with a token of a narrower role (below) has its earlier lines counted under that token. A project without a server reads no registry.
+
+**Refusing before writing.** A line the server refuses can never be pushed, and nothing after it from that writer can either. So the binary runs the same rules (from the token's claims) under the writer's lock, before the line is in the file, and refuses with exit code 2, naming the token. The server's check is the backstop for a line written before the token, by an old binary, or with a token without claims. If it happens, `kontext status` says so and how to get out: an owner revokes the token and makes one for the same writer with a role that may write the line (`kontext token create --writer <w> --role …`); `KONTEXT_TOKEN=<new token> kontext server connect <url>` on that copy saves it and pushes everything.
+
+**Sandboxes.** `kontext token create` prints the variables a sandbox needs: `KONTEXT_SERVER`, `KONTEXT_PROJECT`, `KONTEXT_TOKEN`, and its actor and role (`KONTEXT_ACTOR=agent:epic:<name>` and `KONTEXT_ROLE=coordinator` for a coordinator). In the sandbox, the first kontext command (the start hook included) sees the token for a project that is not registered and clones it into the config folder (`<config>/homes/<project>`), under a lock so that a coordinator and its subagents starting at once set it up once. It runs with the automatic sync's limits (2.5 s a request, 6 s in all, no media), and a process waits at most 2.5 s for another one's lock; what does not fit comes with the next commands. If the server cannot be reached, no process on that machine tries again for 30 s (`<config>/bootstrap-backoff.json`), so a server that hangs costs each hook and command at most one short timeout. The claims are not signed, so they are not trusted: `Token::parse` takes only a valid project name (letters, digits, `-` `_` `.`, not starting with `.`) before any path or URL is built from it, and the server confirms the project and the writer (`GET whoami`) before anything is written. The set-up writes a marker (`homes/.<project>.bootstrap`) first and removes it when the project is registered; a folder left by a set-up that did not finish is removed only if it carries that marker, is a real directory (not a link), and is directly inside `homes/`. Anything else there stays, and the set-up says so. The variables only set up a project this machine does not have: a registered project always uses its own configuration, its token never goes to `KONTEXT_SERVER`, and a command (never the hook) warns when `KONTEXT_SERVER` names another server than the project's. Nothing goes in the repo: no token, no server URL, no ledger. A token can expire (`--ttl 8h`) and be revoked (`kontext token revoke <id>`), and it stops working at once.
+
+**A second machine of the same person** gets its own token, normally with its own writer; `--writer` reuses one (only one copy at a time may write as a writer: the server refuses the second copy's lines as a fork).
 
 ## 15. Benchmark
 

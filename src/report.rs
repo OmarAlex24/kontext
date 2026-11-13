@@ -526,6 +526,11 @@ impl Images {
                 max_total,
                 side,
             } => {
+                // With a kontext server, a file this copy lacks comes down
+                // now (the automatic pull brings no media).
+                for w in crate::remote::ensure_media(home, [name.to_string()]) {
+                    eprintln!("kontext: warning: {w}");
+                }
                 let bytes = fs::read(home.join(&c.rel)).ok()?;
                 let n = bytes.len() as u64;
                 if *used + n <= *max_total {

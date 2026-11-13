@@ -290,11 +290,19 @@ pub enum Cmd {
         /// Git remote for the kontext-home
         #[arg(long)]
         remote: Option<String>,
+        /// Also creates the project on this kontext server (needs its admin secret: the machine that
+        /// ran `kontext server deploy`, or KONTEXT_ADMIN_SECRET) and syncs with it from now on
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
     },
-    /// Brings in an existing kontext-home with git, registers it and builds the index
+    /// Brings in an existing kontext-home with git (or from a kontext server with --server),
+    /// registers it and builds the index
     Clone {
-        /// Git URL of the kontext-home
+        /// Git URL of the kontext-home; with --server, the project's name on the server
         url: String,
+        /// The kontext server to bring the project from, with the token in KONTEXT_TOKEN
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
         /// Where to put it (default: ~/kontext-home/<repo name>)
         #[arg(long)]
         home: Option<PathBuf>,
@@ -302,7 +310,8 @@ pub enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Uploads what's ours (ledger and cursors) and brings in everyone else's: commit, pull --rebase and push of the kontext-home
+    /// Uploads what's ours (ledger and cursors) and brings in everyone else's: with a kontext
+    /// server, push and pull through it; otherwise commit, pull --rebase and push of the kontext-home
     Sync {
         /// Also uploads the changes to project.toml and synonyms.toml
         #[arg(long)]
@@ -310,6 +319,17 @@ pub enum Cmd {
     },
     /// Project, writer, remote, last sync, what's left to upload, index and chains
     Status,
+    /// The kontext server: a Cloudflare Worker you own that relays the ledger between machines
+    Server {
+        #[command(subcommand)]
+        cmd: ServerCmd,
+    },
+    /// Tokens for the project's kontext server (an owner's): one per machine, person or sandbox,
+    /// each bound to a role and its own writer
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
     /// Checks the chain of each ledger file (and any signatures)
     Verify,
     /// Rebuilds the index from the ledger files
@@ -748,6 +768,72 @@ pub enum Cmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum TokenCmd {
+    /// Makes a token and prints it once, with the variables a sandbox needs (KONTEXT_SERVER,
+    /// KONTEXT_PROJECT, KONTEXT_TOKEN, and its actor and role). The server refuses what the
+    /// role may not write (DESIGN §14.2)
+    Create {
+        /// owner, pm, coordinator, implementer, tester or scout
+        #[arg(long)]
+        role: String,
+        /// The epic (id or name); a coordinator needs it, and writes as its coordinator
+        #[arg(long)]
+        epic: Option<String>,
+        /// Whose token it is (default: this machine's human, as in standup)
+        #[arg(long)]
+        person: Option<String>,
+        /// It stops working after this long (`8h`, `7d`)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// The writer it writes as (default: a new one, `<person>.<role>[.<epic>].<random>@kontext`).
+        /// Use an existing one for a second machine of the same person, or to replace a revoked token
+        #[arg(long)]
+        writer: Option<String>,
+    },
+    /// Lists the project's tokens (never their secrets)
+    List,
+    /// Revokes a token: it stops working at once
+    Revoke {
+        /// Its id (`tok_…`, from `kontext token list`)
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerCmd {
+    /// Uploads the kontext server (a Worker with one SQLite Durable Object per project) to your
+    /// Cloudflare account and prints its URL. Needs CLOUDFLARE_API_TOKEN (or the token on stdin)
+    /// with the account permission "Workers Scripts: Edit". Running it again updates the Worker
+    /// and keeps its admin secret (saved in servers.json in the kontext config folder, mode 0600)
+    Deploy {
+        /// The Worker's name: https://<name>.<subdomain>.workers.dev
+        #[arg(long, default_value = "kontext")]
+        name: String,
+        /// Cloudflare account id (default: $CLOUDFLARE_ACCOUNT_ID, or the token's only account)
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Registers this workers.dev subdomain for the account, if it has none yet
+        #[arg(long)]
+        subdomain: Option<String>,
+        /// Does not wait for the URL to answer
+        #[arg(long)]
+        no_check: bool,
+        /// Overwrites a Worker with this name that kontext did not deploy (without it, deploy refuses)
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Attaches this project (with all its history) to a kontext server. With the admin secret it
+    /// uploads everything: every writer's lines, the cursors, project.toml, synonyms.toml and
+    /// media; with only a token (in KONTEXT_TOKEN, or saved for that server) it uploads this
+    /// machine's own lines. Running it again resumes; afterwards every command syncs with the
+    /// server
+    Connect {
+        /// The server's URL (what `kontext server deploy` printed)
+        url: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum DebugCmd {
     /// Adds raw entries: one JSON object per line on stdin, each one with
     /// its own lock. Prints the id of each one.
@@ -1011,7 +1097,66 @@ fn signer(forced: bool) -> Result<Option<crate::sign::Signer>> {
     Ok(key.map(|key| crate::sign::Signer { key }))
 }
 
+/// Runs a command. With a kontext server, an ordinary command pulls first and
+/// pushes what it wrote afterwards (DESIGN §14.1), quietly and with short
+/// timeouts: the network never blocks or breaks it.
 pub fn run(cli: Cli) -> Result<ExitCode> {
+    // A sandbox with KONTEXT_SERVER and KONTEXT_TOKEN sets its project up on
+    // the first command (quietly in the hook, which must stay silent).
+    if !matches!(
+        cli.cmd,
+        Cmd::Init { .. } | Cmd::Clone { .. } | Cmd::Server { .. } | Cmd::Measure { .. }
+    ) && let Some(r) = crate::remote::bootstrap()
+        && !matches!(cli.cmd, Cmd::Hook { .. })
+    {
+        match r {
+            Ok(msg) if !msg.is_empty() => eprintln!("kontext: {msg}"),
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("kontext: warning: could not set the project up from the server: {e:#}")
+            }
+        }
+    }
+    let auto = auto_sync_target(&cli);
+    let warn = |r: Option<crate::remote::Report>| {
+        for w in r.iter().flat_map(crate::remote::auto_warnings) {
+            eprintln!("kontext: warning: {w}");
+        }
+    };
+    if let Some((home, remote)) = &auto {
+        warn(crate::remote::auto(home, remote, true));
+    }
+    let res = run_cmd(cli);
+    if let Some((home, remote)) = &auto {
+        warn(crate::remote::auto(home, remote, false));
+    }
+    res
+}
+
+/// The kontext-home and server to sync around this command, if it has one.
+fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
+    // These sync on their own, need no project, or never return (`ui`).
+    match &cli.cmd {
+        Cmd::Doctor
+        | Cmd::Measure { .. }
+        | Cmd::Hook { .. }
+        | Cmd::Init { .. }
+        | Cmd::Clone { .. }
+        | Cmd::Sync { .. }
+        | Cmd::Server { .. }
+        | Cmd::Token { .. }
+        | Cmd::Ui { .. } => return None,
+        Cmd::Install {
+            skills_only: true, ..
+        } => return None,
+        _ => {}
+    }
+    let p = config::resolve_project(cli.project.as_deref()).ok()?;
+    let remote = crate::remote::Link::of(&p.name).ok()?.remote()?;
+    Some((p.home, remote))
+}
+
+fn run_cmd(cli: Cli) -> Result<ExitCode> {
     let project = cli.project.as_deref();
     let cx = Ctx {
         project,
@@ -1505,8 +1650,43 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             },
             cx.role.unwrap_or("pm"),
         ),
-        Cmd::Init { name, home, remote } => init(&name, home, remote.as_deref()),
-        Cmd::Clone { url, home, name } => {
+        Cmd::Init {
+            name,
+            home,
+            remote,
+            server,
+        } => init(&name, home, remote.as_deref(), server.as_deref()),
+        Cmd::Clone {
+            url,
+            server: Some(server),
+            home,
+            name,
+        } => {
+            let (c, r) = crate::remote::clone(crate::remote::CloneArgs {
+                url: server,
+                project: url,
+                home,
+                name,
+                quick: false,
+            })?;
+            if cx.json {
+                print_json(&json!({ "clone": c, "sync": r }))?;
+            } else {
+                print!("{}", c.text());
+                print!("{}", r.text());
+            }
+            Ok(if r.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Cmd::Clone {
+            url,
+            server: None,
+            home,
+            name,
+        } => {
             let c = crate::sync::clone(&url, home, name.as_deref())?;
             if cx.json {
                 print_json(&c)?;
@@ -1516,6 +1696,58 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Sync { include_config } => {
+            let p = config::resolve_project(project)?;
+            match crate::remote::Link::of(&p.name)? {
+                crate::remote::Link::None => {}
+                crate::remote::Link::NoToken(url) => bail!(
+                    "project {} syncs with {url}, and this machine has no token for it: ask an owner for \
+                     one and save it in {} (mode 0600)",
+                    p.name,
+                    config::Token::path(&p.name)?.display()
+                ),
+                crate::remote::Link::Ready(remote) => {
+                    let mut store = Store::open(&p.home, &p.writer)?;
+                    let before = store.state()?;
+                    let r = crate::remote::sync(
+                        &p.home,
+                        &remote,
+                        &crate::remote::Options::full(include_config),
+                    )?;
+                    let after = store.state()?;
+                    let new_alerts: Vec<_> = after
+                        .alerts
+                        .iter()
+                        .filter(|a| !before.alerts.contains(a))
+                        .collect();
+                    let v = verify::run(&p.home)?;
+                    if cx.json {
+                        print_json(&json!({
+                            "sync": r,
+                            "new_alerts": new_alerts,
+                            "problems": v.problems.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        }))?;
+                    } else {
+                        print!("{}", r.text());
+                        if !new_alerts.is_empty() {
+                            println!("New alerts ({}):", new_alerts.len());
+                            for a in &new_alerts {
+                                println!("  - {a}");
+                            }
+                        }
+                        if !v.problems.is_empty() {
+                            println!("The chains have problems (`kontext verify`):");
+                            for pr in &v.problems {
+                                println!("  - {pr}");
+                            }
+                        }
+                    }
+                    return Ok(if r.ok() && v.problems.is_empty() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    });
+                }
+            }
             let (mut store, _) = cx.open()?;
             let r = crate::sync::sync(&mut store, include_config)?;
             if cx.json {
@@ -1544,11 +1776,13 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 Some(r) => r,
                 None => crate::ui::default_viewer(cx.actor, &proj, &p.home),
             };
+            let server = crate::remote::Link::of(&p.name)?.remote();
             let src = crate::ui::Source {
                 home: p.home,
                 writer: p.writer,
                 you,
                 cwd: std::env::current_dir().ok(),
+                server,
             };
             crate::ui::serve(src, &crate::ui::Options { host, port, open })?;
             Ok(ExitCode::SUCCESS)
@@ -1640,6 +1874,115 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                     "v0 references that could not be translated: {}",
                     r.unresolved.join(", ")
                 );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Token { cmd } => {
+            let p = config::resolve_project(project)?;
+            match cmd {
+                TokenCmd::Create {
+                    role,
+                    epic,
+                    person,
+                    ttl,
+                    writer,
+                } => {
+                    let m = crate::remote::token_create(
+                        &p.name,
+                        &p.home,
+                        &crate::remote::TokenArgs {
+                            role,
+                            epic,
+                            person,
+                            ttl,
+                            writer,
+                        },
+                    )?;
+                    if cx.json {
+                        print_json(&m)?;
+                    } else {
+                        print!("{}", m.text());
+                    }
+                }
+                TokenCmd::List => {
+                    let t = crate::remote::token_list(&p.name)?;
+                    if cx.json {
+                        print_json(&t)?;
+                    } else if t.is_empty() {
+                        println!("No tokens.");
+                    } else {
+                        for l in crate::remote::token_lines(&t) {
+                            println!("{l}");
+                        }
+                    }
+                }
+                TokenCmd::Revoke { id } => {
+                    let t = crate::remote::token_revoke(&p.name, &id)?;
+                    if cx.json {
+                        print_json(&t)?;
+                    } else {
+                        println!(
+                            "Revoked {id} ({} as {}, writer {}). Its writer's lines stay; a new token \
+                             for that writer (`kontext token create --writer {}`) can push the rest.",
+                            t["person"].as_str().unwrap_or("?"),
+                            t["role"].as_str().unwrap_or("?"),
+                            t["writer"].as_str().unwrap_or("?"),
+                            t["writer"].as_str().unwrap_or("?")
+                        );
+                    }
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Server {
+            cmd: ServerCmd::Connect { url },
+        } => {
+            let p = config::resolve_project(project)?;
+            let r = crate::remote::connect(&p.name, &p.home, &p.writer, &url)?;
+            if cx.json {
+                print_json(&r)?;
+            } else {
+                print!("{}", r.text());
+                if r.ok() {
+                    println!(
+                        "Project {} is on {}: every command now syncs with it (`kontext status` shows how).",
+                        p.name, r.url
+                    );
+                } else {
+                    println!(
+                        "Project {} is on {}, but not everything went up (see above). Every command now \
+                         syncs with it; `kontext server connect {}` again uploads what can go.",
+                        p.name, r.url, r.url
+                    );
+                }
+            }
+            Ok(if r.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Cmd::Server {
+            cmd:
+                ServerCmd::Deploy {
+                    name,
+                    account_id,
+                    subdomain,
+                    no_check,
+                    replace,
+                },
+        } => {
+            let d = crate::server::deploy(&crate::server::DeployArgs {
+                name,
+                account_id,
+                subdomain,
+                no_check,
+                replace,
+            })?;
+            if cx.json {
+                print_json(&d)?;
+            } else {
+                print!("{}", d.text());
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -2696,7 +3039,12 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn init(name: &str, home: Option<PathBuf>, remote: Option<&str>) -> Result<ExitCode> {
+fn init(
+    name: &str,
+    home: Option<PathBuf>,
+    remote: Option<&str>,
+    server: Option<&str>,
+) -> Result<ExitCode> {
     if !valid_name(name) {
         bail!("invalid name {name:?}: use letters, digits, - _ and .");
     }
@@ -2720,6 +3068,21 @@ fn init(name: &str, home: Option<PathBuf>, remote: Option<&str>) -> Result<ExitC
     if home.exists() && fs::read_dir(&home)?.next().is_some() {
         bail!("{} already exists and is not empty", home.display());
     }
+    // The project on the server first: if that fails, nothing local is made.
+    let server = server.map(crate::server::normalize_url);
+    let token = match &server {
+        Some(url) => {
+            let admin = crate::remote::require_admin(url)?;
+            match crate::remote::create_project(url, &admin, name, &config::human_name(), &writer)?
+            {
+                Some(t) => Some(t),
+                None => bail!(
+                    "project {name} already exists on {url}: bring it with `kontext clone --server {url} {name}`"
+                ),
+            }
+        }
+        None => None,
+    };
     for d in ["ledger", "cursors"] {
         fs::create_dir_all(home.join(d))?;
         fs::write(home.join(d).join(".gitkeep"), "")?;
@@ -2741,6 +3104,23 @@ fn init(name: &str, home: Option<PathBuf>, remote: Option<&str>) -> Result<ExitC
     Store::open(&home, &writer)?;
     println!("Project {name} created in {}", home.display());
     println!("Writer of this machine: {writer}");
+    if let (Some(url), Some(token)) = (server, token) {
+        let saved = token.save(name)?;
+        Machine::set_server(name, Some(&url))?;
+        let remote = crate::remote::Remote {
+            url: url.clone(),
+            token,
+        };
+        let r = crate::remote::sync(&home, &remote, &crate::remote::Options::full(true))?;
+        println!(
+            "Server: {url} (the token is in {}, mode 0600; keep it out of every repo). Every command \
+             syncs with it.",
+            saved.display()
+        );
+        for w in &r.warnings {
+            println!("Warning: {w}");
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 

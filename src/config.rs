@@ -64,6 +64,10 @@ pub struct ProjectRef {
     /// `[projects.<p>.repos] <nombre> = "<ruta>"`.
     #[serde(default)]
     pub repos: BTreeMap<String, String>,
+    /// The kontext server this project syncs with (DESIGN §14.1). Its token
+    /// is in `<config dir>/tokens/<project>.token` or `$KONTEXT_TOKEN`.
+    #[serde(default)]
+    pub server: Option<String>,
 }
 
 /// `projects.toml`.
@@ -98,6 +102,58 @@ impl Machine {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Machine::default()),
             Err(e) => Err(e).with_context(|| format!("could not read {}", p.display())),
         }
+    }
+
+    /// The writer for a project: the one its server token is bound to (a
+    /// token's writer is minted with it, so sandboxes that share a hostname
+    /// never share a writer), or else this machine's.
+    pub fn writer_for(&self, project: &str) -> Result<String> {
+        // Only a project with a server has a token: one without behaves as
+        // before, whatever is in the config folder or the environment.
+        if self.server_for(project).is_none() {
+            return self.writer();
+        }
+        match token_for(project)? {
+            Some(t) => Ok(t.writer),
+            None => self.writer(),
+        }
+    }
+
+    /// The server URL for a project: `server` in its `[projects.<name>]`,
+    /// normalized. A registered project always uses its own configuration:
+    /// `$KONTEXT_SERVER` never changes it (it only names the server of a
+    /// sandbox's project that is not set up yet, DESIGN §14.2).
+    pub fn server_for(&self, project: &str) -> Option<String> {
+        self.projects
+            .get(project)
+            .and_then(|p| p.server.as_deref())
+            .map(crate::server::normalize_url)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Sets (or removes) `server` of a registered project, keeping the rest of
+    /// the file as it is.
+    pub fn set_server(name: &str, url: Option<&str>) -> Result<()> {
+        let p = Machine::path()?;
+        let text =
+            fs::read_to_string(&p).with_context(|| format!("could not read {}", p.display()))?;
+        let mut table: toml::Table =
+            toml::from_str(&text).with_context(|| format!("could not read {}", p.display()))?;
+        let entry = table
+            .get_mut("projects")
+            .and_then(|v| v.as_table_mut())
+            .and_then(|t| t.get_mut(name))
+            .and_then(|v| v.as_table_mut())
+            .with_context(|| format!("project {name:?} is not registered in {}", p.display()))?;
+        match url {
+            Some(u) => {
+                entry.insert("server".into(), u.trim_end_matches('/').into());
+            }
+            None => {
+                entry.remove("server");
+            }
+        }
+        write_atomic(&p, toml::to_string(&table)?.as_bytes())
     }
 
     /// The writer of this machine: `writer` from `projects.toml`, or
@@ -654,8 +710,8 @@ pub fn resolve_project(flag: Option<&str>) -> Result<Resolved> {
 /// Like [`resolve_project`], looking for the `.kontext.toml` from `dir`.
 pub fn resolve_project_in(flag: Option<&str>, dir: &Path) -> Result<Resolved> {
     let machine = Machine::load()?;
-    let writer = machine.writer()?;
     let (name, _) = choose_project(flag, dir, &machine)?;
+    let writer = machine.writer_for(&name)?;
     let home = machine.project_home(&name)?;
     Project::load(&home)?;
     Ok(Resolved { name, home, writer })
@@ -724,9 +780,234 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// A kontext server token: `kxt1.<base64url of its claims>.<secret>`. The
+/// claims (DESIGN §14.1) are readable without the network: the project, the
+/// writer, and who the token is (person, role, epic, the names a coordinator
+/// writes as, expiry). The binary uses them to pick the writer and to refuse
+/// a line the server would refuse; the server decides from its own copy.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token {
+    pub raw: String,
+    /// The project's name on the server.
+    pub project: String,
+    pub writer: String,
+    pub person: Option<String>,
+    /// `None` in a token without claims: then nothing is checked before writing.
+    pub role: Option<String>,
+    pub epic: Option<String>,
+    /// The actor names a coordinator token writes as.
+    pub actors: Vec<String>,
+    /// Expiry, in ms since the epoch.
+    pub expires: Option<i64>,
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Token({}, {}, kxt1.…)", self.project, self.writer)
+    }
+}
+
+impl Token {
+    pub fn parse(raw: &str) -> Result<Token> {
+        let raw = raw.trim();
+        let mut parts = raw.split('.');
+        let (Some("kxt1"), Some(head), Some(secret), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            bail!("not a kontext server token (they start with kxt1.)");
+        };
+        if secret.is_empty() {
+            bail!("not a kontext server token (no secret)");
+        }
+        let bytes = base64url_decode(head).context("not a kontext server token")?;
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).context("not a kontext server token")?;
+        let project = v
+            .get("p")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let writer = v
+            .get("w")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if project.is_empty() {
+            bail!("the token names no project");
+        }
+        // The claims are not signed: the name becomes paths and URLs, so it
+        // must be a project name (DESIGN §14.2).
+        if !crate::cli::valid_name(&project) {
+            bail!("the token names an invalid project {project:?}");
+        }
+        validate_writer(&writer)?;
+        let text = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        };
+        Ok(Token {
+            raw: raw.to_string(),
+            project,
+            writer,
+            person: text("n"),
+            role: text("r"),
+            epic: text("e"),
+            actors: v
+                .get("c")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            expires: v.get("x").and_then(|x| x.as_i64()),
+        })
+    }
+
+    /// `<config dir>/tokens/<project>.token`.
+    pub fn path(project: &str) -> Result<PathBuf> {
+        Ok(config_dir()?
+            .join("tokens")
+            .join(format!("{project}.token")))
+    }
+
+    /// Saves it for a project (0600).
+    pub fn save(&self, project: &str) -> Result<PathBuf> {
+        let p = Token::path(project)?;
+        write_private(&p, format!("{}\n", self.raw).as_bytes())?;
+        Ok(p)
+    }
+}
+
+fn base64url_decode(s: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => break,
+            _ => bail!("invalid base64url"),
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+/// The token of a registered project: the one saved in
+/// `<config dir>/tokens/<project>.token` (0600). `$KONTEXT_TOKEN` is never
+/// read here: it is only for `clone --server`, `server connect` and setting
+/// up a sandbox, which save it, so a token is only ever sent to the server
+/// its project is registered with.
+pub fn token_for(project: &str) -> Result<Option<Token>> {
+    let p = Token::path(project)?;
+    match fs::read_to_string(&p) {
+        Ok(s) => Token::parse(&s)
+            .map(Some)
+            .with_context(|| format!("{}", p.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("could not read {}", p.display())),
+    }
+}
+
+/// Writes a file only its owner can read (0600), in one go, creating its folder
+/// (0700) if needed: secrets and tokens.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = path.parent().context("path without a folder")?;
+    if !dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("could not create {}", dir.display()))?;
+    }
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&tmp);
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("could not write {}", tmp.display()))?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(&tmp, path).with_context(|| format!("could not write {}", path.display()))?;
+    Ok(())
+}
+
+/// `n` random bytes from the system, in hex.
+pub fn random_hex(n: usize) -> Result<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .context("could not read /dev/urandom")?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens_carry_project_and_writer() {
+        // {"p":"demo","w":"ana.coordinator.payments.3fa9c1@kontext"}
+        let head = "eyJwIjoiZGVtbyIsInciOiJhbmEuY29vcmRpbmF0b3IucGF5bWVudHMuM2ZhOWMxQGtvbnRleHQifQ";
+        let t = Token::parse(&format!("kxt1.{head}.c2VjcmV0")).unwrap();
+        assert_eq!(t.project, "demo");
+        assert_eq!(t.writer, "ana.coordinator.payments.3fa9c1@kontext");
+        assert!(!format!("{t:?}").contains("c2VjcmV0"));
+        // A token without claims: nothing to check before writing.
+        assert_eq!(t.role, None);
+        assert!(t.actors.is_empty());
+        assert!(Token::parse("kxt1.x").is_err());
+        assert!(Token::parse("ghp_abc").is_err());
+        assert!(Token::parse(&format!("kxt1.{head}.")).is_err());
+    }
+
+    #[test]
+    fn private_files_are_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub").join("secret");
+        write_private(&p, b"x").unwrap();
+        write_private(&p, b"y").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"y");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(p.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(random_hex(16).unwrap().len(), 32);
+        assert_ne!(random_hex(16).unwrap(), random_hex(16).unwrap());
+    }
 
     #[test]
     fn writer_validation() {

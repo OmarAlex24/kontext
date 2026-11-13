@@ -2,6 +2,8 @@
 //! and the `kontext` binary with its own isolated configuration.
 #![allow(dead_code)]
 
+pub mod server;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -393,6 +393,70 @@ pub struct Policy {
     /// one (only with `require_signatures`). The store fills it before the walk,
     /// because verifying needs `ssh-keygen`; an entry that is not here does not count.
     pub signatures: BTreeMap<String, crate::sign::Verdict>,
+    /// With a kontext server: the claims of every token, from the server
+    /// (DESIGN §14.2). A line counts as a coordinator's only if the token it
+    /// was written under may coordinate its epic. `None` without a server.
+    pub registry: Option<Registry>,
+    /// The claims of this copy's own token, for the checks before writing.
+    pub own: Option<Grant>,
+}
+
+/// What one token may do, as the server serves it (`GET registry`): never
+/// the secret. A writer's line `n` is governed by its latest token (by `ord`)
+/// with `first_n <= n`; a line with none is not bound by a token.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Grant {
+    pub role: String,
+    #[serde(default)]
+    pub epic: Option<String>,
+    #[serde(default)]
+    pub actors: Vec<String>,
+    #[serde(default = "one")]
+    pub first_n: u64,
+    #[serde(default)]
+    pub ord: u64,
+    #[serde(default)]
+    pub person: Option<String>,
+    #[serde(default)]
+    pub expires: Option<i64>,
+    #[serde(default)]
+    pub revoked: Option<String>,
+}
+
+fn one() -> u64 {
+    1
+}
+
+/// The server's token registry, kept in `.kontext/tokens.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Registry {
+    #[serde(default)]
+    pub version: u64,
+    #[serde(default)]
+    pub writers: BTreeMap<String, Vec<Grant>>,
+}
+
+impl Registry {
+    pub fn path(home: &Path) -> std::path::PathBuf {
+        crate::config::internal_dir(home).join("tokens.json")
+    }
+
+    /// The registry saved in `home`; empty (version 0) if there is none yet.
+    pub fn load(home: &Path) -> Registry {
+        std::fs::read_to_string(Registry::path(home))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// The token that governs line `n` of `writer`.
+    pub fn governing(&self, writer: &str, n: u64) -> Option<&Grant> {
+        self.writers
+            .get(writer)?
+            .iter()
+            .filter(|g| g.first_n <= n)
+            .max_by_key(|g| g.ord)
+    }
 }
 
 impl Default for Policy {
@@ -402,7 +466,60 @@ impl Default for Policy {
             lease_ms: DEFAULT_LEASE_MS,
             require_signatures: false,
             signatures: BTreeMap::new(),
+            registry: None,
+            own: None,
         }
+    }
+}
+
+/// The rule of [`Policy::manages`] under a token's claims. With no token,
+/// or an owner or pm token, the names decide (as without a server). A
+/// coordinator token manages only its own epic, as that epic's coordinator
+/// with role coordinator under one of the token's names; any other token
+/// manages nothing.
+fn manages_under(grant: Option<&Grant>, p: &Policy, actor: &Actor, epic: Option<&Entry>) -> bool {
+    match grant.map(|g| g.role.as_str()) {
+        None | Some("owner") | Some("pm") => {
+            if p.is_owner_actor(actor) || (actor.is_agent() && actor.role.as_deref() == Some("pm"))
+            {
+                return true;
+            }
+            epic.is_some_and(|e| tasks::is_coordinator(actor, e))
+        }
+        Some("coordinator") => {
+            let g = grant.expect("matched");
+            epic.is_some_and(|e| {
+                g.epic.as_deref() == Some(e.id.as_str())
+                    && actor.is_agent()
+                    && actor.role.as_deref() == Some("coordinator")
+                    && g.actors.contains(&actor.name)
+                    && tasks::is_coordinator(actor, e)
+            })
+        }
+        Some(_) => false,
+    }
+}
+
+fn token_reason(writer: &str, g: &Grant, actor: &Actor, epic: Option<&Entry>) -> String {
+    let what = match epic {
+        Some(e) => format!("epic {}", e.id),
+        None => "it".into(),
+    };
+    match (g.role.as_str(), &g.epic) {
+        ("coordinator", Some(mine)) if epic.is_some_and(|e| e.id != *mine) => format!(
+            "{writer} writes with a coordinator token of {mine}, which does not coordinate {what} \
+             (whatever name {} has)",
+            actor.short()
+        ),
+        ("coordinator", _) => format!(
+            "{writer}'s coordinator token coordinates {what} only as {} with role coordinator, not as {}",
+            g.actors.join(" or "),
+            actor.short()
+        ),
+        (role, _) => format!(
+            "{writer} writes with a {role} token, which does not coordinate {what} (whatever name {} has)",
+            actor.short()
+        ),
     }
 }
 
@@ -431,6 +548,8 @@ impl Policy {
             lease_ms,
             require_signatures: project.require_signatures,
             signatures: BTreeMap::new(),
+            registry: None,
+            own: None,
         })
     }
 
@@ -440,12 +559,35 @@ impl Policy {
     }
 
     /// Who manages the tasks of an epic: an owner, the pm or the epic's
-    /// coordinator.
+    /// coordinator. For a line about to be written by this copy (its own
+    /// token, if it has one); the walk uses [`Policy::manages_line`].
     pub fn manages(&self, actor: &Actor, epic: Option<&Entry>) -> bool {
-        if self.is_owner_actor(actor) || (actor.is_agent() && actor.role.as_deref() == Some("pm")) {
-            return true;
-        }
-        epic.is_some_and(|e| tasks::is_coordinator(actor, e))
+        manages_under(self.own.as_ref(), self, actor, epic)
+    }
+
+    /// Like [`Policy::manages`] for a line in the ledger: under the token its
+    /// writer wrote it with (DESIGN §14.2).
+    pub fn manages_line(&self, e: &Entry, epic: Option<&Entry>) -> bool {
+        manages_under(self.grant_of(e), self, &e.actor, epic)
+    }
+
+    /// Why a token takes away powers its actor's name would give: what the
+    /// alert of a line that does not count says. `None` if it does not.
+    pub fn token_limit(&self, e: &Entry, epic: Option<&Entry>) -> Option<String> {
+        let g = self.grant_of(e)?;
+        (manages_under(None, self, &e.actor, epic) && !self.manages_line(e, epic))
+            .then(|| token_reason(&e.writer, g, &e.actor, epic))
+    }
+
+    /// The same for a line this copy is about to write.
+    pub fn own_limit(&self, actor: &Actor, epic: Option<&Entry>) -> Option<String> {
+        let g = self.own.as_ref()?;
+        (manages_under(None, self, actor, epic) && !self.manages(actor, epic))
+            .then(|| token_reason("this copy's writer", g, actor, epic))
+    }
+
+    fn grant_of(&self, e: &Entry) -> Option<&Grant> {
+        self.registry.as_ref()?.governing(&e.writer, e.n)
     }
 
     pub fn is_owner(&self, name: &str) -> bool {
@@ -1021,7 +1163,7 @@ impl State {
             if e.kind == "feature" {
                 self.features
                     .insert(e.id.clone(), crate::features::FeatureInfo::default());
-                if let Err(reason) = crate::features::may_write(self, &e.actor) {
+                if let Err(reason) = crate::features::may_write_line(self, e) {
                     self.not_counting.insert(e.id.clone(), reason.clone());
                     self.alerts.push(Alert::NotCounting {
                         id: e.id.clone(),
@@ -1119,7 +1261,7 @@ impl State {
             }
             "supersede" if target_kind.as_deref() == Some("feature") => {
                 // A feature replaced by another: the pm or an owner.
-                if let Err(reason) = crate::features::may_write(self, &e.actor) {
+                if let Err(reason) = crate::features::may_write_line(self, e) {
                     self.not_counting.insert(e.id.clone(), reason.clone());
                     self.alerts.push(Alert::NotCounting {
                         id: e.id.clone(),
@@ -1259,7 +1401,8 @@ impl State {
 
     fn apply_task(&mut self, e: &Entry, task: &str) {
         let epic = self.get(task).and_then(|t| self.epic_of(t)).cloned();
-        let manages = self.policy.manages(&e.actor, epic.as_ref());
+        let manages = self.policy.manages_line(e, epic.as_ref());
+        let token_limit = self.policy.token_limit(e, epic.as_ref());
         let lease = self.policy.lease_ms;
         let ms = tasks::hlc_ms(&e.hlc);
         let info = self.tasks.get(task).cloned().unwrap_or_default();
@@ -1283,10 +1426,12 @@ impl State {
                     .unwrap_or_default()
                     .to_string();
                 if !manages {
-                    let reason = format!(
-                        "only the epic's coordinator, the pm or an owner can assign ({} is not one)",
-                        e.actor.short()
-                    );
+                    let reason = token_limit.unwrap_or_else(|| {
+                        format!(
+                            "only the epic's coordinator, the pm or an owner can assign ({} is not one)",
+                            e.actor.short()
+                        )
+                    });
                     return self.task_ignored(task, e, reason);
                 }
                 if to.is_empty() {
@@ -1356,10 +1501,12 @@ impl State {
                     return self.event(task, e, false, "does not count: already closed".into());
                 }
                 if !holds && !manages {
-                    let reason = format!(
-                        "only whoever holds it ({}), the epic's coordinator, the pm or an owner can release it",
-                        h.actor
-                    );
+                    let reason = token_limit.unwrap_or_else(|| {
+                        format!(
+                            "only whoever holds it ({}), the epic's coordinator, the pm or an owner can release it",
+                            h.actor
+                        )
+                    });
                     return self.task_ignored(task, e, reason);
                 }
                 self.unhold(task);
@@ -1380,9 +1527,11 @@ impl State {
                         .as_ref()
                         .map(|h| format!("held by {}", h.actor))
                         .unwrap_or_else(|| "nobody holds it".into());
-                    let reason = format!(
-                        "only whoever holds it ({who}), the epic's coordinator, the pm or an owner can close it"
-                    );
+                    let reason = token_limit.unwrap_or_else(|| {
+                        format!(
+                            "only whoever holds it ({who}), the epic's coordinator, the pm or an owner can close it"
+                        )
+                    });
                     return self.task_ignored(task, e, reason);
                 }
                 if let Err(reason) = tasks::check_evidence(e.fields.get("evidence")) {
@@ -1515,7 +1664,7 @@ impl State {
         // A reopen of a dropped feature puts it back; its validation, if it
         // had one, is kept.
         if e.kind == "reopen" && self.dropped.contains_key(f) {
-            if let Err(reason) = crate::features::may_write(self, &e.actor) {
+            if let Err(reason) = crate::features::may_write_line(self, e) {
                 return self.feature_ignored(f, e, reason.replace("add or supersede", "put back"));
             }
             self.dropped.remove(f);
@@ -1538,11 +1687,13 @@ impl State {
                     return self.feature_ignored(f, e, reason);
                 }
                 let epic = self.get(f).and_then(|x| self.epic_of(x)).cloned();
-                if !self.policy.manages(&e.actor, epic.as_ref()) {
-                    let reason = format!(
-                        "only the epic's coordinator, the pm or an owner can validate a feature ({} is not one)",
-                        e.actor.short()
-                    );
+                if !self.policy.manages_line(e, epic.as_ref()) {
+                    let reason = self.policy.token_limit(e, epic.as_ref()).unwrap_or_else(|| {
+                        format!(
+                            "only the epic's coordinator, the pm or an owner can validate a feature ({} is not one)",
+                            e.actor.short()
+                        )
+                    });
                     return self.feature_ignored(f, e, reason);
                 }
                 if let Some(why) = crate::features::unready(self, f) {

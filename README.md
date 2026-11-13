@@ -8,24 +8,32 @@ Status: phases 1 (base), 2 (charter, decisions, views, hooks), 3 (epics, tasks a
 
 ## Install
 
-You need Rust 1.89 or newer (`rustup`) and `git`.
+On macOS (Apple silicon) and Linux (x86_64 and arm64), from the latest release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh
+```
+
+It downloads the binary for your machine (static on Linux, so it runs in any container), checks it against the release's `SHA256SUMS`, and puts it in `~/.local/bin` (or `$KONTEXT_INSTALL_DIR`). `KONTEXT_VERSION=v0.2.0` picks a release. You need `git`; Rust and Node are not needed.
+
+From the source instead, with Rust 1.89 or newer (`rustup`):
 
 ```sh
 cargo install --path . --locked
 ```
 
-That leaves the `kontext` binary in `~/.cargo/bin`. Do this before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
+That leaves the `kontext` binary in `~/.cargo/bin`. Install it either way before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
 
 ### Have an agent install it and migrate the memory
 
 The skill `kontext-migrate` tells an agent how to install kontext in a project and move the memory that already exists into it: a `ctx.py` ledger (the v0 prototype), and the rules and decisions in `CLAUDE.md`, `AGENTS.md`, notes and Claude Code's automatic memory (as proposals that you sign). It asks once about anything it can't work out, and says up front where it is going to write.
 
-To have it in all your sessions before installing anything (the repo is private: it needs `gh auth login`):
+To have it in all your sessions before installing anything:
 
 ```sh
 mkdir -p ~/.claude/skills/kontext-migrate
-gh api repos/OmarAlex24/kontext/contents/templates/skill-kontext-migrate.md \
-  -H "Accept: application/vnd.github.raw" > ~/.claude/skills/kontext-migrate/SKILL.md
+curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/templates/skill-kontext-migrate.md \
+  > ~/.claude/skills/kontext-migrate/SKILL.md
 ```
 
 and ask Claude Code "install kontext in this project". With the binary already installed, `kontext install --skills-only --global` adds (or updates) all the kontext skills in `~/.claude/skills/`, without needing a project. `kontext install` in a repo also installs them.
@@ -201,6 +209,10 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 | `KONTEXT_DISTILL_DISABLE` | If set to anything, the `pre-compact` and `session-end` hooks don't run the distill |
 | `KONTEXT_CAPTURE_DISABLE` | If set to anything, the capture hooks (`user-prompt-submit`, `stop`, `session-end`) write nothing |
 | `KONTEXT_GH_BIN` | Another binary instead of `gh` for `changelog` (tests) |
+| `KONTEXT_SERVER` | A sandbox's kontext server: with `KONTEXT_TOKEN`, the first command sets up the token's project if this machine does not have it. A registered project always uses `server` in `projects.toml`, and its token never goes here |
+| `KONTEXT_TOKEN` | A token for the kontext server (`kxt1.…`) for `clone --server`, `server connect`, and a sandbox's first command (with `KONTEXT_SERVER`); it is then saved in the config folder (0600), and a registered project uses the saved one |
+| `KONTEXT_ADMIN_SECRET` | The server's admin secret, on a machine other than the one that deployed it (`init --server`, `server connect`) |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | For `kontext server deploy` |
 
 ## Phase 3 commands
 
@@ -471,7 +483,7 @@ PRs come from `gh pr list --repo <owner/repo> --state merged --search "merged:>=
 |---|---|
 | `kontext clone <git-url> [--home <path>] [--name <name>]` | Brings in an existing `kontext-home` (default `~/kontext-home/<repo name>`), registers it in `projects.toml`, sets this machine's writer if none was set, builds the index and prints the charter and the owners |
 | `kontext sync [--include-config]` | Commits your own changes (`ledger/` and `cursors/`, with the message `kontext: <writer> <N> entries`), fetches the others' changes (`fetch` and `rebase`) and pushes (`push -u`). Then it says how many entries arrived from each writer, which new alerts they caused, and whether the chain of what arrived verifies. Without a remote, it only commits |
-| `kontext status` | Project, writer, remote, last sync, own entries not committed and not pushed, index, chains, alerts and signatures. `--json` for the UI |
+| `kontext status` | Project, writer, remote, last sync, own entries not committed and not pushed, index, chains, alerts and signatures; with a kontext server, the server, the last contact or error, own entries not pushed and any line it refused. `--json` for the UI |
 | `kontext doctor` | Checks the installation and says what is wrong and which command fixes it: this binary, the `kontext` on `PATH`, the config and the project, the kontext-home, the hooks in every settings file, the capture, the skills and agent files, and the hook log. Each line is `ok`, a `note` or a `problem` with its fix; exits with 1 if there is any problem. Writes nothing, and works on a broken setup (no `projects.toml`, no project, a missing binary) |
 | `kontext verify` | Besides the chains, checks any signatures there are (and, with `require_signatures`, that the required ones are present). Exits with 1 if any doesn't verify |
 | `--sign` | Global option: signs even if `projects.toml` has no `[signing] key` (uses `~/.ssh/id_ed25519.pub`) |
@@ -566,6 +578,56 @@ python3 -m unittest discover bench/tests      # the harness tests
 
 ## Working with other people
 
+Two ways to share a project: a **kontext server** (below: every command syncs on its own, sandboxes join with a token, the page updates live), or a **git remote** (`kontext sync` by hand). Either way the `kontext-home` on each machine is the working copy, and it keeps working offline.
+
+### With a kontext server
+
+The server is a Cloudflare Worker that you deploy on your own account (the free plan is enough); it relays ledger lines and never decides anything. Every command pulls before it reads and pushes what it wrote, with short timeouts. Push and pull go on their own, push first, so a slow pull never holds back what you wrote. Offline, commands work on the local copy and what you wrote goes up with the next command that reaches the server. Screenshots and other media come down when a view needs them, or with `kontext sync`.
+
+```sh
+# Once per Cloudflare account. The API token needs the account permission
+# "Workers Scripts: Edit"; the admin secret is kept in servers.json (0600).
+CLOUDFLARE_API_TOKEN=… kontext server deploy          # prints https://kontext.<subdomain>.workers.dev
+
+# A new project on it, or an existing one with all its history
+kontext init billing --server https://kontext.<subdomain>.workers.dev
+kontext server connect https://kontext.<subdomain>.workers.dev
+
+# A copy that started without the server joins it with a token of its own
+KONTEXT_TOKEN=kxt1.… kontext server connect https://kontext.<subdomain>.workers.dev
+
+# Someone else, or another machine of yours: the owner makes a token (shown once)
+kontext token create --role owner --person ana
+KONTEXT_TOKEN=kxt1.… kontext clone --server https://kontext.<subdomain>.workers.dev billing
+
+# A sandbox for a coordinator: set the printed variables in its environment;
+# its first kontext command sets the project up there
+kontext token create --role coordinator --epic payments --ttl 8h
+kontext token list
+kontext token revoke tok_…
+```
+
+| Command | What it does |
+|---|---|
+| `kontext server deploy [--name kontext] [--account-id] [--subdomain] [--no-check] [--replace]` | Uploads the server with the Cloudflare API (no wrangler or Node) and prints its URL; running it again updates it and keeps its admin secret. It refuses (exit 2) a Worker of that name that kontext did not deploy, unless `--replace` |
+| `kontext init <name> --server <url>` | Creates the project on the server (with the admin secret) and locally, and saves this machine's owner token (0600) |
+| `kontext server connect <url>` | Attaches an existing project. With the admin secret: uploads every writer's lines, the cursors, the config and the media, going on past a writer the server refuses (exit 1 if anything was left out). With only `KONTEXT_TOKEN`: this machine's own lines. Changes nothing local; running it again resumes |
+| `kontext clone --server <url> <project> [--home] [--name]` | Brings a project down with the token in `KONTEXT_TOKEN` |
+| `kontext token create --role <owner\|pm\|coordinator\|implementer\|tester\|scout> [--epic] [--person] [--ttl] [--writer]` | A token bound to a person, a role and its own writer; prints the variables for a sandbox |
+| `kontext token list` / `revoke <id>` | The project's tokens (never their secrets); a revoked one stops at once |
+| `kontext sync [--include-config]` | With a server: push and pull now, media included, and say what arrived, what went up and what was refused (exit 1 if a line was refused or did not continue a chain) |
+| `kontext ui` | Also listens to the server: a change on another machine shows up in a second or two |
+
+- **Who may write what:** each token's role (DESIGN §14.2). A sandbox's coordinator token writes as that epic's coordinator and its workers, never as a human, the pm or another epic's coordinator, and never decisions or signatures. kontext refuses such a line before writing it (exit 2).
+- **A name is not an identity:** with a server, assigning, releasing or closing another's task, or validating a feature, counts as the coordinator's only from a coordinator token of that epic (as one of its names, with role `coordinator`), a pm or owner token, or a writer with no token. Any other line is kept, does not count, and shows up as an alert. kontext reads every token's claims (never a secret) from the server for this.
+- **A line holds at most 4 MiB** with a server; kontext refuses a longer one before writing it (exit 2).
+- **Sandboxes never wait on the network:** a sandbox's set-up has the same short timeouts as every command, and after a failure no process on that machine tries again for 30 s. Token claims are not trusted until the server confirms them, and nothing outside a folder kontext set up is ever removed.
+- **Nothing in the repo:** no token, server URL or ledger goes in the code repo. Tokens live in the config folder (0600) or in the environment.
+- **If two copies write as the same writer** (a token used in two places), the server keeps the first and refuses the other's lines; `kontext status` says so, and nothing is overwritten.
+- **Old binaries** read a synced kontext-home as before (the format did not change); they just don't sync it.
+
+### With a git remote
+
 The `kontext-home` is a git repo. Each writer (`<user>@<machine>`) has its own file in `ledger/` and its own cursors in `cursors/<reader>/<writer>.json`, so combining what several machines wrote never conflicts: `kontext sync` only adds files and lines.
 
 ```sh
@@ -633,6 +695,8 @@ python3 -m unittest discover bench/tests   # the dry-run harness; needs target/d
 ```
 
 CI: `.github/workflows/ci.yml` runs the first three (fmt, clippy with warnings as errors, and the tests) on Linux with Rust 1.98.1, on every pull request whatever its base branch and on every push to `main`. The harness is not part of it.
+
+Releases: `.github/workflows/release.yml` builds `aarch64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (the Linux ones static, checked with `file` and `ldd`), runs `install.sh` against each archive (it must install, and it must refuse a wrong checksum), and on a `v*` tag attaches `kontext-<target>.tar.gz` and `SHA256SUMS` to a GitHub Release. It also builds, without releasing, on a pull request that touches it, `install.sh`, `Cargo.toml` or `Cargo.lock`. To cut one: bump `version` in `Cargo.toml`, merge, then `git tag v0.2.0 && git push origin v0.2.0` on `main`.
 
 The `kontext ui` tests start the server on a free port against the project from `examples/demo.sh` (they need `bash` and `git`). The harness tests don't run from `cargo test`: they are skipped if they can't find the `kontext` binary.
 

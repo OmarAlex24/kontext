@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The same version as on the development machines; rustup comes with the runner.
       - name: Rust 1.98.1
@@ -35,7 +35,7 @@ jobs:
           rustup default 1.98.1
           rustc --version
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -45,11 +45,30 @@ jobs:
           key: cargo-${{ runner.os }}-1.98.1-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-1.98.1-
 
+      # The kontext server's tests run server/worker.js in workerd through
+      # Miniflare, a dev dependency under server/. Only CI and development need
+      # Node; the binary does not.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: npm ci (server)
+        run: npm ci --prefix server --no-audit --no-fund
+
       - name: cargo fmt
         run: cargo fmt --check
 
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: server tests (Miniflare)
+        run: npm test --prefix server
+
+      # With KONTEXT_REQUIRE_SERVER_TESTS=1 the Rust tests that need the local
+      # server fail instead of skipping when it cannot start.
       - name: cargo test
+        env:
+          KONTEXT_REQUIRE_SERVER_TESTS: "1"
         run: cargo test --locked

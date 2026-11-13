@@ -46,7 +46,7 @@ Invoke `kontext` as a bare command that starts with `kontext`. Claude Code usual
 
 ## Never decide
 
-Decisions, charter and goal signatures, and accepting or rejecting proposals belong to a human owner. `kontext decide`, `kontext sign`, `kontext accept`, and `kontext reject` will refuse you, and that is fine: propose with `kontext propose` and move on.
+Decisions, charter and goal signatures, and accepting or rejecting proposals belong to a human owner. `kontext decide`, `kontext sign`, `kontext accept`, and `kontext reject` will refuse you, and that is fine: propose with `kontext propose` and move on. So does exit 2 with "the server would refuse": this copy's token (a sandbox's) does not let you write that, so use the actor and role it allows (`--actor`, `--role`), or propose. With a kontext server each command syncs on its own, offline too.
 
 The only exception is the pm, when an owner has already approved it in the conversation: `kontext --role pm decide … --approved-by <owner>`. Do not use it to guess what the owner would want.
 

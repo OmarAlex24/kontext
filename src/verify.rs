@@ -105,7 +105,38 @@ pub fn run(home: &Path) -> Result<Report> {
 /// `kontext verify`: the chains and also the cited images (it reads and hashes
 /// each one, so it is not used in the views).
 pub fn run_with_media(home: &Path) -> Result<Report> {
+    // With a kontext server, a cited file this copy lacks comes down now: the
+    // automatic pull brings no media (DESIGN §14.1).
+    for w in crate::remote::ensure_media(home, cited_media(home)?) {
+        eprintln!("kontext: warning: {w}");
+    }
     run_inner(home, true)
+}
+
+/// The names (`<sha256>.<ext>`) of the media every entry cites.
+fn cited_media(home: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for (_, path) in ledger_files(&home.join("ledger"))? {
+        let bytes = fs::read(&path)?;
+        for raw in bytes.split(|b| *b == b'\n') {
+            let Ok(v) = serde_json::from_slice::<Value>(raw) else {
+                continue;
+            };
+            let Some(fields) = v.get("fields").and_then(Value::as_object) else {
+                continue;
+            };
+            for item in crate::media::refs_of(fields) {
+                if let Some(name) = item
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.strip_prefix("media/"))
+                {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn run_inner(home: &Path, media: bool) -> Result<Report> {

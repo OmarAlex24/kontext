@@ -510,6 +510,10 @@ pub struct Status {
     pub alerts: usize,
     pub require_signatures: bool,
     pub signing_key: Option<String>,
+    /// The kontext server, if the project has one (without the network).
+    /// Absent from the JSON of a project without one, as before servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<crate::remote::Status>,
 }
 
 /// The writer's own entries not committed yet and, with a remote, not pushed
@@ -570,7 +574,22 @@ pub fn status(store: &mut Store, project: &Project) -> Result<Status> {
     let report = verify::run(&home)?;
     let st = store.state()?;
     let machine = Machine::load()?;
+    let resolved_name = Machine::load()?
+        .projects
+        .iter()
+        .find(|(_, r)| {
+            config::expand_tilde(&r.home)
+                .ok()
+                .and_then(|h| fs::canonicalize(h).ok())
+                == fs::canonicalize(&home).ok()
+        })
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| project.name.clone());
+    let server = crate::remote::Link::of(&resolved_name)
+        .ok()
+        .and_then(|l| crate::remote::status(&home, &l));
     Ok(Status {
+        server,
         project: project.name.clone(),
         home: home.display().to_string(),
         writer,
@@ -603,19 +622,26 @@ impl Status {
                 self.branch.as_deref().unwrap_or("?")
             )),
             (Some(r), None) => l.push(format!("Remote: {r}")),
+            _ if self.server.is_some() => {
+                l.push("Git remote: none (this project syncs through its server)".into())
+            }
             _ => l.push("Remote: none (`kontext sync` only commits)".into()),
         }
-        l.push(format!(
-            "Last sync: {}",
-            self.last_sync
-                .as_deref()
-                .unwrap_or("never from this machine")
-        ));
-        let mut pending = format!("Own entries not committed: {}", self.uncommitted);
-        if let Some(u) = self.unpushed {
-            pending.push_str(&format!("; not pushed: {u} (according to the last fetch)"));
+        // Git's last sync and commits mean nothing for a project that syncs
+        // only through its server: its own lines below say what is pending.
+        if self.server.is_none() || self.remote.is_some() {
+            l.push(format!(
+                "Last sync: {}",
+                self.last_sync
+                    .as_deref()
+                    .unwrap_or("never from this machine")
+            ));
+            let mut pending = format!("Own entries not committed: {}", self.uncommitted);
+            if let Some(u) = self.unpushed {
+                pending.push_str(&format!("; not pushed: {u} (according to the last fetch)"));
+            }
+            l.push(pending);
         }
-        l.push(pending);
         l.push(format!(
             "Index: {} entries{}",
             self.index_entries,
@@ -635,6 +661,9 @@ impl Status {
                 self.chain_problems.len()
             ));
             l.extend(self.chain_problems.iter().map(|p| format!("  - {p}")));
+        }
+        if let Some(s) = &self.server {
+            l.extend(s.lines());
         }
         l.push(format!("Alerts: {}", self.alerts));
         l.push(format!(

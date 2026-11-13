@@ -14,6 +14,12 @@
 //!   `epic_line`, `status`), and the ledger from the newest to the oldest, in
 //!   pages of `limit` (100 by default).
 //! - `GET /api/entry/<id>`: the same as `kontext show --json`, plus its line.
+//! - `GET /api/events`: Server-Sent Events; a `change` event every time the
+//!   ledger, the cursors, the media or the config change on disk (checked every
+//!   second), so both pages read again at once. When the project has a server
+//!   (DESIGN §14.1), a thread listens to its WebSocket and pulls what arrives,
+//!   so a change on another machine shows up within a second or two. The
+//!   5-second poll stays as the fallback.
 //!
 //! It listens on `127.0.0.1` by default. With a loopback address it only
 //! answers requests whose `Host` is loopback (against DNS rebinding: a page on
@@ -23,8 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -76,6 +82,8 @@ pub struct Source {
     /// Where `kontext ui` was started: `/report` looks for `.pm/` from here
     /// on every request, as `kontext report` does.
     pub cwd: Option<PathBuf>,
+    /// The project's server, if it has one: `kontext ui` listens to it.
+    pub server: Option<crate::remote::Remote>,
 }
 
 impl Source {
@@ -850,6 +858,16 @@ pub fn serve(src: Source, opts: &Options) -> Result<()> {
     if opts.open {
         open_browser(&url);
     }
+    let changes = Arc::new(Changes::default());
+    {
+        let home = src.home.clone();
+        let changes = Arc::clone(&changes);
+        std::thread::spawn(move || watch_files(&home, &changes));
+    }
+    if let Some(remote) = src.server.clone() {
+        let home = src.home.clone();
+        std::thread::spawn(move || follow_server(&home, &remote));
+    }
     let shared = Arc::new(Server {
         src,
         loopback,
@@ -857,6 +875,7 @@ pub fn serve(src: Source, opts: &Options) -> Result<()> {
         lock: Mutex::new(()),
         page: page(),
         tree_page: tree_page(),
+        changes,
     });
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -894,6 +913,137 @@ struct Server {
     lock: Mutex<()>,
     page: String,
     tree_page: String,
+    changes: Arc<Changes>,
+}
+
+/// A counter of changes on disk, and a way to wait for the next one.
+#[derive(Default)]
+struct Changes {
+    version: Mutex<u64>,
+    cv: Condvar,
+}
+
+impl Changes {
+    fn bump(&self) {
+        let mut v = self.version.lock().unwrap_or_else(|e| e.into_inner());
+        *v += 1;
+        self.cv.notify_all();
+    }
+
+    fn current(&self) -> u64 {
+        *self.version.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Waits until the version is not `seen`, or `timeout` passes.
+    fn wait(&self, seen: u64, timeout: Duration) -> u64 {
+        let v = self.version.lock().unwrap_or_else(|e| e.into_inner());
+        let (v, _) = self
+            .cv
+            .wait_timeout_while(v, timeout, |v| *v == seen)
+            .unwrap_or_else(|e| e.into_inner());
+        *v
+    }
+}
+
+/// The size and modification time of everything the pages draw from: the
+/// ledger, the cursors, the media and the config.
+fn fingerprint(home: &std::path::Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn walk(dir: &std::path::Path, depth: usize, h: &mut impl Hasher) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut items: Vec<_> = rd.flatten().collect();
+        items.sort_by_key(|e| e.file_name());
+        for e in items {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                if depth > 0 {
+                    walk(&e.path(), depth - 1, h);
+                }
+                continue;
+            }
+            e.file_name().hash(h);
+            m.len().hash(h);
+            if let Ok(t) = m.modified() {
+                t.hash(h);
+            }
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (d, depth) in [("ledger", 0), ("cursors", 1), ("media", 0)] {
+        walk(&home.join(d), depth, &mut h);
+    }
+    for f in ["project.toml", "synonyms.toml"] {
+        if let Ok(m) = std::fs::metadata(home.join(f)) {
+            m.len().hash(&mut h);
+            if let Ok(t) = m.modified() {
+                t.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Checks the files every second and counts a change when they differ.
+fn watch_files(home: &std::path::Path, changes: &Changes) {
+    let mut last = fingerprint(home);
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let now = fingerprint(home);
+        if now != last {
+            last = now;
+            changes.bump();
+        }
+    }
+}
+
+/// Listens to the server's WebSocket and pulls on every frontier it sends
+/// (one when the socket opens, one after every change); what the pull writes
+/// is then seen by [`watch_files`]. It never pushes. Reconnects with a
+/// growing wait.
+fn follow_server(home: &std::path::Path, remote: &crate::remote::Remote) {
+    use crate::remote::{self, Options, TokenRefused};
+    let mut wait = Duration::from_secs(2);
+    let mut last_error = String::new();
+    loop {
+        let started = Instant::now();
+        // Only pulls: the page is read-only, and what this machine writes is
+        // pushed by the command that wrote it.
+        let opts = Options {
+            push: false,
+            ..Options::auto()
+        };
+        let r = remote::watch(remote, |_| {
+            if let Err(e) = remote::sync(home, remote, &opts) {
+                let msg = format!("{e:#}");
+                if msg != last_error {
+                    eprintln!("kontext ui: warning: sync with {}: {msg}", remote.url);
+                    last_error = msg;
+                }
+            }
+            true
+        });
+        if started.elapsed() > Duration::from_secs(60) {
+            wait = Duration::from_secs(2);
+        }
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            if msg != last_error {
+                eprintln!(
+                    "kontext ui: warning: no live updates from {} ({msg}); the page still reads \
+                     the local copy, and it retries",
+                    remote.url
+                );
+                last_error = msg;
+            }
+            if e.is::<TokenRefused>() {
+                wait = Duration::from_secs(300);
+            }
+        }
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_secs(60));
+    }
 }
 
 pub struct Response {
@@ -1009,11 +1159,15 @@ impl Server {
             (method, target, host)
         };
         let head = method == "HEAD";
+        let host_allowed = !self.loopback || host.as_deref().is_some_and(|h| self.host_ok(h));
+        if method == "GET" && host_allowed && target.split('?').next() == Some("/api/events") {
+            return self.events(stream);
+        }
         let resp = if method.is_empty() || target.is_empty() {
             Response::text(400, "invalid request\n")
         } else if method != "GET" && !head {
             Response::text(405, "kontext ui is read-only: GET only\n")
-        } else if self.loopback && !host.as_deref().is_some_and(|h| self.host_ok(h)) {
+        } else if !host_allowed {
             Response::text(
                 403,
                 "Host not allowed: kontext ui only answers to 127.0.0.1, localhost or [::1]\n",
@@ -1028,6 +1182,33 @@ impl Server {
         stream.set_read_timeout(Some(Duration::from_millis(500)))?;
         let _ = std::io::copy(&mut (&stream).take(64 * 1024), &mut std::io::sink());
         Ok(())
+    }
+
+    /// `/api/events`: a `change` event every time the files change, and a
+    /// comment every 15 s so that a dead connection is noticed. Same headers
+    /// (and CSP) as every other answer; it ends when the browser leaves.
+    fn events(&self, mut stream: TcpStream) -> Result<()> {
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
+             Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\
+             Referrer-Policy: no-referrer\r\nContent-Security-Policy: {CSP}\r\n\
+             Connection: close\r\n\r\nretry: 3000\n\n"
+        );
+        stream.write_all(head.as_bytes())?;
+        stream.flush()?;
+        let mut seen = self.changes.current();
+        loop {
+            let v = self.changes.wait(seen, Duration::from_secs(15));
+            let msg = if v == seen {
+                ": still here\n\n".to_string()
+            } else {
+                seen = v;
+                format!("event: change\ndata: {v}\n\n")
+            };
+            stream.write_all(msg.as_bytes())?;
+            stream.flush()?;
+        }
     }
 
     /// The `Host` has to be loopback and with the page's port
@@ -1111,6 +1292,13 @@ impl Server {
                 let name = percent_decode(&p["/media/".len()..]);
                 match crate::media::valid_media_name(&name) {
                     Some((_, ext)) if ext != "html" => {
+                        // With a kontext server, a file this copy lacks comes
+                        // down when the page asks for it.
+                        if self.src.server.is_some() {
+                            for w in crate::remote::ensure_media(&self.src.home, [name.clone()]) {
+                                eprintln!("kontext ui: warning: {w}");
+                            }
+                        }
                         match std::fs::read(self.src.home.join("media").join(&name)) {
                             Ok(body) => Response {
                                 status: 200,

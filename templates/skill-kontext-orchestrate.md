@@ -94,6 +94,8 @@ Check which tools you have in this session (including the deferred ones) and use
 | Codex or another agent CLI | Only if the user names it | Same |
 | No way to launch agents | In series: you play each role in turn, with the same structure of epics and tasks in `kontext` | You, one task at a time |
 
+A coordinator in a worktree of this machine shares the kontext-home and needs nothing more. One that runs elsewhere (a cloud thread, a sandbox, another machine) needs the project on a kontext server: make it a token with `kontext token create --role coordinator --epic <name> --ttl 8h` and give it the printed variables through the harness's environment or secrets, never in the repo (and in the prompt only if there is no other way: prompts are kept). With them, its first kontext command sets the project up, and everything it writes reaches you on your next command; its workers write through the same token.
+
 Do not depend on subagents that launch subagents. The coordinator lives where the harness can keep long processes running (a thread, a worktree, a workflow); workers are always the lowest level and do not launch anyone. If a coordinator cannot launch workers, it returns the briefs and you launch them yourself.
 
 ## 5. The contract, the same with any harness
