@@ -1158,3 +1158,65 @@ fn the_environment_does_not_take_over_a_registered_project() {
     assert_eq!(a.server_tail(&net), a.lines("omar@a").len() as u64);
     assert!(trap.accept().is_err(), "the token went to KONTEXT_SERVER");
 }
+
+/// A copy that started without a server joins it with a token alone: the
+/// admin secret is only for creating the project and uploading every
+/// writer. A saved token never goes to another server.
+#[test]
+fn a_copy_without_a_server_joins_it_with_a_token() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar", "ana"]);
+    let c = net.machine("c", "ana@laptop", "ana");
+    let out = c.ok(&["init", "demo", "--home", c.home.to_str().unwrap()]);
+    assert!(out.contains("Project demo created"), "{out}");
+    c.ok(&["log", "written before the server"]);
+    let mine = c.lines("ana@laptop");
+    assert_eq!(mine.len(), 1);
+
+    // Without a token, it says how to get one.
+    let out = c.run(&[], &["server", "connect", net.url()]);
+    let text = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains("KONTEXT_TOKEN=<token> kontext server connect"),
+        "{text}"
+    );
+
+    let token = net.token(&a, "ana", "owner", "ana@laptop");
+    let out = c.ok_env(
+        &[("KONTEXT_TOKEN", &token)],
+        &["server", "connect", net.url()],
+    );
+    assert!(out.contains("Project demo is on"), "{out}");
+    assert_eq!(c.token(), token);
+    a.ok(&["sync"]);
+    assert_eq!(a.lines("ana@laptop"), mine);
+
+    // The saved token is for that server only.
+    let trap = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    trap.set_nonblocking(true).unwrap();
+    let trap_url = format!("http://{}", trap.local_addr().unwrap());
+    let out = c.run(&[], &["server", "connect", &trap_url]);
+    assert!(!out.status.success());
+    // Nor does one in KONTEXT_TOKEN (a sandbox always has it set).
+    let out = c.run(
+        &[("KONTEXT_TOKEN", &token)],
+        &["server", "connect", &trap_url],
+    );
+    let text = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("no token of it is sent"), "{text}");
+    assert!(trap.accept().is_err(), "a token went to another server");
+    // A token the server does not take never replaces the saved one.
+    let bad = token.rsplit_once('.').unwrap().0.to_string() + ".not-the-secret";
+    let out = c.run(
+        &[("KONTEXT_TOKEN", &bad)],
+        &["server", "connect", net.url()],
+    );
+    assert!(!out.status.success());
+    assert_eq!(c.token(), token);
+
+    c.ok(&["log", "after connecting"]);
+    assert_eq!(c.server_tail(&net), 2);
+}

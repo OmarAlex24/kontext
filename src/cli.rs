@@ -784,9 +784,11 @@ pub enum ServerCmd {
         #[arg(long)]
         replace: bool,
     },
-    /// Attaches this project (with all its history) to a kontext server and uploads everything:
-    /// every writer's lines, the cursors, project.toml, synonyms.toml and media. Needs the admin
-    /// secret. Running it again resumes; afterwards every command syncs with the server
+    /// Attaches this project (with all its history) to a kontext server. With the admin secret it
+    /// uploads everything: every writer's lines, the cursors, project.toml, synonyms.toml and
+    /// media; with only a token (in KONTEXT_TOKEN, or saved for that server) it uploads this
+    /// machine's own lines. Running it again resumes; afterwards every command syncs with the
+    /// server
     Connect {
         /// The server's URL (what `kontext server deploy` printed)
         url: String,

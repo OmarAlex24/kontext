@@ -1819,46 +1819,86 @@ pub fn require_admin(url: &str) -> Result<String> {
 }
 
 /// `kontext server connect <url>`: attaches an existing project to a server
-/// and uploads everything (every writer's lines, the cursors, the config and
-/// the media) with the admin secret. Running it again resumes where it
-/// stopped: the server keeps what it has and only takes what it lacks.
+/// and uploads what this copy has. With the admin secret it creates the
+/// project there if needed and uploads everything (every writer's lines, the
+/// cursors, the config and the media); with only a token (a copy that started
+/// without a server and joins one) it uploads its own writer's lines, and a
+/// token in `$KONTEXT_TOKEN` replaces the saved one (a new token after a
+/// revoke). A saved token goes only to the server it was saved for. Running
+/// it again resumes where it stopped: the server keeps what it has and only
+/// takes what it lacks.
 pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Report> {
     let url = crate::server::normalize_url(url);
-    let admin = require_admin(&url)?;
-    let project = crate::config::Project::load(home)?;
-    let person = config::human_name_in(&project, home);
-    let token = match create_project(&url, &admin, name, &person, writer)? {
+    let admin = crate::server::admin_secret(&url)?;
+    let created = match &admin {
+        Some(admin) => {
+            let project = crate::config::Project::load(home)?;
+            let person = config::human_name_in(&project, home);
+            create_project(&url, admin, name, &person, writer)?
+        }
+        None => None,
+    };
+    let token = match created {
+        // Made once by the server: saved before anything else can fail.
         Some(t) => {
             t.save(name)?;
             t
         }
-        None => match config::token_for(name)? {
-            Some(t) if t.project == name => t,
-            _ => match env_token(name)? {
-                // Given for this command, for this server: saved like the
-                // token `clone --server` gets.
-                Some(t) => {
-                    t.save(name)?;
-                    t
-                }
-                None => bail!(
-                    "project {name} already exists on {url} and this machine has no token for it. If it \
-                     is this project, ask its owner for one (`kontext token create`) and run \
-                     `KONTEXT_TOKEN=<token> kontext server connect {url}`"
-                ),
-            },
-        },
+        None => {
+            let configured = Machine::load()?.server_for(name);
+            // A project already on another server: neither the saved token
+            // nor $KONTEXT_TOKEN goes to this URL (rule: a token only goes to
+            // its own project's configured server). Moving a project is
+            // `server connect` with the admin secret of the new server.
+            if let Some(s) = configured.as_deref().filter(|s| *s != url) {
+                bail!(
+                    "project {name} syncs with {s}, not {url}: no token of it is sent to another server. \
+                     To move it, run `kontext server connect {url}` with that server's admin secret"
+                );
+            }
+            let given = env_token(name)?;
+            let saved = config::token_for(name)?.filter(|t| t.project == name);
+            let Some(t) = given.clone().or(saved) else {
+                bail!(
+                    "{}this machine has no token for {name} on {url}. Ask the project's owner for one \
+                     (`kontext token create`) and run `KONTEXT_TOKEN=<token> kontext server connect {url}`{}",
+                    if admin.is_some() {
+                        format!("project {name} already exists on {url} and ")
+                    } else {
+                        String::new()
+                    },
+                    if admin.is_some() {
+                        ""
+                    } else {
+                        "; to create the project there, run it with the admin secret (`kontext server \
+                         deploy` saved it on the machine that deployed, or set KONTEXT_ADMIN_SECRET)"
+                    }
+                )
+            };
+            if t.writer != writer {
+                bail!(
+                    "the token for {name} writes as {}, not as this machine's writer {writer}",
+                    t.writer
+                );
+            }
+            if given.is_some() {
+                // Saved, like the token `clone --server` gets, once the
+                // server takes it: a bad one never replaces a working one.
+                let remote = Remote {
+                    url: url.clone(),
+                    token: t.clone(),
+                };
+                let who = Conn::of(&remote, Duration::from_secs(30)).get("whoami")?;
+                Conn::ok(who, "check the token")?;
+                t.save(name)?;
+            }
+            t
+        }
     };
-    if token.writer != writer {
-        bail!(
-            "the token for {name} writes as {}, not as this machine's writer {writer}",
-            token.writer
-        );
-    }
     Machine::set_server(name, Some(&url))?;
     let remote = Remote { url, token };
     let mut opts = Options::full(true);
-    opts.admin = Some(admin);
+    opts.admin = admin;
     sync(home, &remote, &opts)
 }
 
