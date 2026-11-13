@@ -1220,3 +1220,36 @@ fn a_copy_without_a_server_joins_it_with_a_token() {
     c.ok(&["log", "after connecting"]);
     assert_eq!(c.server_tail(&net), 2);
 }
+
+/// The push goes before the pull, so a fresh clone pushed before it had
+/// recorded the config it had just brought, and said "the server has no
+/// project.toml yet". A config file the server has, byte for byte, is
+/// nothing to push and nothing to say.
+#[test]
+fn a_clone_says_nothing_about_config_the_server_has() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar", "ana"]);
+    let b = net.machine("b", "ana@b", "ana");
+    let token = net.token(&a, "ana", "owner", "ana@b");
+    let out = b.run(
+        &[("KONTEXT_TOKEN", &token)],
+        &[
+            "clone",
+            "--server",
+            net.url(),
+            "demo",
+            "--home",
+            b.home.to_str().unwrap(),
+        ],
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("project.toml"), "{text}");
+    let out = b.ok(&["sync"]);
+    assert!(!out.contains("project.toml"), "{out}");
+}

@@ -739,7 +739,16 @@ fn run(home: &Path, remote: &Remote, opts: &Options, state: &mut State) -> Outco
     }
 
     if opts.push
-        && let Err(e) = push_all(home, remote, &conn, opts, state, &mut o.report, &started)
+        && let Err(e) = push_all(
+            home,
+            remote,
+            &conn,
+            opts,
+            state,
+            &mut o.report,
+            &started,
+            &f,
+        )
     {
         o.push_err = Some(e);
     }
@@ -778,6 +787,7 @@ fn out_of_time(report: &mut Report, started: &Instant, opts: &Options) -> bool {
 
 /// Own lines (with the admin secret, every writer's, going on past a writer
 /// the server refuses), cursor files, media and config.
+#[allow(clippy::too_many_arguments)]
 fn push_all(
     home: &Path,
     remote: &Remote,
@@ -786,6 +796,7 @@ fn push_all(
     state: &mut State,
     report: &mut Report,
     started: &Instant,
+    f: &Value,
 ) -> Result<()> {
     let admin = opts
         .admin
@@ -810,7 +821,7 @@ fn push_all(
     }
     push_cursors(home, c, remote, state, report, admin.is_some())?;
     push_media(home, conn, state, report, started, opts)?;
-    push_config(home, c, opts.include_config, state, report)?;
+    push_config(home, c, opts.include_config, f.get("config"), state, report)?;
     Ok(())
 }
 
@@ -1376,6 +1387,7 @@ fn push_config(
     home: &Path,
     conn: &Conn,
     include: bool,
+    server: Option<&Value>,
     state: &mut State,
     report: &mut Report,
 ) -> Result<()> {
@@ -1384,6 +1396,21 @@ fn push_config(
             continue;
         };
         let sha = sha256_hex(body.as_bytes());
+        // The server already has this very file (the push goes before the
+        // pull, so a fresh copy has not recorded it yet): nothing to say.
+        if let Some(v) = server.and_then(|s| s.get(*name))
+            && v.get("sha256").and_then(Value::as_str) == Some(sha.as_str())
+        {
+            let version = v.get("version").and_then(Value::as_u64).unwrap_or(0);
+            state.config.insert(
+                name.to_string(),
+                ConfigSeen {
+                    version,
+                    sha256: sha,
+                },
+            );
+            continue;
+        }
         let seen = state.config.get(*name).cloned().unwrap_or_default();
         if seen.sha256 == sha {
             continue;
