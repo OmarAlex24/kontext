@@ -493,6 +493,9 @@ pub enum Cmd {
     },
     /// The wave order of open epics: what runs in series and what in parallel. Exits with 1 if there are cycles or dependencies on epics that don't exist
     Plan,
+    /// The whole project on one screen: waves, epics, their features and the ideas not placed.
+    /// Doesn't write anything
+    Tree,
     /// The coordinator's view of an epic, with its assignment mark. Advances the epic:<name> cursor
     Brief {
         /// Epic: E-…, epic:<name> or <name>
@@ -1195,6 +1198,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             max_chars,
             peek,
         } => cx.brief(&epic, max_chars, peek),
+        Cmd::Tree => cx.tree(),
         Cmd::Plan => {
             let (mut store, _) = cx.open()?;
             let st = store.state()?;
@@ -2098,6 +2102,24 @@ impl Ctx<'_> {
             print_json(&ideas)?;
         } else {
             print!("{}", crate::ideas::text(&ideas));
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn tree(&self) -> Result<ExitCode> {
+        let (mut store, project) = self.open()?;
+        let cwd = std::env::current_dir()?;
+        let repos = Repos::load(&project, &cwd)?;
+        let own = crate::capture::Settings::of(&project).worktrees;
+        let st = app::state(&mut store, &project)?;
+        let people: Vec<String> = project.people.keys().cloned().collect();
+        let ideas = crate::ideas::locate(&repos, own)
+            .and_then(|pm| crate::ideas::load(&st, &project.name, &people, &pm).ok());
+        let tree = crate::tree::build(&st, &project.name, &people, ideas.as_ref());
+        if self.json {
+            print_json(&tree.json())?;
+        } else {
+            print!("{}", crate::tree::text(&tree));
         }
         Ok(ExitCode::SUCCESS)
     }

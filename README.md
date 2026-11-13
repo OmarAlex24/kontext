@@ -286,6 +286,7 @@ kontext doesn't launch agents: the skill `kontext-orchestrate` (installed by `ko
 |---|---|
 | `kontext epic add <title> --goal <G> --after <epic>…` | The epic goes after others: by id, `epic:<name>` or `<name>`, even if they don't exist yet (with a warning). Refuses (exit code 2) to go after itself, an id that doesn't exist, and anything that would close a cycle. Like a task's dependencies, it can't be changed later |
 | `kontext plan [--json]` | Calculates the waves of the open epics: which run in series and which in parallel. An epic is closed when all its tasks (at least one) are closed, or, if it has features, when all its features are done and its tasks without a feature are closed; a closed dependency is already satisfied. Exits with 1 if there is a cycle or a dependency on an epic that doesn't exist or is no longer in force; those epics, and the ones waiting on them, show up as "no wave" with their reason |
+| `kontext tree [--json]` | The whole project on one screen: the waves, each epic with its count (✓ closed, ◐ started, ○ not yet), the features of the open epics ("to validate", "waiting for you" when a question for a person cites the feature or one of its tasks) and, if `.pm/items.md` exists, your ideas that are not placed and how many of your messages no audit has seen. Tasks are not listed. Writes nothing |
 
 ```sh
 # The map can be written in any order: integration warns that its dependencies are still missing.

@@ -279,6 +279,7 @@ If something came in, it rejects the close and shows it. The agent reads it and 
 | `kontext brief epic:<x>` | Coordinator | The charter, the decisions of its epic, the ready tasks, the facts in force for the epic, and the assignment mark |
 | `kontext next epic:<x>` | Implementer or tester | One ready task, plus the facts and decisions that touch it and the assignment mark |
 | `kontext show <id>` | Anyone | A full entry with its history |
+| `kontext tree` | You, the pm | The whole project on one screen: waves, epics, their features, and the ideas not placed |
 
 Each view has a character budget. When it doesn't fit, it trims in this order: old journal, decision bodies (the titles stay), facts, and then the other lists. **The charter and the goals are never trimmed.** The titles of the decisions in force are trimmed only last, when the rest does not leave room for all of them (see "Implemented after the first large ledger" below).
 
@@ -298,6 +299,28 @@ Each view has a character budget. When it doesn't fit, it trims in this order: o
 > - `next`: the task's feature, its state and what the human sees ("- Feature: U-… Refunds (in progress). When it works, the human sees: …"); `--json` adds `feature`.
 > - The per-epic line of `resume` (and the page) starts with the features: "Payments: 2/3 features done, 1 to validate; 3/5 closed, 1 claimed; last activity 2 h ago". A validation (or its reopening) is not task-level work: the pm sees it under "What's new" instead of in the one-line summary of the epics' work.
 > - `show <U>`: its state, its tasks with their status, and its validation history (each validation and reopening, whether it counted and why). `show <E>` lists its features with their state; `--json` of a feature adds `feature`. `standup` says "feature validated by …".
+
+> **Implemented: `kontext tree [--json]`.** With features the project has three levels (wave, epic, feature), and "how are we doing?" took `plan`, `resume --as pm` and `ideas` to answer. `kontext tree` draws it in one screen, read-only (it writes nothing and advances no cursor):
+> ```
+> quoro                            3/9 features · wave 2 of 3
+> ├─ Wave 1
+> │  └─ ✓ Foundations              4/4
+> ├─ Wave 2
+> │  ├─ ◐ Payments                 2/3
+> │  │   ├─ ✓ Card charge
+> │  │   ├─ ◐ Refunds              waiting for you
+> │  │   └─ ○ Invoices
+> │  └─ ◐ Catalog                  1/2
+> └─ Not placed (2) · 12 of your messages not audited since Nov 12
+>     ├─ "que el recibo salga en PDF"  Nov 12
+>     └─ "límite de pedidos abiertos"  Nov 12  (Payments, no feature)
+> ```
+> - **Waves** are `plan::compute` over every epic in force with the closed ones counted as open, so a finished wave keeps its number and the header can say "wave 2 of 3" (the first wave with an open epic). `kontext plan` itself is unchanged: it still plans only the open epics. Epics with no wave (a cycle, a dependency that does not exist or is no longer in force) go in a "No wave" group with the plan's reason.
+> - **Epics.** ✓ closed (by `plan`'s rule: its features, or else its tasks), ◐ something started (a feature not pending, or a task assigned, claimed or closed), ○ nothing yet. A closed epic takes one line; an open one lists its features in force. The count is features done/total, or "n/m tasks" for an epic without features. Tasks are never listed.
+> - **Features.** ✓ done, ◐ in progress or to validate, ○ pending; then "to validate", and "waiting for you" when an open question for a person (as the inbox decides it: `owner`, an owner, `human:<x>` or someone in `[people]`, not dismissed) cites the feature or one of its tasks (`--feature`, `--task` or its refs).
+> - **Header.** "n/m features" across the project, or "n/m epics closed" when there are no features.
+> - **Not placed** comes from `kontext ideas` (§12.3): each idea not placed with the user's words (the quote, or else the idea), the date said and what it cites; the header adds the messages not audited. Without `.pm/items.md` the section is absent.
+> - `--json` gives the same tree (`waves[].epics[].feature_list[]`, `no_wave`, `not_placed: null | {count, ideas, unaudited}`), which `kontext ui` draws.
 
 > **Implemented in phase 4:**
 > - `brief`, `next` and `resume` only list facts in force; the "unreviewed" ones are marked `[unreviewed]`. A fact that expired shows up as an alert in `standup` (until it is replaced) and in the `brief` of its epic, or of all of them if it has no epic. The pm doesn't see facts or those alerts. `show` of a fact lists its fingerprints and its status; `--json` adds `freshness`.
@@ -461,6 +484,7 @@ So `install --local` in the main checkout is what reaches every worktree session
 | `kontext epic add` / `kontext task add` / `assign` / `next [--claim]` / `done --evidence … --since <mark>` / `reopen` | 3 | Tasks |
 | `kontext feature add --epic <epic> [--acceptance]` / `task add --feature <U>` / `done <U>` / `reopen <U>` / `ask --feature <U>` | features | Features between an epic and its tasks (§4.3) |
 | `kontext epic add --after <epic>` / `kontext plan` | orchestrate | Dependencies between epics and wave order (§12.1) |
+| `kontext tree` | human, pm | The project on one screen: waves, epics, features, ideas not placed (§8) |
 | `kontext standup [--peek]` / `resume --as <role>` / `brief <epic>` / `show <id>` | 2 | Views |
 | `kontext recall <text>` | 2 | Searches the ledger and Claude Code's transcripts (what it does today) |
 | `kontext find <topic>` / `--show <path:line>` / `--check` | 4 | Searches the docs of the project's repos, with ranking, synonyms and status in force or historical |

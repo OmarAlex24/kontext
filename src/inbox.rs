@@ -328,6 +328,22 @@ fn closed(st: &State, key: &str) -> bool {
     st.inbox_closed.contains_key(key)
 }
 
+/// An open question that waits for a person, as the inbox sees it: not
+/// closed for the inbox, and addressed to `owner`, an owner, `human:<x>` or
+/// someone in `[people]` (a `--to <name>` that is none of these may be an
+/// agent).
+pub fn waits_for_a_human(st: &State, q: &Entry, people: &[String]) -> bool {
+    if st.status_of(&q.id) != Some(Status::Open) || closed(st, &q.id) {
+        return false;
+    }
+    let raw = field(q, "to").unwrap_or("owner");
+    let to = question_to(q);
+    raw.starts_with("human:")
+        || to == "owner"
+        || st.policy.is_owner(to)
+        || people.iter().any(|p| p == to)
+}
+
 /// The last thing the human wrote (`actor` `human:<name>`).
 pub fn last_action(st: &State, human: &str) -> Option<String> {
     st.entries

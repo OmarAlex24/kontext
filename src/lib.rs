@@ -35,6 +35,7 @@ pub mod state;
 pub mod store;
 pub mod sync;
 pub mod tasks;
+pub mod tree;
 pub mod ui;
 pub mod verify;
 pub mod views;
