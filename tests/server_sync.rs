@@ -1589,3 +1589,73 @@ fn a_line_the_role_may_not_write_waits_until_the_writer_gets_a_token_that_may() 
     assert_eq!(b.lines("ana@laptop"), c.lines("ana@laptop"));
     assert_eq!(b.lines("ana@laptop").len(), 2);
 }
+
+#[test]
+fn a_scout_sandbox_records_a_stale_fact_again() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar"]);
+    let toml = a.home.join("project.toml");
+    let text = fs::read_to_string(&toml).unwrap() + "\n[[repos]]\nname = \"billing\"\n";
+    fs::write(&toml, text).unwrap();
+    a.ok(&["sync", "--include-config"]);
+    let m = mint(&a, &["--role", "scout", "--ttl", "1h"]);
+    let s = Sandbox::new(&m);
+    // The code repo, recognized by its folder name.
+    let repo = s._dir.path().join("billing");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "s")
+            .env("GIT_AUTHOR_EMAIL", "s@example.com")
+            .env("GIT_COMMITTER_NAME", "s")
+            .env("GIT_COMMITTER_EMAIL", "s@example.com")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
+    let commit = |content: &str| {
+        fs::write(repo.join("invoice.ts"), content).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "change"]);
+    };
+    git(&["init", "-q"]);
+    commit("export const iva = 0.16;\n");
+    let fact = |s: &Sandbox| {
+        let out = s
+            .cmd(&["fact", "VAT is fixed in invoice.ts", "--path", "invoice.ts"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    fact(&s);
+    commit("export const iva = 0.08;\n");
+    // The new fact and a supersede of the stale one: a scout may write both.
+    let out = fact(&s);
+    assert!(out.contains("which had expired"), "{out}");
+    let writer = m["writer"].as_str().unwrap();
+    let out = a.ok(&["sync"]);
+    assert!(out.contains(&format!("{writer}: 3")), "{out}");
+    let kinds: Vec<String> = a
+        .lines(writer)
+        .iter()
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(kinds, ["fact", "fact", "supersede"]);
+}

@@ -146,7 +146,11 @@ function actorAllowed(p, e) {
   const name = String(a.name || "");
   const role = a.role == null ? null : String(a.role);
   const fields = e.fields && typeof e.fields === "object" ? e.fields : {};
-  const kind = String(e.kind || "");
+  // A fact replacing a stale fact (both ids `F-…`, read from the line, not
+  // the state) is what any agent writes when it records a fact again.
+  const refs = Array.isArray(e.refs) ? e.refs.map(String) : [];
+  const factSupersede = e.kind === "supersede" && refs.length > 0 && refs.every((r) => r.startsWith("F-"));
+  const kind = factSupersede ? "fact" : String(e.kind || "");
   if (a.type !== "agent") return `a ${p.role} token writes only as agents, not as ${a.type}:${name}`;
   if (p.role === "pm") return null;
   if (role === "pm") return `only a pm or owner token writes as role pm`;

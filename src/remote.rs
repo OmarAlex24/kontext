@@ -1762,7 +1762,15 @@ pub fn identity_problem(token: &Token, e: &Entry) -> Option<String> {
     let a = &e.actor;
     let name = a.name.as_str();
     let arole = a.role.as_deref();
-    let kind = e.kind.as_str();
+    // A fact replacing a stale fact (both ids `F-…`, read from the entry,
+    // not the state) is what any agent writes when it records a fact again.
+    let fact_supersede =
+        e.kind == "supersede" && !e.refs.is_empty() && e.refs.iter().all(|r| r.starts_with("F-"));
+    let kind = if fact_supersede {
+        "fact"
+    } else {
+        e.kind.as_str()
+    };
     if a.kind != "agent" {
         return Some(format!(
             "a {role} token writes only as agents, not as {}:{name}",
@@ -2553,6 +2561,10 @@ mod tests {
     }
 
     fn entry(actor: Actor, kind: &str, approved: bool) -> Entry {
+        entry_refs(actor, kind, approved, &[])
+    }
+
+    fn entry_refs(actor: Actor, kind: &str, approved: bool, refs: &[&str]) -> Entry {
         let mut v = json!({
             "v": 1, "id": "J-000001", "writer": "w@kontext", "n": 1,
             "prev": "0".repeat(64), "hlc": "2026-11-13T10:00:00.000Z.0000",
@@ -2561,6 +2573,7 @@ mod tests {
         if approved {
             v["fields"] = json!({ "approved_by": "omar" });
         }
+        v["refs"] = json!(refs);
         serde_json::from_value(v).unwrap()
     }
 
@@ -2709,6 +2722,26 @@ mod tests {
             let got = identity_problem(&t, &entry(actor, kind, approved));
             assert_eq!(got.is_none(), allowed, "{label}: {got:?}");
         }
+        // Recording a stale fact again supersedes it: any agent may.
+        let t = token(Some("scout"), &[]);
+        let s = agent("s-1", Some("scout"));
+        let f = ["F-aaaaaa", "F-bbbbbb"];
+        assert_eq!(
+            identity_problem(&t, &entry_refs(s.clone(), "supersede", false, &f)),
+            None
+        );
+        let i = token(Some("implementer"), &[]);
+        let im = agent("impl-1", Some("implementer"));
+        assert_eq!(
+            identity_problem(&i, &entry_refs(im, "supersede", false, &f)),
+            None
+        );
+        let d = ["D-aaaaaa", "D-bbbbbb"];
+        assert!(identity_problem(&t, &entry_refs(s, "supersede", false, &d)).is_some());
+        let c = token(Some("coordinator"), &["epic:payments"]);
+        let co = agent("epic:payments", Some("coordinator"));
+        let mixed = ["F-aaaaaa", "G-bbbbbb"];
+        assert!(identity_problem(&c, &entry_refs(co, "supersede", false, &mixed)).is_some());
         // A token without claims: nothing to check here (the server still does).
         let e = entry(Actor::human("x"), "decision", false);
         assert_eq!(identity_problem(&token(None, &[]), &e), None);

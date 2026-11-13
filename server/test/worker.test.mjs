@@ -44,12 +44,13 @@ async function project(writer = "omar@mac") {
 }
 
 /// A chain of ledger lines for a writer, like the binary writes them.
-function chain(writer, count, { from = 1, prev = GENESIS, actor = { type: "human", name: "omar" }, tag = "", kind = "journal", fields } = {}) {
+function chain(writer, count, { from = 1, prev = GENESIS, actor = { type: "human", name: "omar" }, tag = "", kind = "journal", fields, refs } = {}) {
   const out = [];
   for (let i = 0; i < count; i++) {
     const nn = from + i;
     const body = { v: 1, id: `J-${sha(writer + nn + tag).slice(0, 6)}`, writer, n: nn, prev, hlc: "2026-11-13T10:00:00.000Z.0000", actor, kind, title: `entry ${nn}${tag}` };
     if (fields) body.fields = fields;
+    if (refs) body.refs = refs;
     const hash = sha(JSON.stringify(body));
     const line = JSON.stringify({ ...body, hash });
     out.push({ line, hash });
@@ -303,6 +304,11 @@ test("each role writes only as what it is (DESIGN §14.2)", async () => {
     ["tester", agent("t-1", "tester"), "reopen", undefined, true],
     ["scout", agent("s-1", "scout"), "fact", undefined, true],
     ["scout", agent("s-1", "scout"), "done", undefined, false],
+    // Recording a stale fact again: the new fact supersedes the old one.
+    ["scout", agent("s-1", "scout"), "supersede", undefined, true, ["F-aaaaaa", "F-bbbbbb"]],
+    ["implementer", agent("impl-1", "implementer"), "supersede", undefined, true, ["F-aaaaaa", "F-bbbbbb"]],
+    ["scout", agent("s-1", "scout"), "supersede", undefined, false, ["D-aaaaaa", "D-bbbbbb"]],
+    ["coordinator", agent("epic:payments", "coordinator"), "supersede", undefined, false, ["F-aaaaaa", "G-bbbbbb"]],
   ];
   const tokens = {};
   for (const role of ["pm", "coordinator", "implementer", "tester", "scout"]) {
@@ -311,9 +317,9 @@ test("each role writes only as what it is (DESIGN §14.2)", async () => {
     tokens[role] = { ...(await mint(p, body)), n: 0, prev: GENESIS };
   }
   tokens.owner = { token: p.token, writer: p.writer, n: 0, prev: GENESIS };
-  for (const [role, actor, kind, fields, allowed] of cases) {
+  for (const [role, actor, kind, fields, allowed, refs] of cases) {
     const t = tokens[role];
-    const opts = { from: t.n + 1, prev: t.prev, actor, kind, fields, tag: `-${kind}-${actor.name}` };
+    const opts = { from: t.n + 1, prev: t.prev, actor, kind, fields, refs, tag: `-${kind}-${actor.name}-${refs || ""}` };
     const why = await tryLine(p, t.token, t.writer, opts);
     const label = `${role} as ${actor.type}:${actor.name} (${actor.role || "-"}) writing ${kind}`;
     if (allowed) {

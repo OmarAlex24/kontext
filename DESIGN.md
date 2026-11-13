@@ -812,7 +812,7 @@ Every machine, person and sandbox that syncs with the server has its own token, 
 | `implementer`, `tester` | agents | the above, and as a coordinator (role `coordinator`, or a name `epic:…`); `task`, `assign` |
 | `scout` | agents | the above; anything but `fact`, `journal`, `question`, `confirm`, `proposal` |
 
-A coordinator's subagents write through its token: `--actor agent:impl-1 --role implementer next --claim` is allowed, and so are agents with no role (the distill). The epic of an implementer's or tester's token is noted, not enforced (that would need the project's state).
+A `supersede` whose ids are all facts (`F-…`) counts as a fact: it is what any agent writes when it records a stale fact again (§4.3), and the ids say so without the project's state. A coordinator's subagents write through its token: `--actor agent:impl-1 --role implementer next --claim` is allowed, and so are agents with no role (the distill). The epic of an implementer's or tester's token is noted, not enforced (that would need the project's state).
 
 **Refusing before writing.** A line the server refuses can never be pushed, and nothing after it from that writer can either. So the binary runs the same rules (from the token's claims) under the writer's lock, before the line is in the file, and refuses with exit code 2, naming the token. The server's check is the backstop for a line written before the token, by an old binary, or with a token without claims. If it happens, `kontext status` says so and how to get out: an owner revokes the token and makes one for the same writer with a role that may write the line (`kontext token create --writer <w> --role …`); with it, `kontext sync` pushes everything.
 
