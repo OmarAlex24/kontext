@@ -16,9 +16,11 @@ use crate::tasks;
 use crate::verify;
 use crate::views::{self, DEFAULT_BUDGET, ResumeOpts, Standup};
 
-/// `2026-11-03 18:22 UTC`.
+/// `2026-11-03 18:22 UTC`: `KONTEXT_NOW` (for tests) or the clock, like
+/// [`tasks::now_ms`], so two views generated a minute apart in a test match.
 pub fn now_text() -> String {
-    jiff::Timestamp::now()
+    jiff::Timestamp::from_millisecond(tasks::now_ms())
+        .unwrap_or_else(|_| jiff::Timestamp::now())
         .strftime("%Y-%m-%d %H:%M UTC")
         .to_string()
 }
