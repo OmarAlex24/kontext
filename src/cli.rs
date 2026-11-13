@@ -154,13 +154,39 @@ pub enum EpicCmd {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum TaskCmd {
-    /// Adds a task to an epic. Without --goal, it serves the epic's goals
+pub enum FeatureCmd {
+    /// Adds a feature to an epic: what the human would see working. Its tasks hang from it
+    /// (`task add --feature`). Only the pm or an owner. Without --goal, it serves the epic's goals
     Add {
         title: String,
         /// Epic: E-…, epic:<name> or <name>
         #[arg(long)]
         epic: String,
+        /// What the human would see when it works
+        #[arg(long)]
+        acceptance: Option<String>,
+        /// Goal it serves (can be repeated)
+        #[arg(long = "goal", value_name = "G")]
+        goals: Vec<String>,
+        /// Detail
+        #[arg(long, default_value = "")]
+        body: String,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TaskCmd {
+    /// Adds a task to an epic. Without --goal, it serves the epic's goals
+    Add {
+        title: String,
+        /// Epic: E-…, epic:<name> or <name> (not needed with --feature)
+        #[arg(long, required_unless_present = "feature")]
+        epic: Option<String>,
+        /// Feature it hangs from (U-…); its epic is the task's epic
+        #[arg(long, value_name = "U")]
+        feature: Option<String>,
         /// Goal it serves (can be repeated)
         #[arg(long = "goal", value_name = "G")]
         goals: Vec<String>,
@@ -342,6 +368,9 @@ pub enum Cmd {
         /// Task the question comes from (its answer counts as new context in `done`)
         #[arg(long)]
         task: Option<String>,
+        /// Feature the question is about (U-…)
+        #[arg(long, value_name = "U")]
+        feature: Option<String>,
         #[arg(long, default_value = "")]
         body: String,
         /// Epic of the question (default: the task's, or yours if you coordinate it)
@@ -402,8 +431,14 @@ pub enum Cmd {
         reader: Option<String>,
     },
     /// The user's ideas in `.pm/items.md` (skill kontext-pm) and where each one went: its state
-    /// comes from the ledger through the ids in `where`. Doesn't write anything
-    Ideas,
+    /// comes from the ledger through the ids in `where`. Doesn't write anything, except with
+    /// `--mark-audited`
+    Ideas {
+        /// Before a coverage audit: write `.pm/audited.json` with the time and how many messages
+        /// each dump has, so the messages after it count as not audited
+        #[arg(long)]
+        mark_audited: bool,
+    },
     /// Which conversations the capture hook writes from, on this machine: `here`, `list`, `forget`.
     /// Works with the capture off
     Capture {
@@ -414,6 +449,11 @@ pub enum Cmd {
     Epic {
         #[command(subcommand)]
         cmd: EpicCmd,
+    },
+    /// Features: what the human would see working, between an epic and its tasks
+    Feature {
+        #[command(subcommand)]
+        cmd: FeatureCmd,
     },
     /// Tasks
     Task {
@@ -433,7 +473,7 @@ pub enum Cmd {
         #[arg(long, default_value = "")]
         why: String,
     },
-    /// Reopens a closed task
+    /// Reopens a closed task, or a validated feature
     Reopen {
         task: String,
         #[arg(long)]
@@ -453,6 +493,9 @@ pub enum Cmd {
     },
     /// The wave order of open epics: what runs in series and what in parallel. Exits with 1 if there are cycles or dependencies on epics that don't exist
     Plan,
+    /// The whole project on one screen: waves, epics, their features and the ideas not placed.
+    /// Doesn't write anything
+    Tree,
     /// The coordinator's view of an epic, with its assignment mark. Advances the epic:<name> cursor
     Brief {
         /// Epic: E-…, epic:<name> or <name>
@@ -464,7 +507,8 @@ pub enum Cmd {
         #[arg(long)]
         peek: bool,
     },
-    /// Closes a task with evidence. Refuses (exits with 3) if anything that touches it came in after --since
+    /// Closes a task with evidence, or validates a feature (U-…) whose tasks are all closed.
+    /// Refuses (exits with 3) if anything that touches it came in after --since
     Done {
         task: String,
         /// cmd:"<command>"=<code>, file:<path>, pr:<url>, url:<url>, or a screenshot (screenshot.png,
@@ -481,7 +525,8 @@ pub enum Cmd {
         /// Runs this command and closes only if it exits with 0 (stores the exit code and the last 20 lines)
         #[arg(long, value_name = "CMD")]
         run: Option<String>,
-        /// The assignment mark that `kontext next` or `kontext brief` gave you (required for agents)
+        /// The assignment mark that `kontext next` or `kontext brief` gave you (required for agents
+        /// closing a task; optional for a feature)
         #[arg(long, value_name = "MARK")]
         since: Option<String>,
         #[arg(long, default_value = "")]
@@ -1045,6 +1090,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             title,
             to,
             task,
+            feature,
             body,
             epic,
             blocking,
@@ -1053,6 +1099,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             title,
             to,
             task,
+            feature,
             body,
             epic,
             blocking,
@@ -1080,11 +1127,36 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             )?;
             Ok((w.entries, w.warnings))
         }),
+        Cmd::Feature {
+            cmd:
+                FeatureCmd::Add {
+                    title,
+                    epic,
+                    acceptance,
+                    goals,
+                    body,
+                    tags,
+                },
+        } => {
+            let args = crate::features::FeatureArgs {
+                title,
+                epic,
+                acceptance,
+                goals,
+                body,
+                tags: clean_list(&tags),
+            };
+            cx.written_warn("the feature", |s, a| {
+                let w = crate::features::add(s, a, &args)?;
+                Ok((w.entries, w.warnings))
+            })
+        }
         Cmd::Task {
             cmd:
                 TaskCmd::Add {
                     title,
                     epic,
+                    feature,
                     goals,
                     depends_on,
                     acceptance,
@@ -1095,6 +1167,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             let args = TaskArgs {
                 title,
                 epic,
+                feature,
                 goals,
                 depends_on,
                 acceptance,
@@ -1125,6 +1198,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             max_chars,
             peek,
         } => cx.brief(&epic, max_chars, peek),
+        Cmd::Tree => cx.tree(),
         Cmd::Plan => {
             let (mut store, _) = cx.open()?;
             let st = store.state()?;
@@ -1216,7 +1290,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             output,
             reader,
         } => cx.report(html, output, reader),
-        Cmd::Ideas => cx.ideas(),
+        Cmd::Ideas { mark_audited } => cx.ideas(mark_audited),
         Cmd::Capture { cmd } => capture_cmd(project, cx.json, cmd),
         Cmd::Standup { peek, reader } => cx.standup(peek, reader),
         Cmd::Resume {
@@ -1430,7 +1504,12 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             let mut store = Store::open(&p.home, &p.writer)?;
             let sigs = store.check_signatures()?;
             let bad: Vec<_> = sigs.iter().filter(|(_, v)| !v.is_valid()).collect();
-            for pr in report.problems.iter().chain(&report.media_problems) {
+            for pr in report
+                .problems
+                .iter()
+                .chain(&report.media_problems)
+                .chain(&report.newer)
+            {
                 println!("{pr}");
             }
             for (e, v) in &bad {
@@ -1718,6 +1797,10 @@ impl Ctx<'_> {
         if !self.json {
             let st = store.state()?;
             let id = task_id.into_inner();
+            if st.kind_of(&id) == Some("feature") {
+                println!("{id} validated.");
+                return Ok(code);
+            }
             let unblocked: Vec<String> = st
                 .of_kind("task")
                 .filter(|t| {
@@ -1990,17 +2073,23 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn ideas(&self) -> Result<ExitCode> {
+    fn ideas(&self, mark_audited: bool) -> Result<ExitCode> {
         let (mut store, project) = self.open()?;
         let cwd = std::env::current_dir()?;
         let repos = Repos::load(&project, &cwd)?;
         let own = crate::capture::Settings::of(&project).worktrees;
+        if mark_audited {
+            return self.mark_audited(&repos, own);
+        }
         let Some(pm) = crate::ideas::locate(&repos, own) else {
             if self.json {
+                let unaudited = crate::ideas::pm_dir(&cwd, own)
+                    .map(|pm| crate::ideas::unaudited(&pm))
+                    .unwrap_or_default();
                 print_json(&json!({"project": project.name, "path": null, "total": 0,
                     "counts": crate::ideas::IdeaState::ALL.iter()
                         .map(|s| json!({"state": s, "count": 0})).collect::<Vec<_>>(),
-                    "ideas": [], "warnings": []}))?;
+                    "ideas": [], "warnings": [], "not_placed": [], "unaudited": unaudited}))?;
             } else {
                 println!("{}", crate::ideas::NONE_TEXT);
             }
@@ -2013,6 +2102,58 @@ impl Ctx<'_> {
             print_json(&ideas)?;
         } else {
             print!("{}", crate::ideas::text(&ideas));
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    fn tree(&self) -> Result<ExitCode> {
+        let (mut store, project) = self.open()?;
+        let cwd = std::env::current_dir()?;
+        let repos = Repos::load(&project, &cwd)?;
+        let own = crate::capture::Settings::of(&project).worktrees;
+        let st = app::state(&mut store, &project)?;
+        let people: Vec<String> = project.people.keys().cloned().collect();
+        let ideas = crate::ideas::locate(&repos, own)
+            .and_then(|pm| crate::ideas::load(&st, &project.name, &people, &pm).ok());
+        let tree = crate::tree::build(&st, &project.name, &people, ideas.as_ref());
+        if self.json {
+            print_json(&tree.json())?;
+        } else {
+            print!("{}", crate::tree::text(&tree));
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// `kontext ideas --mark-audited`: in the `.pm/` that `kontext ideas` and
+    /// `kontext tree` read ([`crate::ideas::locate`]).
+    fn mark_audited(&self, repos: &Repos, own: bool) -> Result<ExitCode> {
+        let Some(pm) = crate::ideas::locate(repos, own) else {
+            let looked: Vec<String> = crate::ideas::candidates(repos, own)
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            let looked = if looked.is_empty() {
+                "not in a git repo, and no project repo on this machine".to_string()
+            } else {
+                format!("looked in {}", looked.join(", "))
+            };
+            return Err(Refused(format!(
+                "--mark-audited found no .pm/items.md ({looked}): run it in the code repo that has the PM's memory"
+            ))
+            .into());
+        };
+        let a = crate::ideas::mark_audited(&pm)?;
+        let path = pm.join(crate::ideas::AUDITED_FILE);
+        let total: usize = a.files.values().sum();
+        if self.json {
+            print_json(&json!({"path": path, "at": a.at, "files": a.files, "messages": total}))?;
+        } else {
+            println!(
+                "Audit marked at {}: {total} messages in {} dumps ({}).",
+                a.at,
+                a.files.len(),
+                path.display()
+            );
         }
         Ok(ExitCode::SUCCESS)
     }

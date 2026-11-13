@@ -706,7 +706,23 @@ fn check_home(r: &mut Report, home: &Path, writer: Option<&str>) {
             None,
         ),
     }
-    match verify::run_with_media(home) {
+    let report = verify::run_with_media(home);
+    if let Ok(rep) = &report
+        && !rep.newer.is_empty()
+    {
+        let first: Vec<String> = rep.newer.iter().take(3).map(ToString::to_string).collect();
+        let more = if rep.newer.len() > 3 {
+            format!(" and {} more", rep.newer.len() - 3)
+        } else {
+            String::new()
+        };
+        r.note(
+            "home",
+            format!("{}{more}", first.join("; ")),
+            Some("install the latest kontext on this machine".into()),
+        );
+    }
+    match report {
         Ok(rep) if rep.ok() => r.ok("home", format!("chains: {}", rep.summary())),
         Ok(rep) => {
             let first: Vec<String> = rep

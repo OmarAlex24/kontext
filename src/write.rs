@@ -350,6 +350,7 @@ fn replacement_kinds(kind: &str) -> Option<&'static [&'static str]> {
         "goal" => Some(&["goal"]),
         "decision" | "proposal" => Some(&["decision", "proposal"]),
         "fact" => Some(&["fact"]),
+        "feature" => Some(&["feature"]),
         _ => None,
     }
 }
@@ -401,7 +402,12 @@ pub fn supersede(
             }
             _ => {}
         }
-        if st.kind_of(&old) != Some("fact")
+        if st.kind_of(&old) == Some("feature") {
+            if let Err(reason) = crate::features::may_write(st, actor) {
+                return refused(reason);
+            }
+            crate::features::in_force(st, &new)?;
+        } else if st.kind_of(&old) != Some("fact")
             && let Err(reason) = policy.check(actor, approved_by)
         {
             return refused(format!(
@@ -423,6 +429,8 @@ pub struct AskArgs {
     pub title: String,
     pub to: Option<String>,
     pub task: Option<String>,
+    /// `--feature`: the question is about a feature (`fields.feature`).
+    pub feature: Option<String>,
     pub body: String,
     /// The epic of the question (`--epic`). Without it, the task's epic or, if
     /// a coordinator asks (`agent:epic:<x>`), its own.
@@ -472,7 +480,12 @@ pub fn ask(store: &mut Store, actor: &Actor, a: &AskArgs) -> Result<Asked> {
     }
     let ((joined, brake), written) = store.transact(|b| {
         let st = b.state()?;
-        let mut fields = crate::tasks::question_fields(st, a.to.as_deref(), a.task.as_deref())?;
+        let mut fields = crate::tasks::question_fields(
+            st,
+            a.to.as_deref(),
+            a.task.as_deref(),
+            a.feature.as_deref(),
+        )?;
         if !fields.contains_key("epic") {
             let explicit = a.epic.as_deref().map(str::trim).filter(|e| !e.is_empty());
             let epic = match explicit {
@@ -508,6 +521,9 @@ pub fn ask(store: &mut Store, actor: &Actor, a: &AskArgs) -> Result<Asked> {
             if let Some(t) = fields.get("task") {
                 r.fields.insert("task".into(), t.clone());
             }
+            if let Some(u) = fields.get("feature") {
+                r.fields.insert("feature".into(), u.clone());
+            }
             if a.blocking {
                 r.fields.insert("blocking".into(), json!(true));
             }
@@ -532,6 +548,8 @@ pub fn ask(store: &mut Store, actor: &Actor, a: &AskArgs) -> Result<Asked> {
         r.fields = fields;
         if let Some(t) = r.fields.get("task").and_then(Value::as_str) {
             r.refs = vec![t.to_string()];
+        } else if let Some(u) = r.fields.get("feature").and_then(Value::as_str) {
+            r.refs = vec![u.to_string()];
         }
         b.push(r)?;
         Ok((None, brake))

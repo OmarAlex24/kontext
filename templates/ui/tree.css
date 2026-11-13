@@ -1,0 +1,150 @@
+/* kontext ui, the tree: the same account book as the ledger. The waves sit in
+   the margin, left of the double red rule; the work is written on the sheet.
+   Squares as in the ledger: filled done, half started, hollow not yet. Red ink
+   only for what waits for you. */
+:root {
+  --paper: #f1f5f0;
+  --sheet: #fbfdfa;
+  --ink: #18221d;
+  --muted: #5a6a61;
+  --rule: #d3dfd4;
+  --rule-strong: #b3c6b6;
+  --margin: #c8373a;
+  --focus: #1d5fd1;
+  --done: #18221d;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Ubuntu, Cantarell, "Noto Sans", "Liberation Sans", "DejaVu Sans", Arial, system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #101613;
+    --sheet: #151d18;
+    --ink: #e2ebe4;
+    --muted: #93a49a;
+    --rule: #26332b;
+    --rule-strong: #34463b;
+    --margin: #e0575a;
+    --focus: #7fb0ff;
+    --done: #e2ebe4;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.45 var(--font); }
+h1, h2 { font-weight: 800; letter-spacing: -0.02em; margin: 0; }
+p { margin: 0; }
+ul { list-style: none; margin: 0; padding: 0; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+a { color: inherit; text-decoration-color: var(--rule-strong); text-underline-offset: 3px; }
+a:hover { text-decoration-color: currentColor; }
+.muted { color: var(--muted); }
+.tab { font-variant-numeric: tabular-nums; }
+.cmd { font-weight: 600; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------------------------------------------------------------- top */
+.top {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end;
+  gap: 0.4rem 2rem; max-width: 64rem; margin: 0 auto;
+  padding: 2rem clamp(1rem, 3vw, 2.5rem) 1.25rem;
+}
+.top h1 { font-size: clamp(2rem, 5vw, 3.1rem); line-height: 1; letter-spacing: -0.045em; overflow-wrap: anywhere; }
+.summary { grid-column: 1; color: var(--muted); font-size: 1.02rem; }
+.summary b { color: var(--ink); font-weight: 700; }
+.nav { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 1.25rem; font-weight: 600; align-self: end; }
+
+/* ---------------------------------------------------------------- the book */
+.book {
+  width: min(64rem - 2 * clamp(1rem, 3vw, 2.5rem), 100% - 2 * clamp(1rem, 3vw, 2.5rem));
+  margin: 0 auto 1.25rem;
+  background: var(--sheet); border: 1px solid var(--rule-strong); border-radius: 3px;
+  position: relative;
+}
+/* the double red margin */
+.book::before, .book::after {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 1px;
+  background: var(--margin); opacity: 0.8; pointer-events: none;
+}
+.book::before { left: 7.5rem; }
+.book::after { left: calc(7.5rem + 3px); }
+
+.group {
+  display: grid; grid-template-columns: 7.5rem minmax(0, 1fr);
+  border-top: 1px solid var(--rule);
+}
+.group:first-child { border-top: 0; }
+.group > h2 {
+  font-size: 0.95rem; letter-spacing: -0.01em; padding: 0.95rem 0.9rem 0.9rem 1rem;
+  color: var(--muted); font-weight: 700;
+}
+.group.now > h2 { color: var(--ink); }
+.group.now > h2::after { content: "now"; display: block; font-weight: 500; font-size: 0.8rem; color: var(--muted); }
+.group > .body { padding: 0.55rem 1.1rem 0.75rem 1.4rem; min-width: 0; }
+
+/* ---------------------------------------------------------------- epics */
+.epic { padding: 0.4rem 0; }
+.epic + .epic { border-top: 1px dashed var(--rule); }
+.line { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; }
+.line .title { min-width: 0; overflow-wrap: anywhere; }
+.epic > .line .title { font-weight: 700; font-size: 1.02rem; }
+.epic.closed > .line .title { font-weight: 600; color: var(--muted); }
+.line .count { margin-left: auto; color: var(--muted); white-space: nowrap; padding-left: 1rem; }
+.reason { color: var(--muted); font-size: 0.88rem; margin: 0.1rem 0 0 1.35rem; }
+
+/* the tally: one square per feature */
+.tally { display: inline-flex; gap: 3px; align-self: center; margin-left: 0.25rem; }
+.tally .mk { width: 0.55rem; height: 0.55rem; border-width: 1.5px; }
+
+/* features under an open epic, hanging from a rule like a sub-account */
+.features { margin: 0.25rem 0 0.2rem 0.32rem; border-left: 1px solid var(--rule-strong); }
+.features li { padding: 0.18rem 0 0.18rem 1rem; position: relative; }
+.features li::before {
+  content: ""; position: absolute; left: 0; top: 0.95rem; width: 0.65rem; border-top: 1px solid var(--rule-strong);
+}
+.features .line .title { font-size: 0.97rem; }
+.note { margin-left: auto; white-space: nowrap; padding-left: 1rem; color: var(--muted); font-size: 0.9rem; }
+.note .you { color: var(--margin); font-weight: 700; }
+.acc { color: var(--muted); font-size: 0.86rem; margin-left: 1.3rem; overflow-wrap: anywhere; }
+
+/* ---------------------------------------------------------------- marks */
+.mk {
+  display: inline-block; flex: none; width: 0.72rem; height: 0.72rem; position: relative; top: 0.05rem;
+  border: 2px solid var(--done); background: transparent;
+}
+.mk.done { background: var(--done); }
+.mk.in_progress { background: linear-gradient(to top, var(--done) 50%, transparent 50%); }
+.mk.pending { border-color: var(--rule-strong); }
+.mk.you { border-color: var(--margin); }
+
+/* ---------------------------------------------------------------- ideas */
+.ideas li { display: flex; align-items: baseline; gap: 0.8rem; padding: 0.3rem 0; }
+.ideas li + li { border-top: 1px dashed var(--rule); }
+.ideas .words { min-width: 0; overflow-wrap: anywhere; }
+.ideas .meta { margin-left: auto; color: var(--muted); font-size: 0.88rem; text-align: right; }
+.audit { color: var(--muted); padding: 0.35rem 0 0.2rem; }
+.audit b { color: var(--margin); font-weight: 700; }
+.empty { color: var(--muted); padding: 0.45rem 0; }
+
+/* ---------------------------------------------------------------- foot */
+.foot {
+  max-width: 64rem; margin: 0 auto; padding: 0 clamp(1rem, 3vw, 2.5rem) 2rem;
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem 1.5rem;
+  font-size: 0.86rem; color: var(--muted);
+}
+.foot .bad { color: var(--margin); }
+
+/* ---------------------------------------------------------------- narrow */
+@media (max-width: 640px) {
+  .top { grid-template-columns: minmax(0, 1fr); }
+  .nav { grid-column: 1; grid-row: auto; }
+  .book::before { left: 0.6rem; }
+  .book::after { left: calc(0.6rem + 3px); }
+  .group { grid-template-columns: minmax(0, 1fr); }
+  .group > h2 { padding: 0.8rem 1rem 0 1.6rem; }
+  .group.now > h2::after { display: inline; margin-left: 0.5rem; }
+  .group > .body { padding: 0.3rem 0.9rem 0.7rem 1.6rem; }
+  .line { flex-wrap: wrap; }
+  .line .count, .note { margin-left: 1.3rem; padding-left: 0; }
+  .ideas li { flex-direction: column; gap: 0.1rem; }
+  .ideas .meta { margin-left: 0; text-align: left; }
+}

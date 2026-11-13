@@ -328,6 +328,22 @@ fn closed(st: &State, key: &str) -> bool {
     st.inbox_closed.contains_key(key)
 }
 
+/// An open question that waits for a person, as the inbox sees it: not
+/// closed for the inbox, and addressed to `owner`, an owner, `human:<x>` or
+/// someone in `[people]` (a `--to <name>` that is none of these may be an
+/// agent).
+pub fn waits_for_a_human(st: &State, q: &Entry, people: &[String]) -> bool {
+    if st.status_of(&q.id) != Some(Status::Open) || closed(st, &q.id) {
+        return false;
+    }
+    let raw = field(q, "to").unwrap_or("owner");
+    let to = question_to(q);
+    raw.starts_with("human:")
+        || to == "owner"
+        || st.policy.is_owner(to)
+        || people.iter().any(|p| p == to)
+}
+
 /// The last thing the human wrote (`actor` `human:<name>`).
 pub fn last_action(st: &State, human: &str) -> Option<String> {
     st.entries
@@ -869,6 +885,9 @@ fn task_title(st: &State, id: &str) -> String {
 
 fn is_closed_task(st: &State, id: &str) -> bool {
     st.task_status(id) == Some(TaskStatus::Closed)
+        || st
+            .feature(id)
+            .is_some_and(|f| f.status == crate::features::FeatureStatus::Done)
 }
 
 fn problemas(st: &State, out: &mut Vec<Draft>) {
@@ -894,7 +913,17 @@ fn problemas(st: &State, out: &mut Vec<Draft>) {
                 actor,
                 reason,
             } if !is_closed_task(st, task) => {
-                let (key, title, why) = if kind == "done" {
+                let feature = st.kind_of(task) == Some("feature");
+                let (key, title, why) = if kind == "done" && feature {
+                    (
+                        format!("close:{id}"),
+                        format!(
+                            "Validation that didn't count: {} ({reason})",
+                            task_title(st, task)
+                        ),
+                        format!("{actor} validated the feature, but it is not done"),
+                    )
+                } else if kind == "done" {
                     (
                         format!("close:{id}"),
                         format!(

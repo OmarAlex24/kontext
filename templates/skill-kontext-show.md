@@ -18,14 +18,15 @@ The human also loses the thread. Rule: **if they have not answered, they have no
 
 ## How, depending on where you run
 
-1. First the status paragraph (below), logged with `kontext log --status "…"`.
-2. Then, with the first option you have:
+1. First `kontext tree`, pasted as it is in a code block: the closed epics under "Done", the waves still to go (the same as `kontext plan`), the open epics and their features, what waits for them, and their ideas that are not placed yet.
+2. Then the status paragraph (below), logged with `kontext log --status "…"`.
+3. Then, with the first option you have:
 
 | If you have | Do |
 |---|---|
 | T3 Code (`html_preview`, `html_render`; search for them with ToolSearch if they are deferred) | `kontext report --html -o /tmp/kontext-report.html`, and show it with `html_preview`, then `html_render` with that HTML |
 | Claude Code with an Artifact tool | A private Artifact with the HTML from `kontext report --html` |
-| Claude Code without an Artifact tool | `kontext ui` and give them the path `http://127.0.0.1:4700/report` |
+| Claude Code without an Artifact tool | `kontext ui` and give them the path `http://127.0.0.1:4700/report` (the tree is at `/`) |
 | Terminal only | Paste the status paragraph and the output of `kontext inbox` (or `kontext report`, which is the same in text) |
 
 The report is fixed: do not redesign it or add sections to it. The only part that is yours is the paragraph.

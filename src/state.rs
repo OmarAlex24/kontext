@@ -195,6 +195,9 @@ pub enum Alert {
     /// Phase 5: a pending proposal that says it supersedes a decision in force
     /// (`fields.supersedes`). It shows until it is accepted or rejected.
     ProposalSupersedes { proposal: String, decision: String },
+    /// An open task of a superseded feature: it no longer keeps its epic open,
+    /// so the work would be lost unless it is closed or moved.
+    SupersededFeatureTask { task: String, feature: String },
     /// Phase 4: a fact whose fingerprint no longer matches `HEAD` (it is not
     /// written; [`crate::facts::annotate`] adds it when reading).
     FactStale {
@@ -231,6 +234,7 @@ impl Alert {
             Alert::BadSignature { id, .. } => vec![id],
             Alert::ClaimLost { task, record, .. } => vec![task, record],
             Alert::ProposalSupersedes { proposal, decision } => vec![proposal, decision],
+            Alert::SupersededFeatureTask { task, feature } => vec![task, feature],
         }
     }
 
@@ -250,6 +254,7 @@ impl Alert {
                     | Alert::FactStale { .. }
                     | Alert::ClaimLost { .. }
                     | Alert::ProposalSupersedes { .. }
+                    | Alert::SupersededFeatureTask { .. }
             )
     }
 
@@ -335,6 +340,10 @@ impl fmt::Display for Alert {
             Alert::ProposalSupersedes { proposal, decision } => write!(
                 f,
                 "{proposal} proposes to supersede {decision}, which is in force: `kontext accept {proposal}` or `kontext reject {proposal} --why …`"
+            ),
+            Alert::SupersededFeatureTask { task, feature } => write!(
+                f,
+                "open task {task} of superseded feature {feature}: close it with evidence or move the work to a feature in force"
             ),
             Alert::FactStale {
                 id,
@@ -498,6 +507,9 @@ pub struct State {
     pub claims: BTreeMap<String, Claim>,
     /// Task → its status, its holder and its history.
     pub tasks: BTreeMap<String, TaskInfo>,
+    /// Feature → its state, its tasks and its validations (empty in a project
+    /// without features).
+    pub features: BTreeMap<String, crate::features::FeatureInfo>,
     /// Now (ms since 1970): to know whether a claim expired. Comes from
     /// `KONTEXT_NOW` or the clock.
     pub now_ms: i64,
@@ -552,7 +564,9 @@ impl State {
             ..State::default()
         };
         for e in all {
-            if st.entries.contains_key(&e.id) {
+            // A kind from a newer version: `kontext verify` lists it, and it
+            // does not count here.
+            if st.entries.contains_key(&e.id) || crate::model::prefix_for(&e.kind).is_none() {
                 continue;
             }
             st.apply(&e);
@@ -590,6 +604,10 @@ impl State {
 
     pub fn task_status(&self, id: &str) -> Option<TaskStatus> {
         self.tasks.get(id).map(|t| t.status)
+    }
+
+    pub fn feature(&self, id: &str) -> Option<&crate::features::FeatureInfo> {
+        self.features.get(id)
     }
 
     /// Epics in force, in order.
@@ -925,6 +943,25 @@ impl State {
             self.status.insert(e.id.clone(), initial);
             if e.kind == "task" {
                 self.tasks.insert(e.id.clone(), TaskInfo::default());
+                // A task added to a feature after it was validated: the
+                // validation no longer covers all its work.
+                if let Some(f) = crate::features::counted_feature(self, e).map(str::to_string) {
+                    self.unvalidate(&f, e, format!("{} was added after the validation", e.id));
+                }
+            }
+            if e.kind == "feature" {
+                self.features
+                    .insert(e.id.clone(), crate::features::FeatureInfo::default());
+                if let Err(reason) = crate::features::may_write(self, &e.actor) {
+                    self.not_counting.insert(e.id.clone(), reason.clone());
+                    self.alerts.push(Alert::NotCounting {
+                        id: e.id.clone(),
+                        kind: e.kind.clone(),
+                        actor: e.actor.short(),
+                        reason,
+                    });
+                    self.status.insert(e.id.clone(), Status::Ignored);
+                }
             }
             if e.kind == "journal" {
                 self.touch_task(e);
@@ -1008,6 +1045,23 @@ impl State {
                     self.answers.entry(target).or_default().push(e.id.clone());
                 }
             }
+            "supersede" if target_kind.as_deref() == Some("feature") => {
+                // A feature replaced by another: the pm or an owner.
+                if let Err(reason) = crate::features::may_write(self, &e.actor) {
+                    self.not_counting.insert(e.id.clone(), reason.clone());
+                    self.alerts.push(Alert::NotCounting {
+                        id: e.id.clone(),
+                        kind: e.kind.clone(),
+                        actor: e.actor.short(),
+                        reason,
+                    });
+                    return;
+                }
+                match e.refs.get(1) {
+                    Some(by) => self.supersede(&target, by),
+                    None => self.set(&target, Status::Superseded),
+                }
+            }
             "supersede" => {
                 let restricted = matches!(
                     target_kind.as_deref(),
@@ -1025,6 +1079,9 @@ impl State {
                 if target_kind.as_deref() == Some("task") =>
             {
                 self.apply_task(e, &target);
+            }
+            "done" | "reopen" if target_kind.as_deref() == Some("feature") => {
+                self.apply_feature(e, &target);
             }
             "confirm" if target_kind.as_deref() == Some("question") => {
                 self.joined.entry(target).or_default().push(e.id.clone());
@@ -1247,9 +1304,158 @@ impl State {
                 }
                 self.unhold(task);
                 self.event(task, e, true, "reopened".into());
+                let feature = self
+                    .get(task)
+                    .and_then(|t| crate::features::counted_feature(self, t))
+                    .map(str::to_string);
+                if let Some(f) = feature {
+                    self.unvalidate(&f, e, format!("{task} was reopened after the validation"));
+                }
             }
             _ => {}
         }
+    }
+
+    fn feature_event(&mut self, f: &str, e: &Entry, counted: bool, note: String) {
+        if let Some(i) = self.features.get_mut(f) {
+            i.history.push(TaskEvent {
+                record: e.id.clone(),
+                kind: e.kind.clone(),
+                actor: e.actor.short(),
+                hlc: e.hlc.clone(),
+                counted,
+                note,
+            });
+        }
+    }
+
+    /// A validation or reopening of a feature that does not count: it stays in
+    /// the feature's history and shows up as an alert, like a task's.
+    fn feature_ignored(&mut self, f: &str, e: &Entry, reason: String) {
+        self.not_counting.insert(e.id.clone(), reason.clone());
+        self.alerts.push(Alert::TaskRecordIgnored {
+            id: e.id.clone(),
+            task: f.to_string(),
+            kind: e.kind.clone(),
+            actor: e.actor.short(),
+            reason: reason.clone(),
+        });
+        self.feature_event(f, e, false, format!("does not count: {reason}"));
+    }
+
+    /// A feature's validation stops holding (a task reopened or added after
+    /// it). Nothing is written: the state says so, with the reason.
+    fn unvalidate(&mut self, f: &str, e: &Entry, note: String) {
+        let Some(i) = self.features.get_mut(f) else {
+            return;
+        };
+        let Some(v) = i.validated.take() else {
+            return;
+        };
+        let note = format!("{note} ({v}); validate it again when its tasks are closed");
+        i.note = Some(note.clone());
+        self.feature_event(f, e, true, note);
+    }
+
+    /// `done` (validate) and `reopen` on a feature.
+    fn apply_feature(&mut self, e: &Entry, f: &str) {
+        let info = self.features.get(f).cloned().unwrap_or_default();
+        match e.kind.as_str() {
+            "done" => {
+                if info.validated.is_some() {
+                    return self.feature_event(
+                        f,
+                        e,
+                        false,
+                        "does not count: already validated".into(),
+                    );
+                }
+                if let Some(s @ (Status::Superseded | Status::Ignored)) = self.status_of(f) {
+                    let reason = format!("the feature is {}", s.label());
+                    return self.feature_ignored(f, e, reason);
+                }
+                let epic = self.get(f).and_then(|x| self.epic_of(x)).cloned();
+                if !self.policy.manages(&e.actor, epic.as_ref()) {
+                    let reason = format!(
+                        "only the epic's coordinator, the pm or an owner can validate a feature ({} is not one)",
+                        e.actor.short()
+                    );
+                    return self.feature_ignored(f, e, reason);
+                }
+                if let Some(why) = crate::features::unready(self, f) {
+                    return self.feature_ignored(f, e, format!("{why} when it was validated"));
+                }
+                if let Err(reason) = tasks::check_evidence(e.fields.get("evidence")) {
+                    return self.feature_ignored(f, e, reason);
+                }
+                if let Some(i) = self.features.get_mut(f) {
+                    i.validated = Some(e.id.clone());
+                    i.note = None;
+                }
+                let summary = tasks::evidence_summary(e.fields.get("evidence"));
+                self.feature_event(f, e, true, format!("validated with evidence: {summary}"));
+            }
+            "reopen" => {
+                if info.validated.is_none() {
+                    return self.feature_event(
+                        f,
+                        e,
+                        false,
+                        "does not count: it was not validated".into(),
+                    );
+                }
+                if let Some(i) = self.features.get_mut(f) {
+                    i.validated = None;
+                    i.note = None;
+                }
+                self.feature_event(f, e, true, "validation reopened".into());
+            }
+            _ => {}
+        }
+    }
+
+    /// The final state of each feature, once its tasks' states are known.
+    fn finish_features(&mut self) {
+        let ids: Vec<String> = self.features.keys().cloned().collect();
+        for id in ids {
+            let tasks = crate::features::task_ids(self, &id);
+            let closed = tasks
+                .iter()
+                .filter(|t| self.task_status(t) == Some(TaskStatus::Closed))
+                .count();
+            let mut info = self.features[&id].clone();
+            info.tasks = tasks;
+            info.closed_tasks = closed;
+            info.status = crate::features::derive(self, &id, &info);
+            self.features.insert(id, info);
+        }
+        // Tasks that name a feature they don't count toward (another epic's),
+        // and open tasks of a superseded feature.
+        let mut alerts = Vec::new();
+        for t in self.of_kind("task") {
+            if let Some((feature, reason)) = crate::features::foreign_feature(self, t) {
+                alerts.push(Alert::TaskRecordIgnored {
+                    id: t.id.clone(),
+                    task: feature,
+                    kind: t.kind.clone(),
+                    actor: t.actor.short(),
+                    reason,
+                });
+                continue;
+            }
+            let Some(f) = crate::features::counted_feature(self, t) else {
+                continue;
+            };
+            if self.status_of(f) == Some(Status::Superseded)
+                && self.task_status(&t.id) != Some(TaskStatus::Closed)
+            {
+                alerts.push(Alert::SupersededFeatureTask {
+                    task: t.id.clone(),
+                    feature: f.to_string(),
+                });
+            }
+        }
+        self.alerts.extend(alerts);
     }
 
     fn hold(&mut self, task: &str, c: Claim, ms: i64) {
@@ -1439,6 +1645,7 @@ impl State {
         }
         self.alerts.extend(contradictions);
         self.finish_tasks();
+        self.finish_features();
         // A lost claim stops mattering when the task closes, or when the loser
         // holds it after all.
         let tasks = &self.tasks;

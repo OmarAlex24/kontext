@@ -310,7 +310,10 @@ fn captures(st: &State) -> Vec<(Option<String>, String, Capture)> {
         match e.kind.as_str() {
             "done" => {
                 let Some(task) = e.refs.first() else { continue };
-                if st.task(task).and_then(|t| t.done.as_deref()) != Some(e.id.as_str()) {
+                // The close of a task, or the validation of a feature, that counts.
+                let counts = st.task(task).and_then(|t| t.done.as_deref()) == Some(e.id.as_str())
+                    || st.feature(task).and_then(|f| f.validated.as_deref()) == Some(e.id.as_str());
+                if !counts {
                     continue;
                 }
                 let epic = st

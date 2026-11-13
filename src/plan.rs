@@ -3,7 +3,11 @@
 //!
 //! It is deterministic and writes nothing. Rules:
 //! - An epic is **closed** if it has at least one task and all of them are
-//!   closed; otherwise it is **open**. Only epics in force count.
+//!   closed; otherwise it is **open**. Only epics in force count. An epic
+//!   with at least one feature in force is closed instead when all its
+//!   features in force are done (validated) and all its tasks without a
+//!   feature are closed (a superseded feature's open tasks don't count; they
+//!   raise an alert).
 //! - A dependency is looked up by `id` or by name (`epic:<name>`). A closed
 //!   dependency is already met. One that doesn't exist, or that is no longer in
 //!   force, is a problem.
@@ -17,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::model::Entry;
 use crate::state::{State, Status, string_list};
 use crate::tasks::{TaskStatus, epic_name};
 
@@ -32,12 +37,27 @@ pub struct Node {
     pub active: bool,
     pub tasks: usize,
     pub closed_tasks: usize,
+    /// Its features in force, and how many are done (0 and 0: no features).
+    pub features: usize,
+    pub done_features: usize,
+    /// Its open tasks without a feature (they keep an epic with features open).
+    pub open_loose: usize,
 }
 
 impl Node {
     pub fn closed(&self) -> bool {
+        if self.features > 0 {
+            return self.done_features == self.features && self.open_loose == 0;
+        }
         self.tasks > 0 && self.closed_tasks == self.tasks
     }
+}
+
+/// An epic's features in the plan (only for an epic that has any).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct FeatureCount {
+    pub total: usize,
+    pub done: usize,
 }
 
 /// An epic in the output.
@@ -50,6 +70,9 @@ pub struct PlanEpic {
     pub after: Vec<String>,
     pub tasks: usize,
     pub closed_tasks: usize,
+    /// Only for an epic with features in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<FeatureCount>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -92,23 +115,34 @@ pub struct Plan {
 
 /// The epics in the state, in `hlc` order.
 pub fn nodes(st: &State) -> Vec<Node> {
-    st.of_kind("epic")
-        .map(|e| {
-            let tasks = st.tasks_of(&e.id);
-            Node {
-                id: e.id.clone(),
-                name: epic_name(e),
-                title: e.title.trim().to_string(),
-                after: string_list(e.fields.get("depends_on")),
-                active: st.status_of(&e.id) == Some(Status::Active),
-                tasks: tasks.len(),
-                closed_tasks: tasks
-                    .iter()
-                    .filter(|t| st.task_status(&t.id) == Some(TaskStatus::Closed))
-                    .count(),
-            }
-        })
-        .collect()
+    st.of_kind("epic").map(|e| node(st, e)).collect()
+}
+
+/// One epic, with what the plan needs (its closure is [`Node::closed`]).
+pub fn node(st: &State, e: &Entry) -> Node {
+    let tasks = st.tasks_of(&e.id);
+    let (done_features, features, _) = crate::features::counts(st, &e.id);
+    Node {
+        id: e.id.clone(),
+        name: epic_name(e),
+        title: e.title.trim().to_string(),
+        after: string_list(e.fields.get("depends_on")),
+        active: st.status_of(&e.id) == Some(Status::Active),
+        tasks: tasks.len(),
+        closed_tasks: tasks
+            .iter()
+            .filter(|t| st.task_status(&t.id) == Some(TaskStatus::Closed))
+            .count(),
+        features,
+        done_features,
+        open_loose: tasks
+            .iter()
+            .filter(|t| {
+                crate::features::counted_feature(st, t).is_none()
+                    && st.task_status(&t.id) != Some(TaskStatus::Closed)
+            })
+            .count(),
+    }
 }
 
 /// `kontext plan` over the state.
@@ -140,6 +174,10 @@ fn plan_epic(n: &Node, after: Vec<String>) -> PlanEpic {
         after,
         tasks: n.tasks,
         closed_tasks: n.closed_tasks,
+        features: (n.features > 0).then_some(FeatureCount {
+            total: n.features,
+            done: n.done_features,
+        }),
     }
 }
 
@@ -393,6 +431,10 @@ fn epic_text(e: &PlanEpic) -> String {
     } else {
         format!("{}/{} tasks closed", e.closed_tasks, e.tasks)
     };
+    let tasks = match &e.features {
+        Some(f) => format!("{}/{} features done; {tasks}", f.done, f.total),
+        None => tasks,
+    };
     let after = if e.after.is_empty() {
         String::new()
     } else {
@@ -489,6 +531,9 @@ mod tests {
             active: true,
             tasks: 2,
             closed_tasks: 0,
+            features: 0,
+            done_features: 0,
+            open_loose: 0,
         }
     }
 
@@ -623,6 +668,29 @@ mod tests {
         );
         // The replaced epic doesn't show up in any list.
         assert!(!p.text().contains("E-old old"));
+    }
+
+    #[test]
+    fn an_epic_with_features_closes_when_its_features_are_done() {
+        // All tasks closed, but one of two features not validated yet: open.
+        let mut a = node("a", &[]);
+        a.closed_tasks = 2;
+        a.features = 2;
+        a.done_features = 1;
+        let p = compute(&[a.clone(), node("b", &["a"])]);
+        assert_eq!(p.waves.len(), 2);
+        assert!(
+            p.text().contains("(1/2 features done; 2/2 tasks closed)"),
+            "{}",
+            p.text()
+        );
+        assert_eq!(p.json()["waves"][0]["epics"][0]["features"]["done"], 1);
+        // Without features the key is not there.
+        assert!(p.json()["waves"][1]["epics"][0].get("features").is_none());
+        a.done_features = 2;
+        let p = compute(&[a, node("b", &["a"])]);
+        assert_eq!(p.closed.len(), 1);
+        assert_eq!(p.waves.len(), 1);
     }
 
     #[test]
