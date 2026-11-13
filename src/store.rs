@@ -84,6 +84,9 @@ pub struct Store {
     signer: Option<Signer>,
     /// Phase 5: `[people]` from `project.toml`, to verify signatures.
     people: BTreeMap<String, Person>,
+    /// The project has a kontext server: a line it could never push (over
+    /// `MAX_LINE_BYTES`) is refused before it is written (DESIGN §14.1).
+    server: bool,
 }
 
 /// What [`Batch::push`] returned.
@@ -111,6 +114,7 @@ impl Store {
             policy,
             signer: None,
             people,
+            server: crate::remote::server_for_home(home).is_some(),
         })
     }
 
@@ -317,7 +321,18 @@ impl Store {
             let created = !path.exists();
             let mut buf = String::new();
             for e in &pending {
-                buf.push_str(&e.to_line());
+                let line = e.to_line();
+                if self.server && line.len() > crate::server::MAX_LINE_BYTES {
+                    return Err(Refused(format!(
+                        "the entry would be a ledger line of {} bytes, and the project's kontext server takes \
+                         at most {} (4 MiB): it could never be pushed, so nothing was written. Make it shorter \
+                         (a long text or output goes in a file, an image with --attach)",
+                        line.len(),
+                        crate::server::MAX_LINE_BYTES
+                    ))
+                    .into());
+                }
+                buf.push_str(&line);
                 buf.push('\n');
             }
             let mut file = OpenOptions::new()

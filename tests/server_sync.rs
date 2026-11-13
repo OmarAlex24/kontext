@@ -974,6 +974,56 @@ fn files_in_or_empty(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     }
 }
 
+/// A line kontext writes in a project with a server is never one the server
+/// can't take: over 4 MiB it is refused before it is written (exit 2); up to
+/// it, it goes up and comes down byte for byte.
+#[test]
+fn a_line_over_the_servers_cap_is_refused_before_it_is_written() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    let b = net.machine("b", "ana@b", "ana");
+    net.start(&a, &["omar", "ana"]);
+    net.join(&a, &b);
+    let entry = |body_len: usize| {
+        json!({ "kind": "journal", "title": "a long one", "body": "x".repeat(body_len) })
+            .to_string()
+    };
+    let append = |m: &Machine, line: String| {
+        let mut c = m.cmd(&["debug", "append"]);
+        c.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{line}\n").as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let before = a.lines("omar@a");
+    let out = append(&a, entry(4 * 1024 * 1024));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("4 MiB"));
+    assert_eq!(a.lines("omar@a"), before, "nothing was written");
+    // Just under the cap: written, pushed, and B gets the same bytes.
+    let out = append(&a, entry(3 * 1024 * 1024));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(a.server_tail(&net), a.lines("omar@a").len() as u64);
+    b.ok(&["sync"]);
+    assert_eq!(a.ledger(), b.ledger());
+}
+
 /// `server connect` goes on past a writer the server refuses (a line over the
 /// cap, written before the project had a server, where nothing limits it),
 /// uploads every other writer, says which one was left out and why, and
