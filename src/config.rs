@@ -835,6 +835,11 @@ impl Token {
         if project.is_empty() {
             bail!("the token names no project");
         }
+        // The claims are not signed: the name becomes paths and URLs, so it
+        // must be a project name (DESIGN §14.2).
+        if !crate::cli::valid_name(&project) {
+            bail!("the token names an invalid project {project:?}");
+        }
         validate_writer(&writer)?;
         let text = |k: &str| {
             v.get(k)

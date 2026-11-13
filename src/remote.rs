@@ -2092,8 +2092,10 @@ pub struct CloneArgs {
     pub project: String,
     pub home: Option<PathBuf>,
     pub name: Option<String>,
-    /// Short timeouts and a 20 s budget (a sandbox setting itself up); what
-    /// does not fit comes with the next commands.
+    /// The automatic sync's timeouts (2.5 s a request, 6 s in all) and no
+    /// media: a sandbox setting itself up from a command or the start hook,
+    /// which the network never holds up. What does not fit comes with the
+    /// next commands.
     pub quick: bool,
 }
 
@@ -2109,6 +2111,9 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
             "set KONTEXT_TOKEN to a token for the project (the owner makes one with `kontext token create`)",
         )?;
     let token = Token::parse(&raw).context("$KONTEXT_TOKEN")?;
+    if !crate::cli::valid_name(&a.project) {
+        bail!("invalid project name {:?}", a.project);
+    }
     if token.project != a.project {
         bail!(
             "the token in KONTEXT_TOKEN is for project {}, not {}",
@@ -2144,15 +2149,22 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
         token,
     };
     let opts = if a.quick {
-        Options {
-            timeout: Duration::from_secs(10),
-            budget: Duration::from_secs(20),
-            ..Options::full(false)
-        }
+        Options::auto()
     } else {
         Options::full(false)
     };
     let conn = Conn::of(&remote, opts.timeout);
+    // The claims are read without the secret: the server confirms them
+    // before anything is written.
+    let who = Conn::ok(conn.get("whoami")?, "check the token")?;
+    let says = |k: &str| who.get(k).and_then(Value::as_str).unwrap_or("");
+    if says("project") != remote.token.project || says("writer") != remote.token.writer {
+        bail!(
+            "the server does not confirm the token's claims (project {}, writer {})",
+            remote.token.project,
+            remote.token.writer
+        );
+    }
     let config_files = Conn::ok(conn.get("config")?, "config")?;
     let Some(project_toml) = config_files
         .get("files")
@@ -2496,13 +2508,14 @@ pub fn token_lines(tokens: &[Value]) -> Vec<String> {
 /// (`<config>/homes/<project>`) and registers it. Under a lock, so a
 /// coordinator and its subagents starting at once set it up once. `None` if
 /// there is nothing to do; otherwise what was done (empty if another process
-/// did it), or why it failed (the command then goes on, and says there is no
-/// project).
+/// did it, or the server was unreachable a moment ago), or why it failed (the
+/// command then goes on, and says there is no project).
+///
+/// The variables are only for a project this machine does not have: a
+/// registered project always uses its own configuration, and its token never
+/// goes to `KONTEXT_SERVER` (DESIGN §14.2).
 pub fn bootstrap() -> Option<Result<String>> {
     let raw = std::env::var("KONTEXT_TOKEN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())?;
-    let url = std::env::var("KONTEXT_SERVER")
         .ok()
         .filter(|s| !s.trim().is_empty())?;
     let token = Token::parse(&raw).ok()?;
@@ -2512,15 +2525,108 @@ pub fn bootstrap() -> Option<Result<String>> {
     {
         return None;
     }
+    let url = std::env::var("KONTEXT_SERVER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|u| crate::server::normalize_url(&u));
     let machine = Machine::load().ok()?;
     if machine.projects.contains_key(&token.project) {
-        return None;
+        let own = machine.server_for(&token.project)?;
+        let url = url?;
+        return (url != own).then(|| {
+            Ok(format!(
+                "KONTEXT_SERVER is {url}, but project {} syncs with {own}: it uses its own server, \
+                 and nothing was sent to {url}",
+                token.project
+            ))
+        });
     }
-    Some(bootstrap_project(&url, &token))
+    Some(bootstrap_project(&url?, &token))
+}
+
+/// How long a sandbox waits for another process setting its project up, and
+/// for each request: the automatic sync's timeout.
+const BOOTSTRAP_WAIT: Duration = Duration::from_millis(2500);
+/// After the server could not be reached, how long the set-up is not tried
+/// again (on this machine, by any process).
+const BOOTSTRAP_BACKOFF_MS: i64 = 30_000;
+
+/// Where a sandbox's project goes: `<config>/homes/<project>`, for a valid
+/// project name only (`Token::parse` already refuses others; this is the
+/// last check before a path is built from the token).
+fn bootstrap_home(config: &Path, project: &str) -> Result<PathBuf> {
+    if !crate::cli::valid_name(project) {
+        bail!("the token names an invalid project {project:?}");
+    }
+    Ok(home_path(&config.join("homes"), project))
+}
+
+fn home_path(homes: &Path, project: &str) -> PathBuf {
+    homes.join(project)
+}
+
+/// A set-up that did not finish may be removed only if it is a real
+/// directory (not a link), directly inside `homes/`, and carries the marker
+/// this process's kind wrote before it started.
+fn leftover_setup(homes: &Path, home: &Path, marker: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(home) else {
+        return false;
+    };
+    meta.is_dir()
+        && home.parent() == Some(homes)
+        && home
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::cli::valid_name)
+        && fs::symlink_metadata(marker).is_ok_and(|m| m.is_file())
+}
+
+/// `<config>/bootstrap-backoff.json`: until when (ms) the set-up of each
+/// project is not tried again after the server could not be reached.
+fn backoff_path(config: &Path) -> PathBuf {
+    config.join("bootstrap-backoff.json")
+}
+
+fn backoff_until(config: &Path, project: &str) -> i64 {
+    fs::read_to_string(backoff_path(config))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get(project).and_then(Value::as_i64))
+        .unwrap_or(0)
+}
+
+fn set_backoff(config: &Path, project: &str, until: Option<i64>) {
+    let mut v = fs::read_to_string(backoff_path(config))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    match until {
+        Some(u) => v[project] = json!(u),
+        None => {
+            if let Some(m) = v.as_object_mut() {
+                m.remove(project);
+            }
+        }
+    }
+    let _ = fs::create_dir_all(config);
+    let _ = write_atomic(&backoff_path(config), v.to_string().as_bytes());
+}
+
+/// Did the clone fail because the server could not be reached (or answered
+/// too late)?
+fn unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<crate::http::Unreachable>())
 }
 
 fn bootstrap_project(url: &str, token: &Token) -> Result<String> {
     let dir = config::config_dir()?;
+    let home = bootstrap_home(&dir, &token.project)?;
+    let homes = dir.join("homes");
+    let until = backoff_until(&dir, &token.project);
+    if until > now_ms() {
+        return Ok(String::new());
+    }
     let lock_dir = dir.join("locks");
     fs::create_dir_all(&lock_dir)?;
     let f = OpenOptions::new()
@@ -2528,34 +2634,59 @@ fn bootstrap_project(url: &str, token: &Token) -> Result<String> {
         .truncate(false)
         .write(true)
         .open(lock_dir.join(format!("bootstrap-{}.lock", token.project)))?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + BOOTSTRAP_WAIT;
     while f.try_lock().is_err() {
         if Instant::now() > deadline {
             bail!(
-                "another kontext process is setting up {} and took too long",
+                "another kontext process is setting up {} (this command did not wait for it)",
                 token.project
             );
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
     }
     // Another process did it while this one waited.
     if Machine::load()?.projects.contains_key(&token.project) {
         return Ok(String::new());
     }
-    let home = dir.join("homes").join(&token.project);
-    // Not registered, and this process holds the lock: what is there is a
-    // setup that did not finish.
-    if home.exists() {
+    let marker = homes.join(format!(".{}.bootstrap", token.project));
+    if fs::symlink_metadata(&home).is_ok() {
+        // Not registered, and this process holds the lock: a set-up that did
+        // not finish, if it carries the marker. Anything else stays.
+        if !leftover_setup(&homes, &home, &marker) {
+            bail!(
+                "{} exists and kontext did not set it up: move it away to set project {} up here",
+                home.display(),
+                token.project
+            );
+        }
         fs::remove_dir_all(&home)?;
     }
-    fs::create_dir_all(dir.join("homes"))?;
-    let (c, r) = clone(CloneArgs {
+    fs::create_dir_all(&homes)?;
+    fs::write(&marker, "")?;
+    let res = clone(CloneArgs {
         url: url.to_string(),
         project: token.project.clone(),
         home: Some(home),
         name: None,
         quick: true,
-    })?;
+    });
+    // Done, or nothing was made: the marker goes. A home left half made
+    // keeps it, so the next attempt may remove that home.
+    if Machine::load()?.projects.contains_key(&token.project)
+        || fs::symlink_metadata(home_path(&homes, &token.project)).is_err()
+    {
+        let _ = fs::remove_file(&marker);
+    }
+    let (c, r) = match res {
+        Ok(x) => x,
+        Err(e) => {
+            if unreachable(&e) {
+                set_backoff(&dir, &token.project, Some(now_ms() + BOOTSTRAP_BACKOFF_MS));
+            }
+            return Err(e);
+        }
+    };
+    set_backoff(&dir, &token.project, None);
     drop(f);
     Ok(format!(
         "set up project {} from {} in {} (writer {}, {} entries{})",
@@ -2576,6 +2707,80 @@ fn bootstrap_project(url: &str, token: &Token) -> Result<String> {
 mod tests {
     use super::*;
     use crate::model::Actor;
+
+    /// A token with these claims and a made-up secret.
+    fn forged(claims: Value) -> String {
+        let b = crate::media::base64(claims.to_string().as_bytes())
+            .replace('+', "-")
+            .replace('/', "_")
+            .replace('=', "");
+        format!("kxt1.{b}.not-a-secret")
+    }
+
+    /// The claims are not signed: a project name that is not one never
+    /// becomes a path (the reviewer's `"p": ".."` removed the config folder).
+    #[test]
+    fn a_token_names_only_a_valid_project() {
+        for bad in [
+            "..",
+            ".",
+            "/",
+            "/etc",
+            "/Users/x/kontext-home",
+            "",
+            "a/b",
+            "../x",
+            ".x",
+        ] {
+            let t = forged(json!({ "p": bad, "w": "w@kontext", "n": "omar", "r": "owner" }));
+            assert!(Token::parse(&t).is_err(), "{bad:?} was taken");
+            assert!(
+                bootstrap_home(Path::new("/tmp/kx-config"), bad).is_err(),
+                "{bad:?} became a home"
+            );
+        }
+        let t = forged(json!({ "p": "demo", "w": "w@kontext" }));
+        assert_eq!(Token::parse(&t).unwrap().project, "demo");
+        assert_eq!(
+            bootstrap_home(Path::new("/tmp/kx-config"), "demo").unwrap(),
+            Path::new("/tmp/kx-config/homes/demo")
+        );
+    }
+
+    /// Only a set-up kontext started and marked, directly inside `homes/`,
+    /// is ever removed.
+    #[test]
+    fn only_a_marked_setup_inside_homes_is_removed() {
+        let d = tempfile::tempdir().unwrap();
+        let homes = d.path().join("homes");
+        let home = homes.join("demo");
+        let marker = homes.join(".demo.bootstrap");
+        fs::create_dir_all(&home).unwrap();
+        assert!(!leftover_setup(&homes, &home, &marker), "no marker");
+        fs::write(&marker, "").unwrap();
+        assert!(leftover_setup(&homes, &home, &marker));
+        // A folder outside `homes/`, even with a marker.
+        let outside = d.path().join("demo");
+        fs::create_dir_all(&outside).unwrap();
+        assert!(!leftover_setup(&homes, &outside, &marker));
+        assert!(!leftover_setup(&homes, &homes.join("x/../demo"), &marker));
+        // A link, even to a folder, and a file.
+        let link = homes.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        fs::write(homes.join(".link.bootstrap"), "").unwrap();
+        assert!(!leftover_setup(
+            &homes,
+            &link,
+            &homes.join(".link.bootstrap")
+        ));
+        fs::write(homes.join("file"), "").unwrap();
+        fs::write(homes.join(".file.bootstrap"), "").unwrap();
+        assert!(!leftover_setup(
+            &homes,
+            &homes.join("file"),
+            &homes.join(".file.bootstrap")
+        ));
+    }
 
     fn token(role: Option<&str>, actors: &[&str]) -> Token {
         Token {

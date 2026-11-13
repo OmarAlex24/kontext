@@ -89,17 +89,32 @@ impl Http {
                 r.send(b.unwrap_or_default())
             }
         };
-        let mut res = res.map_err(|e| anyhow::anyhow!("{method} {}: {e}", redact(url)))?;
+        let mut res = res.map_err(|e| Unreachable(format!("{method} {}: {e}", redact(url))))?;
         let status = res.status().as_u16();
         let body = res
             .body_mut()
             .with_config()
             .limit(MAX_BODY)
             .read_to_vec()
-            .map_err(|e| anyhow::anyhow!("{method} {}: reading the answer: {e}", redact(url)))?;
+            .map_err(|e| {
+                Unreachable(format!("{method} {}: reading the answer: {e}", redact(url)))
+            })?;
         Ok(Reply { status, body })
     }
 }
+
+/// The request got no answer: the network, the server down, or a timeout.
+/// (An answer with an error status is a [`Reply`], not this.)
+#[derive(Debug)]
+pub struct Unreachable(pub String);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {}
 
 /// A URL without its query, for messages.
 fn redact(url: &str) -> &str {

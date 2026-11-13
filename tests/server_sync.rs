@@ -1912,3 +1912,196 @@ fn connecting_and_new_tokens_change_nothing_already_written() {
     assert!(out.contains("Project demo cloned"), "{out}");
     assert_eq!(b.ok(&["show", &t]), before);
 }
+
+/// A token with these claims and a made-up secret.
+fn forged(claims: Value) -> String {
+    let b = kontext::media::base64(claims.to_string().as_bytes())
+        .replace('+', "-")
+        .replace('/', "_")
+        .replace('=', "");
+    format!("kxt1.{b}.not-a-secret")
+}
+
+/// `kontext <args>` with only a throwaway config folder and these variables.
+fn bare(config: &Path, envs: &[(&str, &str)], args: &[&str], stdin: &[u8]) -> Output {
+    let mut c = Command::new(BIN);
+    c.args(args)
+        .env("KONTEXT_CONFIG_DIR", config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env_remove("KONTEXT_PROJECT")
+        .env_remove("KONTEXT_ACTOR")
+        .env_remove("KONTEXT_ROLE")
+        .env_remove("KONTEXT_TOKEN")
+        .env_remove("KONTEXT_SERVER")
+        .env_remove("KONTEXT_ADMIN_SECRET")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .current_dir(config.parent().unwrap())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in envs {
+        c.env(k, v);
+    }
+    let mut child = c.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The reviewer's sequence: a token whose claims say `"p": ".."` made the
+/// first command remove `homes/..`, the config folder. The claims are not
+/// signed: a name that is not a project's is never a path, and only a
+/// set-up kontext started and marked is ever removed. (`/` and absolute
+/// paths are in the unit tests: they are never run against a binary.)
+#[test]
+fn forged_token_claims_never_remove_anything() {
+    let d = tempfile::tempdir().unwrap();
+    let config = d.path().join("outer").join("config");
+    let mine = config.join("homes").join("demo").join("mine.txt");
+    fs::create_dir_all(mine.parent().unwrap()).unwrap();
+    for f in [
+        &mine,
+        &config.join("keep.txt"),
+        &d.path().join("outer/keep.txt"),
+    ] {
+        fs::write(f, "x").unwrap();
+    }
+    let trap = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    trap.set_nonblocking(true).unwrap();
+    let trap_url = format!("http://{}", trap.local_addr().unwrap());
+    let still_there = |what: &str| {
+        for f in [
+            &mine,
+            &config.join("keep.txt"),
+            &d.path().join("outer/keep.txt"),
+        ] {
+            assert!(f.exists(), "{what}: {} is gone", f.display());
+        }
+    };
+    for p in ["..", ".", ""] {
+        let t = forged(json!({ "p": p, "w": "w@kontext", "n": "x", "r": "owner" }));
+        let env = [("KONTEXT_TOKEN", t.as_str()), ("KONTEXT_SERVER", &trap_url)];
+        bare(&config, &env, &["status"], b"");
+        bare(&config, &env, &["hook", "session-start"], b"{}");
+        still_there(p);
+    }
+    // A project name, and a folder there that kontext did not set up: it
+    // stays, and the server is not asked.
+    let t = forged(json!({ "p": "demo", "w": "w@kontext", "n": "x", "r": "owner" }));
+    let env = [("KONTEXT_TOKEN", t.as_str()), ("KONTEXT_SERVER", &trap_url)];
+    let out = bare(&config, &env, &["status"], b"");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("kontext did not set it up"), "{err}");
+    still_there("demo");
+    assert!(trap.accept().is_err(), "the server was asked");
+}
+
+/// Against a server that takes the connection and never answers, a sandbox's
+/// start hook (and any command) exits 0 within the automatic sync's short
+/// timeout, on the first call and on every call after: they waited 10 s a
+/// request before.
+#[test]
+fn a_sandbox_never_waits_on_a_server_that_does_not_answer() {
+    let d = tempfile::tempdir().unwrap();
+    let config = d.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    // Never accepted: the connection completes in the backlog and hangs.
+    let hang = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", hang.local_addr().unwrap());
+    let t = forged(json!({ "p": "demo", "w": "w@kontext", "n": "x", "r": "implementer" }));
+    let env = [
+        ("KONTEXT_TOKEN", t.as_str()),
+        ("KONTEXT_SERVER", url.as_str()),
+        ("KONTEXT_PROJECT", "demo"),
+    ];
+    let timed = |args: &[&str]| {
+        let started = Instant::now();
+        let out = bare(&config, &env, args, b"{}");
+        (out, started.elapsed())
+    };
+    let (out, took) = timed(&["hook", "session-start"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "the first start hook took {took:?}"
+    );
+    for _ in 0..3 {
+        let (out, took) = timed(&["hook", "session-start"]);
+        assert!(out.status.success());
+        assert!(
+            took < Duration::from_millis(1500),
+            "a later start hook took {took:?}"
+        );
+    }
+    let (_, took) = timed(&["status"]);
+    assert!(
+        took < Duration::from_millis(1500),
+        "a later command took {took:?}"
+    );
+    // Several at once, with no backoff yet: none waits longer than one try.
+    fs::remove_file(config.join("bootstrap-backoff.json")).unwrap();
+    let kids: Vec<_> = (0..3)
+        .map(|_| {
+            let config = config.clone();
+            let env: Vec<(String, String)> = env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let env: Vec<(&str, &str)> =
+                    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                let out = bare(&config, &env, &["hook", "session-start"], b"{}");
+                (out.status.success(), started.elapsed())
+            })
+        })
+        .collect();
+    for k in kids {
+        let (ok, took) = k.join().unwrap();
+        assert!(ok);
+        assert!(took < Duration::from_secs(6), "a start hook took {took:?}");
+    }
+    drop(hang);
+}
+
+/// KONTEXT_SERVER and KONTEXT_TOKEN are a sandbox's way to set up a project
+/// it does not have: for a registered project they change nothing, a token
+/// never goes to KONTEXT_SERVER, and a command (never the hook) says so.
+#[test]
+fn the_sandbox_variables_never_take_over_a_registered_project() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    net.start(&a, &["omar"]);
+    let trap = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    trap.set_nonblocking(true).unwrap();
+    let trap_url = format!("http://{}", trap.local_addr().unwrap());
+    let token = a.token();
+    let env = [
+        ("KONTEXT_SERVER", trap_url.as_str()),
+        ("KONTEXT_TOKEN", token.as_str()),
+    ];
+    let out = a.run(&env, &["log", "still on its own server"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("nothing was sent to"), "{err}");
+    let mut hook = a
+        .cmd(&["hook", "session-start"])
+        .envs(env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(b"{}").unwrap();
+    let out = hook.wait_with_output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("KONTEXT_SERVER"));
+    // Without a token, nothing to say.
+    let out = a.run(&[("KONTEXT_SERVER", &trap_url)], &["status"]);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("KONTEXT_SERVER"));
+    assert!(trap.accept().is_err(), "a token went to KONTEXT_SERVER");
+    assert_eq!(a.server_tail(&net), a.lines("omar@a").len() as u64);
+}
