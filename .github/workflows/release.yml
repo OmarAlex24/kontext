@@ -65,7 +65,7 @@ jobs:
         run: |
           bin=target/${{ matrix.target }}/release/kontext
           file "$bin"
-          file "$bin" | grep -Eq 'static(-pie)? linked'
+          file "$bin" | grep -Eq 'static(-pie)? linked|statically linked'
           if ldd "$bin" 2>&1 | grep -q '=>'; then ldd "$bin"; exit 1; fi
 
       - name: Package
