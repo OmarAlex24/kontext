@@ -549,3 +549,26 @@ fn a_task_of_another_epic_does_not_count_toward_a_feature() {
     let next = p.run_as_ok(&implementer("impl-1"), &["next", "--epic", "other"]);
     assert!(!next.contains("- Feature:"), "{next}");
 }
+
+#[test]
+fn a_feature_that_lost_its_validation_is_in_progress() {
+    let (p, _, _) = with_epic();
+    let u = feature(&p, "Refunds", &[]);
+    let t = task_in(&p, "Endpoint", &u);
+    close(&p, &t);
+    p.kontext_ok(&["done", &u, "--evidence", "url:https://x"]);
+    p.kontext_ok(&["reopen", &t, "--why", "bug"]);
+    assert_eq!(fstatus(&p, &u), "in progress");
+    let show = p.kontext_ok(&["show", &u]);
+    assert!(show.contains("- **Status:** in progress"), "{show}");
+    let brief = p.kontext_ok(&["brief", "payments", "--peek"]);
+    assert!(
+        brief.contains(&format!("### Feature {u} Refunds [in progress")),
+        "{brief}"
+    );
+    // A task added after the validation: in progress too.
+    close(&p, &t);
+    p.kontext_ok(&["done", &u, "--evidence", "url:https://x"]);
+    task_in(&p, "Receipt", &u);
+    assert_eq!(fstatus(&p, &u), "in progress");
+}

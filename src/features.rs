@@ -6,8 +6,10 @@
 //! tasks point to it with `fields.feature`.
 //!
 //! Its state is derived, never written:
-//! - **pending**: no tasks, or none assigned, claimed or closed;
-//! - **in progress**: some task assigned, claimed or closed, not all closed;
+//! - **pending**: no tasks, or none assigned, claimed, closed or reopened,
+//!   and never validated;
+//! - **in progress**: some task assigned, claimed, closed or reopened, not
+//!   all closed, or a validation lost (a task reopened or added after it);
 //! - **to validate**: at least one task and all closed, no `done` that counts
 //!   on the feature;
 //! - **done**: a `done` on the feature that counts, and none of its tasks
@@ -230,12 +232,17 @@ pub fn derive(st: &State, id: &str, info: &FeatureInfo) -> FeatureStatus {
     if n > 0 && closed == n {
         return FeatureStatus::ToValidate;
     }
-    let started = info.tasks.iter().any(|t| {
-        matches!(
-            st.task_status(t),
-            Some(TaskStatus::Assigned | TaskStatus::Claimed | TaskStatus::Closed)
-        )
-    });
+    // A reopened task counts as started, and a feature that lost its
+    // validation is never pending again.
+    let started = info.note.is_some()
+        || info.tasks.iter().any(|t| {
+            matches!(
+                st.task_status(t),
+                Some(TaskStatus::Assigned | TaskStatus::Claimed | TaskStatus::Closed)
+            ) || st
+                .task(t)
+                .is_some_and(|i| i.history.iter().any(|h| h.counted && h.kind == "reopen"))
+        });
     if started {
         FeatureStatus::InProgress
     } else {
