@@ -205,14 +205,16 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 | Command | What it does |
 |---|---|
 | `kontext epic add <title> --goal <G>… [--coordinator <name>] [--name <short>] [--after <epic>]…` | Creates an epic linked to goals in the charter. Its reader is `epic:<name>` (the name comes from the title if not given) and its default coordinator, `epic:<name>`. `--after`: epics that have to close first (see "Orchestrating several agents") |
-| `kontext task add <title> --epic <epic> [--goal <G>]… [--depends-on <T>]… [--acceptance <text>]` | Adds a task. Without `--goal`, it serves the epic's goals; if none are left, it is still written, with a drift warning |
+| `kontext feature add <title> --epic <epic> [--acceptance <text>] [--goal <G>]…` | Adds a feature: what the human would see working, between the epic and its tasks. Only the pm or an owner. Without `--goal`, it serves the epic's goals |
+| `kontext task add <title> --epic <epic> [--feature <U>] [--goal <G>]… [--depends-on <T>]… [--acceptance <text>]` | Adds a task. Without `--goal`, it serves the epic's goals (with `--feature`, the feature's); if none are left, it is still written, with a drift warning. With `--feature`, `--epic` can be left out; one that isn't the feature's epic is refused |
 | `kontext assign <T> --to <name>` | Assigns a task. Only the epic's coordinator, the pm or an owner |
 | `kontext next --epic <epic> [--claim] [--max-chars N]` | The assignment for the next task: the one you already have, or the first ready one. Brings acceptance, goals, decisions and facts that touch it, and the **assignment mark**. With `--claim` it claims it (atomic on the machine); if none is ready, it exits with 2 and says what blocks it |
 | `kontext brief <epic> [--max-chars N] [--peek]` | The coordinator's view: charter, goals and decisions of the epic, the board (ready, claimed, assigned, blocked, closed with their evidence), questions for `epic:<name>`, facts, journal, alerts and the assignment mark. Advances the cursor of `epic:<name>` (with `--peek`, it doesn't) |
 | `kontext done <T> --since <mark> [--run <cmd>] [--evidence <spec>]… [--evidence-json <json>]` | Closes with evidence. `--run` runs the command and only closes if it exits with 0 (it keeps the code and the last 20 lines). If something that touches the task came in after the mark, it exits with 3 and lists it |
+| `kontext done <U> [--run <cmd>] [--evidence <spec>]… [--since <mark>]` | Validates a feature whose tasks are all closed, against what the human should see. Only the epic's coordinator, the pm or an owner; `--since` is optional |
 | `kontext release <T> [--why]` | The task goes back to ready. Whoever has it, the coordinator, the pm or an owner |
-| `kontext reopen <T> --why <text>` | Reopens a closed task |
-| `kontext ask <title> [--to <reader>] [--task <T>]` | With `--task`, the question belongs to that task and, if you don't say who it's for, it goes to its epic. Its answer counts as new context in `done` |
+| `kontext reopen <T\|U> --why <text>` | Reopens a closed task, or a feature's validation |
+| `kontext ask <title> [--to <reader>] [--task <T>] [--feature <U>]` | With `--task`, the question belongs to that task and, if you don't say who it's for, it goes to its epic. Its answer counts as new context in `done`. With `--feature`, it is about that feature |
 | `kontext fact <text> [--path <path>]… [--repo <name>] [--epic <epic>] [--tags a,b]` | A fact, with the fingerprint of the files it came from (phase 4). With `--epic` it shows up in that epic's `brief` and `next` |
 
 `<epic>` can be the id (`E-61e`), `epic:<name>` or `<name>`. Evidence is `cmd:"<command>"=<code>`, `file:<path>`, `pr:<url>` or `url:<url>`; a command without exit code 0 doesn't count, and `file:` has to exist (relative to the folder where you run `done`; it accepts `path:line`).
@@ -225,6 +227,12 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 - **Expired claims:** a claim with no `kontext log --task` or `done` from its owner during `[claims] lease` (2 h by default) expires and the task goes back to ready. If two machines claim the same task, the one with the lower `hlc` wins.
 - **Stale context:** `done --since <mark>` checks whether a decision for the epic (or one that cites the task) came in after the mark, the replacement of a goal the task cites, or the answer to a question about the task. If something came in, it exits with 3, lists it, and gives the mark for now. Agents always pass `--since`; an owner can leave it out.
 - **Drift:** a task with no goals, or one that cites a goal that was replaced or doesn't exist, and an epic that cites a replaced goal, show up as alerts in `standup` and `resume` until they are fixed. Citing an unsigned goal shows as "unsigned goal".
+
+### Features
+
+An epic can have **features** (`U-…`): what you would see working ("Refunds"), with `--acceptance` saying what that is. Tasks hang from them (`task add --feature`). A feature is `pending` (no task started), `in progress`, `to validate` (all its tasks closed), `done` (its coordinator, the pm or an owner checked it against its acceptance with `kontext done <U>`) or `superseded`. If a task is reopened or added after the validation, the feature goes back to in progress on its own, with a note. An epic with features is closed in `kontext plan` when all its features are done; an epic without features works exactly as before. `brief` groups the board by feature, `next` says which feature the task is for, and the pm's line per epic says "2/3 features done, 1 to validate".
+
+**Upgrade every machine first.** A binary from before features reports the ledger's chain as broken as soon as it holds a `feature` entry (`kontext verify` doesn't know the kind) and doesn't count validations. Install the new binary on every machine of the project before anyone runs `kontext feature add`.
 
 ### What each reader sees
 
@@ -277,7 +285,7 @@ kontext doesn't launch agents: the skill `kontext-orchestrate` (installed by `ko
 | Command | What it does |
 |---|---|
 | `kontext epic add <title> --goal <G> --after <epic>…` | The epic goes after others: by id, `epic:<name>` or `<name>`, even if they don't exist yet (with a warning). Refuses (exit code 2) to go after itself, an id that doesn't exist, and anything that would close a cycle. Like a task's dependencies, it can't be changed later |
-| `kontext plan [--json]` | Calculates the waves of the open epics: which run in series and which in parallel. An epic is closed when all its tasks (at least one) are closed, and a closed dependency is already satisfied. Exits with 1 if there is a cycle or a dependency on an epic that doesn't exist or is no longer in force; those epics, and the ones waiting on them, show up as "no wave" with their reason |
+| `kontext plan [--json]` | Calculates the waves of the open epics: which run in series and which in parallel. An epic is closed when all its tasks (at least one) are closed, or, if it has features, when all its features are done; a closed dependency is already satisfied. Exits with 1 if there is a cycle or a dependency on an epic that doesn't exist or is no longer in force; those epics, and the ones waiting on them, show up as "no wave" with their reason |
 
 ```sh
 # The map can be written in any order: integration warns that its dependencies are still missing.

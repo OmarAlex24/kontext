@@ -26,6 +26,7 @@ pub fn kind_label(kind: &str) -> &str {
         "fact" => "fact",
         "task" => "task",
         "journal" => "journal",
+        "feature" => "feature",
         "sign" => "signature",
         "accept" => "acceptance",
         "reject" => "rejection",
@@ -210,7 +211,20 @@ pub fn standup(
                     .get(&target)
                     .map(|t| one_line(&t.title, 120))
                     .unwrap_or_default();
-                let text = if e.kind == "done" {
+                let feature = st.kind_of(&target) == Some("feature");
+                let text = if e.kind == "done" && feature {
+                    format!(
+                        "feature validated by {}: {title} · evidence: {}",
+                        e.actor.short(),
+                        crate::tasks::evidence_summary(e.fields.get("evidence"))
+                    )
+                } else if feature {
+                    format!(
+                        "feature validation reopened by {}: {title} (why: {})",
+                        e.actor.short(),
+                        one_line(&e.why, 120)
+                    )
+                } else if e.kind == "done" {
                     format!(
                         "task closed by {}: {title} · evidence: {}",
                         e.actor.short(),
@@ -1274,6 +1288,9 @@ pub fn show(st: &State, id: &str) -> String {
     l.push(format!("- **Kind:** {}", kind_label(&e.kind)));
     let status_text = match (crate::board::task_status_text(st, id), status) {
         (Some(t), _) => t,
+        (None, _) if e.kind == "feature" => {
+            crate::features::status_text(st, id).unwrap_or_else(|| "?".into())
+        }
         (None, Some(s)) => {
             let mut t = s.label().to_string();
             if let Some(p) = st.promoted_to.get(id) {
@@ -1460,7 +1477,77 @@ pub fn show(st: &State, id: &str) -> String {
             }
         }
     }
+    if e.kind == "feature"
+        && let Some(info) = st.feature(id)
+    {
+        l.push(String::new());
+        l.push(format!(
+            "**Tasks** ({}/{} closed)",
+            info.closed_tasks,
+            info.tasks.len()
+        ));
+        l.push(String::new());
+        if info.tasks.is_empty() {
+            l.push(format!(
+                "(none yet: `kontext task add \"<title>\" --feature {id} --acceptance \"…\"`)"
+            ));
+        }
+        for t in info.tasks.iter().filter_map(|t| st.get(t)) {
+            l.push(format!(
+                "- {} [{}] {}",
+                t.id,
+                st.task_status(&t.id).map(|s| s.label()).unwrap_or("?"),
+                one_line(&t.title, 120)
+            ));
+        }
+        l.push(String::new());
+        l.push("**Validation history**".into());
+        l.push(String::new());
+        if info.history.is_empty() {
+            l.push("(not validated yet)".into());
+        }
+        for h in &info.history {
+            let why = st
+                .get(&h.record)
+                .map(|r| r.why.trim())
+                .filter(|w| !w.is_empty())
+                .map(|w| format!(" (why: {})", one_line(w, 160)))
+                .unwrap_or_default();
+            let what = if h.kind == "done" {
+                "validation"
+            } else {
+                kind_label(&h.kind)
+            };
+            l.push(format!(
+                "- {} {} {what} by {}: {}{why}",
+                when(&h.hlc),
+                h.record,
+                h.actor,
+                h.note
+            ));
+        }
+    }
     if e.kind == "epic" {
+        let fs: Vec<&Entry> = st
+            .of_kind("feature")
+            .filter(|f| field(f, "epic") == Some(id))
+            .collect();
+        if !fs.is_empty() {
+            l.push(String::new());
+            l.push(format!(
+                "**Features** ({})",
+                crate::features::counts_text(st, id)
+            ));
+            l.push(String::new());
+            for f in fs {
+                l.push(format!(
+                    "- {} [{}] {}",
+                    f.id,
+                    st.feature(&f.id).map(|i| i.status.label()).unwrap_or("?"),
+                    one_line(&f.title, 120)
+                ));
+            }
+        }
         let ts = st.tasks_of(id);
         l.push(String::new());
         l.push(format!("**Tasks** ({})", crate::board::epic_line(st, e)));
@@ -1480,13 +1567,16 @@ pub fn show(st: &State, id: &str) -> String {
     let in_task_history = |r: &Entry| {
         st.task(id)
             .is_some_and(|i| i.history.iter().any(|h| h.record == r.id))
+            || st
+                .feature(id)
+                .is_some_and(|i| i.history.iter().any(|h| h.record == r.id))
     };
     let history: Vec<&Entry> = st
         .referrers(id)
         .into_iter()
         .filter(|r| !(e.kind == "question" && r.kind == "answer"))
         .filter(|r| !in_task_history(r))
-        .filter(|r| !(e.kind == "epic" && r.kind == "task"))
+        .filter(|r| !(e.kind == "epic" && matches!(r.kind.as_str(), "task" | "feature")))
         .collect();
     if !history.is_empty() {
         l.push(String::new());
@@ -1531,7 +1621,7 @@ pub fn show_json(st: &State, id: &str) -> Value {
     let Some(e) = st.get(id) else {
         return Value::Null;
     };
-    json!({
+    let mut v = json!({
         "entry": e,
         "task": st.task(id),
         "status": st.status_of(id),
@@ -1542,7 +1632,11 @@ pub fn show_json(st: &State, id: &str) -> Value {
         "answers": st.answers.get(id),
         "freshness": st.freshness.get(id),
         "history": st.referrers(id),
-    })
+    });
+    if let Some(f) = st.feature(id) {
+        v["feature"] = json!(f);
+    }
+    v
 }
 
 #[cfg(test)]

@@ -127,6 +127,7 @@ Entries with their own identity:
 | `fact` | `F` | `fingerprints[]: {repo, path, commit, blob}` |
 | `task` | `T` | `epic`, `goals[]`, `depends_on[]`, `acceptance` |
 | `journal` | `J` | `task?`, `next?` |
+| `feature` | `U` | `epic`, `goals[]`, `acceptance` |
 
 Records that act on another entry (their `refs[0]` is the target):
 
@@ -161,6 +162,12 @@ Records that act on another entry (their `refs[0]` is the target):
 > - A `done` without valid evidence (at least one element; a command needs `exit_code` 0) is stored, doesn't count, and shows up as an alert.
 > - `kontext fact` arrives in phase 3 without fingerprints (`fields.fingerprints = []`), so the scout has somewhere to put what it finds.
 
+> **Implemented: features.** A plan made with a large model has features, phases and epics, but kontext had only epics and tasks: a feature the human asked for that never became a task was invisible, because an epic closes when its tasks close. A **feature** is the level in between: what the human would see working ("Refunds"), with that in `fields.acceptance`. Its prefix is `U` (`F` is the fact's).
+> - `fields.epic` is the epic's id (as in a task, so `epic_of`, `touches_epic` and the coordinator's "what's new" work unchanged), `fields.goals` like a task's (without `--goal`, the epic's), `refs` = the epic. A task stores `fields.feature`; `kontext task add --feature <U>` takes the epic from the feature (`--epic` is then optional, and one that names another epic is refused with exit 2), and its goals, without `--goal`, from the feature. A question with `--feature` stores `fields.feature` and its epic (the name, as for a task), `refs` = the feature, and goes to the epic's coordinator without `--to`; a `confirm` that joins it keeps the feature.
+> - **Who counts.** Only the pm (`actor.role = "pm"`, without `approved_by`) or an owner adds a feature or supersedes it with another; the CLI refuses anyone else (exit 2), and one that arrives from another machine is stored with the state `not counted` and the `NotCounting` alert. Validating is `kontext done <U>`: the same record and evidence rules as a task's close, written by the epic's coordinator, the pm or an owner, and only if the feature has at least one task and all of them are closed **at that point of the ledger** (the walk checks it in `hlc` order, with the same helper the CLI uses, so the refusal and the alert give the same reason). A `done` that doesn't meet that is stored, doesn't count, and raises `TaskRecordIgnored` (with the feature in `task`; the inbox calls it "Validation that didn't count"). `--since` is optional for a feature (the coordinator validates what it sees, not an assignment); with it, stale context is checked as for a task, including answers to questions about the feature. `kontext reopen <U> --why` undoes a validation; anyone can write it, as for a task.
+> - `kontext supersede <U> <U'>` replaces a feature with another one. Dropping a feature with no replacement is a scope change and is left for later: `supersede` always needs the new entry, so it can't be written.
+> - **Old binaries.** A binary from before features does not know the kind: `kontext verify` stops at the first `feature` line ("unknown entry kind"), so `resume` and the start hook say "CHAIN BROKEN … run `kontext verify` and stop", `sync` merges but warns that what arrived does not pass `verify` and exits with 1, `plan` closes an epic by its tasks alone, `done <U>` is refused ("is feature, not a task") and a validation written by a new binary counts for nothing and shows up in its `standup` as "task closed". The rest reads (an unknown entity is `in force`). That was measured with the binary of 716e888 on a ledger with features. So **every machine of a project upgrades its binary before anyone writes a feature**; an entry's format can't be made readable by older code, and making `feature` look like an existing kind would break the rule that the prefix says the kind.
+
 > **Implemented in phase 4:**
 > - `kontext fact --path <path>…` resolves each path against the git repo of the current folder (or `--repo`) and stores `{repo, path, commit, blob}` with `commit` = `HEAD` and `blob` = `git rev-parse HEAD:<path>` (a folder stores its tree). A path that isn't in the last commit is rejected; one with uncommitted changes is accepted with a warning. The repo name is the one from `[[repos]]` with the same remote, or with the same folder name, or the folder's name (with a warning).
 > - Expiry is compared against the `HEAD` of the local checkout (not against `commit`): `git rev-parse HEAD:<path>` being different or missing means "expired", with the short `HEAD` where it was seen; if the repo is not on this machine, "unreviewed". It is calculated after the walk (`facts::annotate`, which adds `State::freshness` and the `FactStale` alert), because it needs git; the pure state doesn't change.
@@ -184,6 +191,8 @@ Records that act on another entry (their `refs[0]` is the target):
 > - Stale context is not an alert that sticks around: it is checked at the moment of `done` (7.3).
 > - Two more alerts: a claim that expired without anyone taking it back, and an `assign`, `release` or `done` that doesn't count.
 > - The state of each task (ready, blocked, assigned, claimed, closed) is calculated at the end of the walk, with all dependencies seen. A dependency that doesn't exist blocks.
+
+> **Implemented: the state of a feature.** It is derived at the end of the walk (`State::features`, `src/features.rs`), never written: **pending** (no tasks, or none assigned, claimed or closed); **in progress** (some task assigned, claimed or closed, not all closed); **to validate** (at least one task, all closed, no validation that counts); **done** (a validation that counts and holds); **superseded**; **not counted**. A validation stops holding, with no record, when one of the feature's tasks is reopened or a new task is added to it after the validation: the feature goes back to in progress (or to validate, once those tasks close) with a note that says which task and which validation, and the next validation clears it. That way "done" always means a human-visible check after the last change, and nobody has to remember to undo it. An epic with no features has no entry in `State::features`, and its state and views are what they were (a script compares every view of a project without features against the binary of 716e888).
 
 > **Implemented in phase 2:** conflicts are calculated at the end of the walk. There is a conflict if an entry has more than one replacement in force (two decisions or goals that replace the same thing), or if there is more than one signed charter that isn't replaced (the last signed one counts). They are resolved by writing an entry that replaces all the ones involved. "A proposal that contradicts a decision" is left for when there is a way to detect it without a model. The state (`State`) has a map by type and an `enum Alert` so that phases 3 and 4 can add tasks, drift and expiry.
 
@@ -282,6 +291,12 @@ Each view has a character budget. When it doesn't fit, it trims in this order: o
 > - `resume` has one line per epic for all roles. With `--as pm`, facts and the tasks' journal are also left out, and in "what's new" the entries from the epics' work (tasks, their records, their journal, facts and questions for a coordinator) are summarized in one line. Alerts do show: they only cite ids.
 > - `standup` puts the closed tasks (with their evidence) and the reopened ones under "Closed".
 > - `show <T>` shows the task's state history (each record, whether it counted and why) and its journal; `show <E>` lists its tasks.
+
+> **Implemented: features in the views.** Only for an epic with at least one feature in force; the others read as before, byte for byte, and their JSON has no new keys.
+> - `brief`: the board is grouped by feature, each with its state (`[to validate (3/3 tasks closed)]`), what the human sees when it works, and its tasks under it with their status (`- [ready] T-…`; open ones first, closed ones cut like the rest of the board); a feature to validate says how to validate it; the tasks with no feature (or whose feature is no longer in force) go in a last "No feature" group. The header gains "2/3 features done, 1 to validate." `--json` adds `features` (each with `feature_status`, its tasks and the validation).
+> - `next`: the task's feature, its state and what the human sees ("- Feature: U-… Refunds (in progress). When it works, the human sees: …"); `--json` adds `feature`.
+> - The per-epic line of `resume` (and the page) starts with the features: "Payments: 2/3 features done, 1 to validate; 3/5 closed, 1 claimed; last activity 2 h ago". A validation (or its reopening) is not task-level work: the pm sees it under "What's new" instead of in the one-line summary of the epics' work.
+> - `show <U>`: its state, its tasks with their status, and its validation history (each validation and reopening, whether it counted and why). `show <E>` lists its features with their state; `--json` of a feature adds `feature`. `standup` says "feature validated by …".
 
 > **Implemented in phase 4:**
 > - `brief`, `next` and `resume` only list facts in force; the "unreviewed" ones are marked `[unreviewed]`. A fact that expired shows up as an alert in `standup` (until it is replaced) and in the `brief` of its epic, or of all of them if it has no epic. The pm doesn't see facts or those alerts. `show` of a fact lists its fingerprints and its status; `--json` adds `freshness`.
@@ -443,6 +458,7 @@ So `install --local` in the main checkout is what reaches every worktree session
 | `kontext fact [--path <path>...]` | 4 | Facts with a fingerprint (takes the current commit and blob) |
 | `kontext log` | 2 | Journal entry |
 | `kontext epic add` / `kontext task add` / `assign` / `next [--claim]` / `done --evidence … --since <mark>` / `reopen` | 3 | Tasks |
+| `kontext feature add --epic <epic> [--acceptance]` / `task add --feature <U>` / `done <U>` / `reopen <U>` / `ask --feature <U>` | features | Features between an epic and its tasks (§4.3) |
 | `kontext epic add --after <epic>` / `kontext plan` | orchestrate | Dependencies between epics and wave order (§12.1) |
 | `kontext standup [--peek]` / `resume --as <role>` / `brief <epic>` / `show <id>` | 2 | Views |
 | `kontext recall <text>` | 2 | Searches the ledger and Claude Code's transcripts (what it does today) |
@@ -585,6 +601,8 @@ kontext still doesn't orchestrate (§1): it keeps the memory and the contract th
 - A current epic is **closed** if it has at least one task and all of them are closed; otherwise it is **open**. A closed dependency is already satisfied.
 - Each open epic goes in the wave after that of its last open dependency; those in the same wave don't depend on each other and run in parallel (within the wave, in `hlc` order).
 - A dependency that doesn't exist, or an epic that is no longer current, is a problem; a cycle (which only arrives from another machine or version) is too. Those epics, and the ones waiting on them, are left **with no wave** with their reason. If there is any problem, it exits with 1.
+
+> **Implemented: features in `kontext plan`.** An epic with at least one feature in force is closed when all its features in force are done (validated), whatever its tasks say: closing every task is not enough, someone has to check what the human sees. An epic without features keeps the rule above. Its line says "(2/3 features done; 4/6 tasks closed)", and `--json` adds `features: {total, done}` only to such epics. A superseded feature doesn't count; a feature added later reopens the epic.
 
 ### 12.2 Installing and migrating: the skill `kontext-migrate`
 

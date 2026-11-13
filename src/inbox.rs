@@ -869,6 +869,9 @@ fn task_title(st: &State, id: &str) -> String {
 
 fn is_closed_task(st: &State, id: &str) -> bool {
     st.task_status(id) == Some(TaskStatus::Closed)
+        || st
+            .feature(id)
+            .is_some_and(|f| f.status == crate::features::FeatureStatus::Done)
 }
 
 fn problemas(st: &State, out: &mut Vec<Draft>) {
@@ -894,7 +897,17 @@ fn problemas(st: &State, out: &mut Vec<Draft>) {
                 actor,
                 reason,
             } if !is_closed_task(st, task) => {
-                let (key, title, why) = if kind == "done" {
+                let feature = st.kind_of(task) == Some("feature");
+                let (key, title, why) = if kind == "done" && feature {
+                    (
+                        format!("close:{id}"),
+                        format!(
+                            "Validation that didn't count: {} ({reason})",
+                            task_title(st, task)
+                        ),
+                        format!("{actor} validated the feature, but it is not done"),
+                    )
+                } else if kind == "done" {
                     (
                         format!("close:{id}"),
                         format!(

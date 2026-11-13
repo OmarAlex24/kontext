@@ -7,6 +7,7 @@
 use serde_json::{Value, json};
 
 use crate::cursor::Frontier;
+use crate::features::{self, FeatureStatus};
 use crate::model::{Entry, is_record_kind};
 use crate::state::{State, Status, string_list};
 use crate::tasks::{self, TaskStatus, epic_name, touches_epic};
@@ -60,7 +61,9 @@ fn count_text(n: usize, s: TaskStatus) -> String {
     format!("{n} {}", if n == 1 { s.label() } else { s.plural() })
 }
 
-/// "Pagos: 3/5 closed, 1 claimed, 1 blocked; last activity 2 h ago".
+/// "Pagos: 3/5 closed, 1 claimed, 1 blocked; last activity 2 h ago". An epic
+/// with features starts with them: "Pagos: 2/3 features done, 1 to validate;
+/// 3/5 closed, …".
 pub fn epic_line(st: &State, epic: &Entry) -> String {
     let c = counts(st, &epic.id);
     let total: usize = c.iter().map(|(_, n)| n).sum();
@@ -96,8 +99,13 @@ pub fn epic_line(st: &State, epic: &Entry) -> String {
     } else {
         String::new()
     };
+    let features = if features::has_features(st, &epic.id) {
+        format!("{}; ", features::counts_text(st, &epic.id))
+    } else {
+        String::new()
+    };
     format!(
-        "{}: {}; last activity {}{drift}",
+        "{}: {features}{}; last activity {}{drift}",
         epic.title.trim(),
         parts.join(", "),
         tasks::ago(st.now_ms, last_activity(st, epic))
@@ -400,7 +408,9 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
             format!(": {}", summary.join(", "))
         }
     ));
-    if ts.is_empty() {
+    if features::has_features(st, &epic.id) {
+        feature_board(st, epic, &ts, lv, &mut l);
+    } else if ts.is_empty() {
         l.push(format!(
             "- (none) Add tasks with `kontext task add \"<title>\" --epic {name} --acceptance \"…\"`"
         ));
@@ -416,7 +426,8 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
             .iter()
             .filter(|t| st.task_status(&t.id) == Some(s))
             .collect();
-        if of.is_empty() {
+        // With features, the board is grouped by feature instead.
+        if of.is_empty() || features::has_features(st, &epic.id) {
             continue;
         }
         let mut title = s.plural().to_string();
@@ -545,6 +556,70 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
     l.join("\n") + "\n"
 }
 
+/// The board of an epic with features: each feature in force with its state
+/// and acceptance, its tasks under it (open first), and the tasks with no
+/// feature (or whose feature is no longer in force) in a last group.
+fn feature_board(st: &State, epic: &Entry, ts: &[&Entry], lv: Level, l: &mut Vec<String>) {
+    let fs = features::of_epic(st, &epic.id);
+    l.push(format!("{}.", features::counts_text(st, &epic.id)));
+    let line = |t: &Entry| {
+        let status = st.task_status(&t.id).map(|s| s.label()).unwrap_or("?");
+        let s = task_line(st, t, lv.detail);
+        format!("- [{status}] {}", s.strip_prefix("- ").unwrap_or(&s))
+    };
+    // Open tasks are never cut; closed ones are, like the rest of the board.
+    let group = |l: &mut Vec<String>, of: Vec<&&Entry>| {
+        let (closed, open): (Vec<&&Entry>, Vec<&&Entry>) = of
+            .into_iter()
+            .partition(|t| st.task_status(&t.id) == Some(TaskStatus::Closed));
+        l.extend(open.iter().map(|t| line(t)));
+        let items = closed.iter().map(|t| line(t)).collect();
+        capped(l, items, lv.list_cap, "see `kontext brief --json`");
+    };
+    for f in &fs {
+        let status = features::status_text(st, &f.id).unwrap_or_default();
+        l.push(format!(
+            "### Feature {} {} [{status}]",
+            f.id,
+            one_line(&f.title, 120)
+        ));
+        match features::acceptance(f) {
+            Some(a) => l.push(format!(
+                "When it works, the human sees: {}",
+                one_line(a, 240)
+            )),
+            None => l.push("When it works, the human sees: (not stated)".into()),
+        }
+        let of: Vec<&&Entry> = ts
+            .iter()
+            .filter(|t| features::feature_of(t) == Some(f.id.as_str()))
+            .collect();
+        if of.is_empty() {
+            l.push(format!(
+                "- (no tasks yet) Add them with `kontext task add \"<title>\" --feature {} --acceptance \"…\"`",
+                f.id
+            ));
+        }
+        group(l, of);
+        if st.feature(&f.id).map(|i| i.status) == Some(FeatureStatus::ToValidate) {
+            l.push(format!(
+                "All its tasks are closed: check it against what the human should see (yourself or with a \
+                 tester) and validate it with `kontext done {} --evidence …` (or `--run \"<command>\"`).",
+                f.id
+            ));
+        }
+    }
+    let in_force: Vec<&str> = fs.iter().map(|f| f.id.as_str()).collect();
+    let loose: Vec<&&Entry> = ts
+        .iter()
+        .filter(|t| features::feature_of(t).is_none_or(|f| !in_force.contains(&f)))
+        .collect();
+    if !loose.is_empty() {
+        l.push(format!("### No feature ({})", loose.len()));
+        group(l, loose);
+    }
+}
+
 /// `kontext brief <epic>`, cut to the budget: the journal first, then the why
 /// of decisions and criteria, facts, and then the lists. If that is not
 /// enough, the titles of the other decisions in force and then the epic's get
@@ -638,7 +713,7 @@ pub fn brief_json(st: &State, new: &[Entry], o: &BriefOpts) -> Value {
     let reader = format!("epic:{name}");
     let list =
         |v: Vec<&Entry>| -> Vec<Value> { v.into_iter().map(|e| entry_json(st, e)).collect() };
-    json!({
+    let mut v = json!({
         "project": o.project,
         "epic": entry_json(st, epic),
         "name": name,
@@ -655,7 +730,14 @@ pub fn brief_json(st: &State, new: &[Entry], o: &BriefOpts) -> Value {
         "journal": list(epic_journal(st, epic)),
         "alerts": epic_alerts(st, epic),
         "new": new.iter().filter(|e| concerns_epic(st, e, epic)).map(|e| entry_json(st, e)).collect::<Vec<_>>(),
-    })
+    });
+    if features::has_features(st, &epic.id) {
+        v["features"] = features::of_epic(st, &epic.id)
+            .into_iter()
+            .map(|f| features::json(st, f))
+            .collect();
+    }
+    v
 }
 
 /// What `next` needs.
@@ -770,6 +852,15 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
             "- Acceptance: (not stated; ask with `kontext ask … --task` if it isn't obvious)"
                 .into(),
         ),
+    }
+    if let Some(f) = features::feature_of(t).and_then(|f| st.get(f)) {
+        let status = st.feature(&f.id).map(|i| i.status.label()).unwrap_or("?");
+        let sees = features::acceptance(f).unwrap_or("(not stated)");
+        l.push(format!(
+            "- Feature: {} {} ({status}). When it works, the human sees: {sees}",
+            f.id,
+            f.title.trim()
+        ));
     }
     let goals = string_list(t.fields.get("goals"));
     if goals.is_empty() {
@@ -897,7 +988,7 @@ pub fn next_json(st: &State, task: &str, o: &NextOpts) -> Value {
     let epic = st.epic_of(t);
     let list =
         |v: Vec<&Entry>| -> Vec<Value> { v.into_iter().map(|e| entry_json(st, e)).collect() };
-    json!({
+    let mut v = json!({
         "project": o.project,
         "task": task_json(st, t),
         "epic": epic.map(|e| entry_json(st, e)),
@@ -908,7 +999,11 @@ pub fn next_json(st: &State, task: &str, o: &NextOpts) -> Value {
         "claimed": o.claimed,
         "actor": o.actor,
         "lost_claims": lost_claims(st, &o.actor),
-    })
+    });
+    if let Some(f) = features::feature_of(t).and_then(|f| st.get(f)) {
+        v["feature"] = features::json(st, f);
+    }
+    v
 }
 
 /// The claims of `actor` that lost to an earlier claim from another machine.
@@ -923,6 +1018,8 @@ fn lost_claims<'a>(st: &'a State, actor: &str) -> Vec<&'a crate::state::Alert> {
 pub fn task_level(e: &Entry) -> bool {
     match e.kind.as_str() {
         "task" | "fact" | "confirm" => true,
+        // A feature's validation (or its reopening) is news for the pm.
+        "done" | "reopen" if e.refs.first().is_some_and(|r| r.starts_with("U-")) => false,
         "assign" | "claim" | "release" | "done" | "reopen" => true,
         "journal" => field(e, "task").is_some(),
         // The coordinator sees questions on a task, or addressed to a coordinator.

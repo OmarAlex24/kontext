@@ -502,6 +502,7 @@ pub fn stale_entries<'a>(st: &'a State, task: &str, since: &Frontier) -> Vec<&'a
             // that repeated an open question).
             "answer" => e.refs.first().and_then(|q| st.get(q)).is_some_and(|q| {
                 q.fields.get("task").and_then(Value::as_str) == Some(task)
+                    || q.fields.get("feature").and_then(Value::as_str) == Some(task)
                     || st.joined.get(&q.id).into_iter().flatten().any(|c| {
                         st.get(c)
                             .and_then(|c| c.fields.get("task"))
@@ -533,7 +534,7 @@ fn write(store: &mut Store, f: impl FnOnce(&mut Batch) -> Result<()>) -> Result<
 }
 
 /// Resolves goals: they must exist and be goals.
-fn resolve_goals(st: &State, ids: &[String]) -> Result<Vec<String>> {
+pub fn resolve_goals(st: &State, ids: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for g in ids {
         let id = st.resolve(g)?;
@@ -682,6 +683,8 @@ fn resolve_after(
             active: true,
             tasks: 0,
             closed_tasks: 0,
+            features: 0,
+            done_features: 0,
         });
         let plan = crate::plan::compute(&nodes);
         if let Some(c) = plan.cycles.iter().find(|c| c.iter().any(|n| n == own)) {
@@ -708,7 +711,10 @@ fn looks_like_id(s: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct TaskArgs {
     pub title: String,
-    pub epic: String,
+    /// The epic (`--epic`); optional when `feature` is given.
+    pub epic: Option<String>,
+    /// The feature it hangs from (`--feature`).
+    pub feature: Option<String>,
     pub goals: Vec<String>,
     pub depends_on: Vec<String>,
     pub acceptance: Option<String>,
@@ -716,8 +722,10 @@ pub struct TaskArgs {
     pub tags: Vec<String>,
 }
 
-/// `kontext task add`. Without `--goal`, the epic's goals. If none remain, it
-/// still writes the task and warns about drift.
+/// `kontext task add`. Without `--goal`, the epic's goals (with `--feature`,
+/// the feature's). If none remain, it still writes the task and warns about
+/// drift. With `--feature`, the epic is the feature's; an `--epic` that names
+/// another one is refused.
 pub fn task_add(store: &mut Store, actor: &Actor, a: &TaskArgs) -> Result<Written> {
     if a.title.trim().is_empty() {
         bail!("the task needs a title");
@@ -725,7 +733,37 @@ pub fn task_add(store: &mut Store, actor: &Actor, a: &TaskArgs) -> Result<Writte
     let mut warnings = Vec::new();
     let entries = write(store, |b| {
         let st = b.state()?;
-        let epic_id = st.find_epic(&a.epic)?;
+        let given = a.epic.as_deref().map(str::trim).filter(|e| !e.is_empty());
+        let feature = match a
+            .feature
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+        {
+            Some(f) => Some(crate::features::in_force(st, f)?),
+            None => None,
+        };
+        let feature_epic = feature
+            .as_deref()
+            .and_then(|f| st.get(f))
+            .and_then(|f| f.fields.get("epic"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let epic_id = match (given, &feature_epic) {
+            (Some(e), Some(fe)) => {
+                let id = st.find_epic(e)?;
+                if &id != fe {
+                    return refused(format!(
+                        "--epic {e} ({id}) is not the epic of {} ({fe}); leave --epic out or use the feature's",
+                        feature.as_deref().unwrap_or("?")
+                    ));
+                }
+                id
+            }
+            (Some(e), None) => st.find_epic(e)?,
+            (None, Some(fe)) => fe.clone(),
+            (None, None) => bail!("missing --epic <epic> (or --feature <U>)"),
+        };
         if st.status_of(&epic_id) != Some(Status::Active) {
             return refused(format!(
                 "the epic {epic_id} is not in force ({})",
@@ -734,7 +772,8 @@ pub fn task_add(store: &mut Store, actor: &Actor, a: &TaskArgs) -> Result<Writte
         }
         let epic = st.get(&epic_id).unwrap();
         let goals = if a.goals.is_empty() {
-            string_list(epic.fields.get("goals"))
+            let from = feature.as_deref().and_then(|f| st.get(f)).unwrap_or(epic);
+            string_list(from.fields.get("goals"))
         } else {
             resolve_goals(st, &a.goals)?
         };
@@ -762,6 +801,9 @@ pub fn task_add(store: &mut Store, actor: &Actor, a: &TaskArgs) -> Result<Writte
             "acceptance".into(),
             json!(a.acceptance.as_deref().unwrap_or("").trim()),
         );
+        if let Some(f) = &feature {
+            r.fields.insert("feature".into(), json!(f));
+        }
         r.refs = vec![epic_id];
         b.push(r)?;
         Ok(())
@@ -843,7 +885,16 @@ pub fn reopen(store: &mut Store, actor: &Actor, task: &str, why: &str) -> Result
     }
     write(store, |b| {
         let st = b.state()?;
-        let id = open_task(st, task)?;
+        let id = st.resolve(task)?;
+        if st.kind_of(&id) == Some("feature") {
+            crate::features::check_reopen(st, &id)?;
+            let mut r = raw("reopen", actor, &format!("Reopens {id}"));
+            r.why = why.trim().to_string();
+            r.refs = vec![id];
+            b.push(r)?;
+            return Ok(());
+        }
+        let id = open_task(st, &id)?;
         if st.task_status(&id) != Some(TaskStatus::Closed) {
             return refused(format!(
                 "{id} is not closed ({})",
@@ -1013,6 +1064,12 @@ pub fn stale_message(task: &str, stale: &[&Entry], now: &Frontier) -> String {
 /// task is open, that whoever closes it may close it, and that nothing touching
 /// it came in after the mark. Returns the full `id`.
 pub fn check_done(st: &State, actor: &Actor, a: &DoneArgs) -> Result<String> {
+    if st
+        .resolve(&a.task)
+        .is_ok_and(|id| st.kind_of(&id) == Some("feature"))
+    {
+        return crate::features::check_validate(st, actor, a);
+    }
     let id = open_task(st, &a.task)?;
     let info = st.task(&id).cloned().unwrap_or_default();
     if info.status == TaskStatus::Closed {
@@ -1066,8 +1123,14 @@ pub fn done(store: &mut Store, actor: &Actor, a: &DoneArgs) -> Result<Vec<Entry>
         return refused(format!("invalid evidence: {why}"));
     }
     write(store, |b| {
-        let id = check_done(b.state()?, actor, a)?;
-        let mut r = raw("done", actor, &format!("Closes {id}"));
+        let st = b.state()?;
+        let id = check_done(st, actor, a)?;
+        let verb = if st.kind_of(&id) == Some("feature") {
+            "Validates"
+        } else {
+            "Closes"
+        };
+        let mut r = raw("done", actor, &format!("{verb} {id}"));
         r.why = a.why.trim().to_string();
         r.refs = vec![id];
         r.fields
@@ -1096,13 +1159,34 @@ pub fn question_fields(
     st: &State,
     to: Option<&str>,
     task: Option<&str>,
+    feature: Option<&str>,
 ) -> Result<Map<String, Value>> {
     let mut f = Map::new();
     let mut epic_name_of_task = None;
+    let mut task_feature = None;
     if let Some(t) = task.map(str::trim).filter(|t| !t.is_empty()) {
         let id = open_task(st, t)?;
         epic_name_of_task = epic_of_task(st, &id).map(epic_name);
+        task_feature = st
+            .get(&id)
+            .and_then(crate::features::feature_of)
+            .map(str::to_string);
         f.insert("task".into(), json!(id));
+    }
+    // A question about a feature: its id, and its epic like a task's.
+    if let Some(u) = feature.map(str::trim).filter(|u| !u.is_empty()) {
+        let id = crate::features::resolve(st, u)?;
+        if let Some(tf) = &task_feature
+            && tf != &id
+        {
+            return refused(format!(
+                "--task hangs from {tf}, not from --feature {id}; leave one of them out"
+            ));
+        }
+        if epic_name_of_task.is_none() {
+            epic_name_of_task = st.get(&id).and_then(|x| st.epic_of(x)).map(epic_name);
+        }
+        f.insert("feature".into(), json!(id));
     }
     let to = match to.map(str::trim).filter(|t| !t.is_empty()) {
         Some(t) => t.to_string(),

@@ -39,6 +39,8 @@ pub const ENTITY_KINDS: &[(&str, &str)] = &[
     ("fact", "F"),
     ("task", "T"),
     ("journal", "J"),
+    // `F` is taken by fact: a feature is `U` (what the user sees).
+    ("feature", "U"),
 ];
 
 /// Records that act on another entry (`refs[0]`). All of them use the prefix `R`.
@@ -455,6 +457,7 @@ mod tests {
         assert_eq!(prefix_for("decision"), Some("D"));
         assert_eq!(prefix_for("charter"), Some("A"));
         assert_eq!(prefix_for("claim"), Some("R"));
+        assert_eq!(prefix_for("feature"), Some("U"));
         assert_eq!(prefix_for("nothing"), None);
         assert!(is_valid_id("D-a3b8ac"));
         assert!(!is_valid_id("D-0001"));

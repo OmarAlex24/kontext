@@ -13,6 +13,7 @@ pub mod cursor;
 pub mod distill;
 pub mod doctor;
 pub mod facts;
+pub mod features;
 pub mod find;
 pub mod git;
 pub mod hlc;

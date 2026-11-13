@@ -91,7 +91,7 @@ fn category_of(st: &State, e: &Entry, depth: usize) -> &'static str {
         "decision" | "proposal" | "accept" | "reject" => "decision",
         "question" | "answer" => "question",
         "fact" | "confirm" => "fact",
-        "epic" | "task" | "assign" | "claim" | "release" | "done" | "reopen" => "task",
+        "epic" | "feature" | "task" | "assign" | "claim" | "release" | "done" | "reopen" => "task",
         "journal" => "journal",
         "supersede" => match e.refs.first().and_then(|t| st.get(t)) {
             Some(t) if depth < 4 => category_of(st, t, depth + 1),
@@ -135,6 +135,7 @@ fn row_title(st: &State, e: &Entry) -> String {
         return match e.kind.as_str() {
             "goal" => format!("Meta: {t}"),
             "epic" => format!("Epic: {t}"),
+            "feature" => format!("Feature: {t}"),
             _ => t,
         };
     }
@@ -156,6 +157,9 @@ fn row_title(st: &State, e: &Entry) -> String {
         ),
         "claim" => format!("Claims {}", with_title(st, target)),
         "release" => format!("Releases {}", with_title(st, target)),
+        "done" if st.kind_of(target) == Some("feature") => {
+            format!("Validates {}", with_title(st, target))
+        }
         "done" => format!("Closes {}", with_title(st, target)),
         "reopen" => format!("Reopens {}", with_title(st, target)),
         "confirm" if st.kind_of(target) == Some("question") => {
