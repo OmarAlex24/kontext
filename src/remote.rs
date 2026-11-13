@@ -14,8 +14,11 @@
 //!   `--include-config`, as with git) and `media/` go the same way.
 //!
 //! The network never blocks or breaks a command: short timeouts, and after a
-//! failure no automatic attempt for 30 s; the error is kept in
-//! `.kontext/server.json` and `kontext status` shows it.
+//! failure no automatic attempt in that direction for 30 s; the error is kept
+//! in `.kontext/server.json` and `kontext status` shows it. Push and pull are
+//! independent: the push goes first, and a failed pull never skips or delays
+//! it. The automatic pull brings no media: a file comes down when a view
+//! needs it ([`ensure_media`]) or with `kontext sync`.
 //!
 //! §9.5: what a pull brings is only appended to the ledger files; it shows up
 //! through the existing views and the start hook, never by rewriting what a
@@ -230,12 +233,22 @@ pub struct State {
     pub last_error: Option<String>,
     #[serde(default)]
     pub last_error_at: Option<String>,
+    /// The last push's error, until a push works.
     #[serde(default)]
-    pub offline_until_ms: i64,
-    /// The last line the server refused (a fork, or a line this token may not
-    /// write). Cleared when a push of that writer goes through.
+    pub push_error: Option<String>,
+    /// The last pull's error, until a pull works.
     #[serde(default)]
-    pub refused: Option<Problem>,
+    pub pull_error: Option<String>,
+    /// No automatic push before this time (ms), after a failed one.
+    #[serde(default)]
+    pub push_offline_until_ms: i64,
+    /// No automatic pull before this time (ms), after a failed one.
+    #[serde(default)]
+    pub pull_offline_until_ms: i64,
+    /// The lines the server refused (a fork, or a line this token may not
+    /// write), one per writer. Cleared when a push of that writer goes through.
+    #[serde(default)]
+    pub refused: Vec<Problem>,
     /// Pulled lines that were not written (they do not continue the local chain).
     #[serde(default)]
     pub forks: Vec<Problem>,
@@ -269,17 +282,48 @@ impl State {
         )
     }
 
-    fn contacted(&mut self) {
-        self.last_contact = Some(now());
-        self.last_error = None;
-        self.last_error_at = None;
-        self.offline_until_ms = 0;
+    /// What a run did, direction by direction: a direction that failed is
+    /// not tried again automatically for 30 s, and its error stays until it
+    /// works again; one that worked is tried again at once.
+    fn record(&mut self, o: &Outcome) {
+        let until = now_ms() + OFFLINE_BACKOFF_MS;
+        if o.pushed {
+            self.push_offline_until_ms = if o.push_err.is_some() { until } else { 0 };
+            self.push_error = o.push_err.as_ref().map(|e| format!("{e:#}"));
+        }
+        if o.pulled {
+            self.pull_offline_until_ms = if o.pull_err.is_some() { until } else { 0 };
+            self.pull_error = o.pull_err.as_ref().map(|e| format!("{e:#}"));
+        }
+        if o.contacted {
+            self.last_contact = Some(now());
+        }
+        let errors: Vec<(&str, &String)> = [("push", &self.push_error), ("pull", &self.pull_error)]
+            .into_iter()
+            .filter_map(|(d, e)| e.as_ref().map(|e| (d, e)))
+            .collect();
+        let joined = match errors.as_slice() {
+            [] => None,
+            // Both failed the same way (the frontier, which both need).
+            [(_, a), (_, b)] if a == b => Some(a.to_string()),
+            _ => Some(
+                errors
+                    .iter()
+                    .map(|(d, e)| format!("{d}: {e}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ),
+        };
+        if joined != self.last_error {
+            self.last_error_at = joined.as_ref().map(|_| now());
+            self.last_error = joined;
+        }
     }
 
-    fn failed(&mut self, e: &anyhow::Error) {
-        self.last_error = Some(format!("{e:#}"));
-        self.last_error_at = Some(now());
-        self.offline_until_ms = now_ms() + OFFLINE_BACKOFF_MS;
+    /// Notes a refused line of a writer (one per writer).
+    fn refuse(&mut self, p: Problem) {
+        self.refused.retain(|x| x.writer != p.writer);
+        self.refused.push(p);
     }
 }
 
@@ -330,6 +374,9 @@ pub struct Options {
     pub pull: bool,
     pub push: bool,
     pub include_config: bool,
+    /// Bring the media the server has and this copy lacks. Not in the
+    /// automatic pull: a file comes down when a view needs it.
+    pub media: bool,
     /// Push every writer's file and every cursor file with the admin secret
     /// (`kontext server connect`).
     pub admin: Option<String>,
@@ -344,6 +391,7 @@ impl Options {
             pull: true,
             push: true,
             include_config: false,
+            media: false,
             admin: None,
         }
     }
@@ -356,6 +404,7 @@ impl Options {
             pull: true,
             push: true,
             include_config,
+            media: true,
             admin: None,
         }
     }
@@ -378,8 +427,11 @@ pub struct Report {
     pub config_in: Vec<String>,
     pub config_out: Vec<String>,
     pub warnings: Vec<String>,
-    /// A line the server refused in this run.
-    pub refused: Option<Problem>,
+    /// The lines the server refused in this run, one per writer: nothing
+    /// after each was pushed for that writer; the other writers went on.
+    pub refused: Vec<Problem>,
+    /// A direction (push or pull) that failed while the other worked.
+    pub errors: Vec<String>,
     /// Pulled lines not written in this run.
     pub forks: Vec<Problem>,
     /// Not everything fit in the time budget.
@@ -400,7 +452,7 @@ impl Report {
     }
 
     pub fn ok(&self) -> bool {
-        self.refused.is_none() && self.forks.is_empty()
+        self.refused.is_empty() && self.forks.is_empty() && self.errors.is_empty()
     }
 
     pub fn text(&self) -> String {
@@ -408,11 +460,15 @@ impl Report {
             "Server {} (project {}, writer {}).",
             self.url, self.project, self.writer
         )];
-        if let Some(r) = &self.refused {
+        for r in &self.refused {
             l.push(format!(
-                "REFUSED by the server: {r}. Nothing after it was pushed; the local ledger is unchanged."
+                "REFUSED by the server: {r}. Nothing after it from {} was pushed; the local ledger is unchanged.",
+                r.writer
             ));
             l.push(refused_hint(r));
+        }
+        for e in &self.errors {
+            l.push(format!("FAILED: {e}"));
         }
         for f in &self.forks {
             l.push(format!(
@@ -495,53 +551,89 @@ pub fn refused_hint(r: &Problem) -> String {
              or with a token for that role (`kontext token create`)."
                 .into()
         }
+        "too_large" => format!(
+            "The line is over the server's limit of 4 MiB per line, so it can never be pushed, and nothing \
+             after it from {} can either (this binary refuses such a line before writing it in a project \
+             with a server; this one was written before). Everything else was uploaded. Go on writing with \
+             another writer (a new token for this machine).",
+            r.writer
+        ),
         _ => "Run `kontext sync` again; if it repeats, check `kontext verify`.".into(),
     }
 }
 
-/// Syncs a kontext-home with its server: pull, then push. Network errors are
-/// returned (and kept for `kontext status`).
+/// What a run did: the report, and the error of each direction it tried.
+struct Outcome {
+    report: Report,
+    pushed: bool,
+    pulled: bool,
+    push_err: Option<anyhow::Error>,
+    pull_err: Option<anyhow::Error>,
+    /// The server answered at least once.
+    contacted: bool,
+}
+
+impl Outcome {
+    /// `Err` only if every direction it tried failed (the first error);
+    /// otherwise the report, with the direction that failed in `errors`.
+    fn into_result(mut self) -> Result<Report> {
+        let tried = [self.pushed, self.pulled].iter().filter(|x| **x).count();
+        let failed = [&self.push_err, &self.pull_err]
+            .iter()
+            .filter(|e| e.is_some())
+            .count();
+        if tried > 0 && failed == tried {
+            return Err(self.push_err.or(self.pull_err).unwrap());
+        }
+        for (d, e) in [("push", &self.push_err), ("pull", &self.pull_err)] {
+            if let Some(e) = e {
+                self.report.errors.push(format!("the {d} failed: {e:#}"));
+            }
+        }
+        Ok(self.report)
+    }
+}
+
+/// Syncs a kontext-home with its server: push, then pull, independently.
+/// `Err` if every direction it tried failed; the errors are kept for
+/// `kontext status`.
 pub fn sync(home: &Path, remote: &Remote, opts: &Options) -> Result<Report> {
     let _lock = sync_lock(home, true)?;
     let mut state = State::load(home, &remote.url);
-    let r = run(home, remote, opts, &mut state);
-    match &r {
-        Ok(_) => state.contacted(),
-        Err(e) => state.failed(e),
-    }
+    let o = run(home, remote, opts, &mut state);
+    state.record(&o);
     state.save(home)?;
-    r
+    o.into_result()
 }
 
-/// The automatic sync around a command: quiet, bounded, and skipped while the
-/// server was unreachable less than 30 s ago or another process of this copy
-/// is syncing. With `pull` false it only pushes, and only if there is
-/// something to push. Returns the report when it ran.
+/// The automatic sync around a command: quiet, bounded, and skipped while
+/// another process of this copy is syncing. Each direction is skipped for
+/// 30 s after it failed, on its own: a failed pull never holds back the push.
+/// With `pull` false it only pushes, and only if there is something to push.
+/// Returns the report when something ran and not all of it failed.
 pub fn auto(home: &Path, remote: &Remote, pull: bool) -> Option<Report> {
     let lock = sync_lock(home, false).ok()??;
     let mut state = State::load(home, &remote.url);
-    if state.offline_until_ms > now_ms() {
-        return None;
-    }
-    if !pull && !has_unpushed(home, remote, &state) {
+    let now = now_ms();
+    let push = state.push_offline_until_ms <= now && has_unpushed(home, remote, &state);
+    let pull = pull && state.pull_offline_until_ms <= now;
+    if !push && !pull {
         return None;
     }
     let mut opts = Options::auto();
+    opts.push = push;
     opts.pull = pull;
-    let r = run(home, remote, &opts, &mut state);
-    match &r {
-        Ok(_) => state.contacted(),
-        Err(e) => state.failed(e),
-    }
+    let o = run(home, remote, &opts, &mut state);
+    state.record(&o);
     let _ = state.save(home);
     drop(lock);
-    r.ok()
+    o.into_result().ok()
 }
 
 /// The warnings of an automatic sync, for stderr (never in the hook).
 pub fn auto_warnings(r: &Report) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(p) = &r.refused {
+    for p in &r.refused {
         out.push(format!("the server refused {p}. {}", refused_hint(p)));
     }
     for f in &r.forks {
@@ -564,29 +656,39 @@ fn has_unpushed(home: &Path, remote: &Remote, state: &State) -> bool {
     !own_cursors(home, w, state).is_empty()
 }
 
-fn run(home: &Path, remote: &Remote, opts: &Options, state: &mut State) -> Result<Report> {
+/// One run: the frontier (both directions need it), then the push, then the
+/// pull, each on its own: an error in one is recorded and the other goes on.
+fn run(home: &Path, remote: &Remote, opts: &Options, state: &mut State) -> Outcome {
     let started = Instant::now();
     let conn = Conn::of(remote, opts.timeout);
-    let admin = opts
-        .admin
-        .as_ref()
-        .map(|s| Conn::new(&remote.url, &remote.token.project, s, opts.timeout));
-    let mut report = Report {
-        url: remote.url.clone(),
-        project: remote.token.project.clone(),
-        writer: remote.token.writer.clone(),
-        ..Report::default()
+    let mut o = Outcome {
+        report: Report {
+            url: remote.url.clone(),
+            project: remote.token.project.clone(),
+            writer: remote.token.writer.clone(),
+            ..Report::default()
+        },
+        pushed: opts.push,
+        pulled: opts.pull,
+        push_err: None,
+        pull_err: None,
+        contacted: false,
     };
-    let out_of_time = |report: &mut Report| {
-        if started.elapsed() > opts.budget {
-            report.partial = true;
-            true
-        } else {
-            false
+    let f = match conn.get("frontier").and_then(|r| Conn::ok(r, "frontier")) {
+        Ok(f) => f,
+        Err(e) => {
+            if opts.push && opts.pull {
+                o.push_err = Some(anyhow::anyhow!("{e:#}"));
+            }
+            if opts.pull {
+                o.pull_err = Some(e);
+            } else {
+                o.push_err = Some(e);
+            }
+            return o;
         }
     };
-
-    let f = Conn::ok(conn.get("frontier")?, "frontier")?;
+    o.contacted = true;
     let server_tails: BTreeMap<String, (u64, String)> = f
         .get("tails")
         .and_then(Value::as_object)
@@ -607,7 +709,14 @@ fn run(home: &Path, remote: &Remote, opts: &Options, state: &mut State) -> Resul
     // The same length with a different last line is a fork that comparing
     // lengths alone would miss (another copy wrote as the same writer while
     // this one was offline). Nothing is written or pushed for that writer.
-    let diverged = diverged_writers(home, &server_tails)?;
+    let diverged = match diverged_writers(home, &server_tails) {
+        Ok(d) => d,
+        Err(e) => {
+            o.push_err = opts.push.then(|| anyhow::anyhow!("{e:#}"));
+            o.pull_err = opts.pull.then_some(e);
+            return o;
+        }
+    };
     for (w, n) in &diverged {
         let p = Problem {
             writer: w.clone(),
@@ -618,81 +727,137 @@ fn run(home: &Path, remote: &Remote, opts: &Options, state: &mut State) -> Resul
             at: now(),
         };
         if *w == remote.token.writer {
-            report.refused = Some(p.clone());
-            state.refused = Some(p);
+            o.report.refused.push(p.clone());
+            state.refuse(p);
         } else {
             state
                 .forks
                 .retain(|x| !(x.writer == p.writer && x.n == p.n));
             state.forks.push(p.clone());
-            report.forks.push(p);
+            o.report.forks.push(p);
         }
     }
 
+    if opts.push
+        && let Err(e) = push_all(home, remote, &conn, opts, state, &mut o.report, &started)
+    {
+        o.push_err = Some(e);
+    }
     if opts.pull {
-        let mut local = local_frontier(home)?;
-        let behind = tails
-            .iter()
-            .any(|(w, n)| *n > local.get(w).copied().unwrap_or(0));
-        if behind {
-            pull_lines(home, &conn, &mut local, state, &mut report, &out_of_time)?;
-        }
-        // A fork noted earlier whose writer now matches the server is gone.
-        let now_local = local_frontier(home)?;
-        state.forks.retain(|p| {
-            report.forks.contains(p)
-                || diverged.contains_key(&p.writer)
-                || now_local.get(&p.writer).copied().unwrap_or(0)
-                    < tails.get(&p.writer).copied().unwrap_or(0)
-        });
-        if seq != state.seq {
-            pull_cursors(home, &conn, remote, state, &mut report)?;
-            pull_config(home, &conn, f.get("config"), state, &mut report)?;
-            pull_media(home, &conn, state, &mut report, &started, opts)?;
-        }
-    }
-
-    if opts.push {
-        // Own lines (with the admin secret, every writer's).
-        let writers: Vec<String> = match &admin {
-            Some(_) => ledger_files(&home.join("ledger"))?
-                .into_iter()
-                .map(|(w, _)| w)
-                .collect(),
-            None => vec![remote.token.writer.clone()],
-        };
-        for w in writers {
-            if out_of_time(&mut report) {
-                break;
-            }
-            let c = admin.as_ref().unwrap_or(&conn);
-            if let Some(p) = push_lines(home, c, &w, state, &mut report)? {
-                report.refused = Some(p.clone());
-                state.refused = Some(p);
-                break;
-            }
-        }
-        push_cursors(
+        match pull_all(
             home,
-            admin.as_ref().unwrap_or(&conn),
             remote,
+            &conn,
+            opts,
             state,
-            &mut report,
-            admin.is_some(),
-        )?;
-        push_media(home, &conn, state, &mut report, &started, opts)?;
-        push_config(
-            home,
-            admin.as_ref().unwrap_or(&conn),
-            opts.include_config,
-            state,
-            &mut report,
-        )?;
+            &mut o.report,
+            &started,
+            &f,
+            &diverged,
+        ) {
+            Ok(()) => {
+                if !o.report.partial {
+                    state.seq = seq;
+                }
+            }
+            Err(e) => o.pull_err = Some(e),
+        }
     }
-    if opts.pull && !report.partial {
-        state.seq = seq;
+    o
+}
+
+/// Stop starting new requests: the run is over its budget.
+fn out_of_time(report: &mut Report, started: &Instant, opts: &Options) -> bool {
+    if started.elapsed() > opts.budget {
+        report.partial = true;
+        true
+    } else {
+        false
     }
-    Ok(report)
+}
+
+/// Own lines (with the admin secret, every writer's, going on past a writer
+/// the server refuses), cursor files, media and config.
+fn push_all(
+    home: &Path,
+    remote: &Remote,
+    conn: &Conn,
+    opts: &Options,
+    state: &mut State,
+    report: &mut Report,
+    started: &Instant,
+) -> Result<()> {
+    let admin = opts
+        .admin
+        .as_ref()
+        .map(|s| Conn::new(&remote.url, &remote.token.project, s, opts.timeout));
+    let writers: Vec<String> = match &admin {
+        Some(_) => ledger_files(&home.join("ledger"))?
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect(),
+        None => vec![remote.token.writer.clone()],
+    };
+    let c = admin.as_ref().unwrap_or(conn);
+    for w in writers {
+        if out_of_time(report, started, opts) {
+            break;
+        }
+        if let Some(p) = push_lines(home, c, &w, state, report, admin.is_some())? {
+            report.refused.push(p.clone());
+            state.refuse(p);
+        }
+    }
+    push_cursors(home, c, remote, state, report, admin.is_some())?;
+    push_media(home, conn, state, report, started, opts)?;
+    push_config(home, c, opts.include_config, state, report)?;
+    Ok(())
+}
+
+/// What the server has that this copy lacks: lines, cursor files, config and
+/// (only with `opts.media`) media.
+#[allow(clippy::too_many_arguments)]
+fn pull_all(
+    home: &Path,
+    remote: &Remote,
+    conn: &Conn,
+    opts: &Options,
+    state: &mut State,
+    report: &mut Report,
+    started: &Instant,
+    f: &Value,
+    diverged: &BTreeMap<String, u64>,
+) -> Result<()> {
+    let tails = state.server_tails.clone();
+    let seq = f.get("seq").and_then(Value::as_u64).unwrap_or(0);
+    let mut local = local_frontier(home)?;
+    let behind = tails
+        .iter()
+        .any(|(w, n)| *n > local.get(w).copied().unwrap_or(0));
+    if behind {
+        pull_lines(home, conn, &mut local, state, report, &|r: &mut Report| {
+            out_of_time(r, started, opts)
+        })?;
+    }
+    // A fork noted earlier whose writer now matches the server is gone.
+    let now_local = local_frontier(home)?;
+    let forks_now = report.forks.clone();
+    state.forks.retain(|p| {
+        forks_now.contains(p)
+            || diverged.contains_key(&p.writer)
+            || now_local.get(&p.writer).copied().unwrap_or(0)
+                < tails.get(&p.writer).copied().unwrap_or(0)
+    });
+    if seq != state.seq {
+        pull_cursors(home, conn, remote, state, report)?;
+        pull_config(home, conn, f.get("config"), state, report)?;
+    }
+    // Media go by their own mark (`media_seq`), not by `seq`: the automatic
+    // pull moves `seq` without bringing them, and `kontext sync` still must.
+    if opts.media {
+        pull_media(home, conn, state, report, started, opts)?;
+    }
+    Ok(())
 }
 
 /// The writers whose local file ends at the same `n` as the server's but with
@@ -906,13 +1071,16 @@ pub fn apply_lines(
     Ok((written, forks))
 }
 
-/// Pushes one writer's lines the server lacks. `Some` if the server refused one.
+/// Pushes one writer's lines the server lacks. `Some` if the server refused
+/// one, or (with `each_writer`, `kontext server connect`, which goes on with
+/// the other writers) answered an error for this writer's lines.
 fn push_lines(
     home: &Path,
     conn: &Conn,
     writer: &str,
     state: &mut State,
     report: &mut Report,
+    each_writer: bool,
 ) -> Result<Option<Problem>> {
     let path = home.join("ledger").join(format!("{writer}.jsonl"));
     let local_n = read_tail(&path).map(|t| t.0).unwrap_or(0);
@@ -970,20 +1138,28 @@ fn push_lines(
             }));
         }
         if !r.ok() {
-            bail!(
-                "push: the server answered {}: {}",
+            let message = format!(
+                "the server answered {}: {}",
                 r.status,
                 v.get("message").and_then(Value::as_str).unwrap_or("")
             );
+            if each_writer {
+                return Ok(Some(Problem {
+                    writer: writer.to_string(),
+                    n: None,
+                    reason: "error".into(),
+                    message,
+                    at: now(),
+                }));
+            }
+            bail!("push: {message}");
         }
         if tail <= from {
             break;
         }
         from = tail;
     }
-    if state.refused.as_ref().is_some_and(|p| p.writer == writer) {
-        state.refused = None;
-    }
+    state.refused.retain(|p| p.writer != writer);
     Ok(None)
 }
 
@@ -1428,6 +1604,94 @@ pub fn watch(remote: &Remote, mut on_frontier: impl FnMut(&Value) -> bool) -> Re
     }
 }
 
+/// The registered project whose kontext-home is `home`, if any.
+pub fn project_for_home(home: &Path) -> Option<(Machine, String)> {
+    let machine = Machine::load().ok()?;
+    let want = fs::canonicalize(home).ok()?;
+    let name = machine
+        .projects
+        .keys()
+        .find(|name| {
+            machine
+                .project_home(name)
+                .ok()
+                .and_then(|h| fs::canonicalize(h).ok())
+                .is_some_and(|h| h == want)
+        })?
+        .clone();
+    Some((machine, name))
+}
+
+/// The server of the project registered with `home`, if it has one.
+pub fn server_for_home(home: &Path) -> Option<String> {
+    let (machine, name) = project_for_home(home)?;
+    machine.server_for(&name)
+}
+
+/// The server and token of the project registered with `home`, if it has both.
+pub fn remote_for_home(home: &Path) -> Option<Remote> {
+    let (_, name) = project_for_home(home)?;
+    Link::of(&name).ok()?.remote()
+}
+
+/// Brings the media files in `names` (`<sha256>.<ext>`) that this copy lacks
+/// from the project's server, for a view that needs them: the automatic pull
+/// brings none. Bounded (10 s a file, 30 s in all), and skipped while the
+/// pull is backing off after a failure; it stops at the first network error.
+/// Without a server, or with every file here, it does nothing. Returns the
+/// warnings.
+pub fn ensure_media<I: IntoIterator<Item = String>>(home: &Path, names: I) -> Vec<String> {
+    let mut missing: Vec<String> = names
+        .into_iter()
+        .filter(|n| media::valid_media_name(n).is_some() && !home.join("media").join(n).exists())
+        .collect();
+    missing.sort();
+    missing.dedup();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let Some(remote) = remote_for_home(home) else {
+        return Vec::new();
+    };
+    if State::load(home, &remote.url).pull_offline_until_ms > now_ms() {
+        return Vec::new();
+    }
+    let conn = Conn::of(&remote, Duration::from_secs(10));
+    let started = Instant::now();
+    let mut warnings = Vec::new();
+    for name in missing {
+        if started.elapsed() > Duration::from_secs(30) {
+            warnings.push(
+                "not every media file came from the server in time: `kontext sync` brings them"
+                    .into(),
+            );
+            break;
+        }
+        let r = match conn.get(&format!("media/{name}")) {
+            Ok(r) => r,
+            Err(e) => {
+                warnings.push(format!(
+                    "could not bring media/{name} from the server: {e:#}"
+                ));
+                break;
+            }
+        };
+        let sha = media::valid_media_name(&name)
+            .map(|(s, _)| s.to_string())
+            .unwrap_or_default();
+        if !r.ok() || sha256_hex(&r.body) != sha {
+            warnings.push(format!("the server has no media/{name} ({})", r.status));
+            continue;
+        }
+        let path = home.join("media").join(&name);
+        if fs::create_dir_all(home.join("media")).is_ok() && write_atomic(&path, &r.body).is_ok() {
+            continue;
+        }
+        warnings.push(format!("could not save media/{name}"));
+    }
+    warnings
+}
+
 /// For `kontext status`: the server, without the network.
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
@@ -1440,7 +1704,7 @@ pub struct Status {
     pub last_error_at: Option<String>,
     /// Own entries the server does not have, as last seen.
     pub unpushed: Option<u64>,
-    pub refused: Option<Problem>,
+    pub refused: Vec<Problem>,
     pub forks: Vec<Problem>,
 }
 
@@ -1501,7 +1765,7 @@ impl Status {
                 "Own entries not pushed: {u} (as last seen; `kontext sync` pushes them)"
             ));
         }
-        if let Some(r) = &self.refused {
+        for r in &self.refused {
             l.push(format!("REFUSED by the server: {r}"));
             l.push(format!("  {}", refused_hint(r)));
         }

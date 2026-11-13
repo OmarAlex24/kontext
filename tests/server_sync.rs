@@ -768,6 +768,282 @@ fn an_old_binary_reads_a_synced_copy() {
     assert!(out.contains("Chains: OK"), "{out}");
 }
 
+/// A proxy in front of the local server that stalls every media download
+/// (`GET …/media/<name>`) for `stall`: a large file on a slow link.
+fn slow_media_proxy(upstream: &str, stall: Duration) -> String {
+    stalling_proxy(upstream, stall, |req| {
+        req.starts_with("GET ") && req.contains("/media/")
+    })
+}
+
+/// A proxy in front of the local server that stalls the requests whose first
+/// line `slow` picks. One request per connection (it answers with
+/// `Connection: close`).
+fn stalling_proxy(upstream: &str, stall: Duration, slow: fn(&str) -> bool) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = format!("http://{}", listener.local_addr().unwrap());
+    let up = upstream.trim_start_matches("http://").to_string();
+    std::thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let up = up.clone();
+            std::thread::spawn(move || {
+                let mut client = client;
+                let mut r = BufReader::new(client.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut l = String::new();
+                    if r.read_line(&mut l).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let end = l == "\r\n";
+                    head.push_str(&l);
+                    if end {
+                        break;
+                    }
+                }
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse().ok())?
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; len];
+                r.read_exact(&mut body).unwrap();
+                let first = head.lines().next().unwrap_or("").to_string();
+                if slow(&first) {
+                    std::thread::sleep(stall);
+                }
+                // Forwarded with the same client the binary uses, so the
+                // answer's framing is read right whatever workerd does.
+                let mut parts = first.split(' ');
+                let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let headers: Vec<(String, String)> = head
+                    .lines()
+                    .skip(1)
+                    .filter_map(|l| l.split_once(':'))
+                    .filter(|(k, _)| {
+                        k.eq_ignore_ascii_case("authorization")
+                            || k.eq_ignore_ascii_case("content-type")
+                    })
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                    .collect();
+                let h: Vec<(&str, &str)> = headers
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let body = (method != "GET").then_some(body.as_slice());
+                let Ok(r) = Http::new(Duration::from_secs(30)).request(
+                    method,
+                    &format!("http://{up}{path}"),
+                    &h,
+                    body,
+                ) else {
+                    return;
+                };
+                let mut answer = format!(
+                    "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    r.status,
+                    r.body.len()
+                )
+                .into_bytes();
+                answer.extend_from_slice(&r.body);
+                let _ = client.write_all(&answer);
+            });
+        }
+    });
+    addr
+}
+
+/// The reviewer's sequence: a media file that cannot come down within the
+/// automatic pull's 2.5 s (a slow link) made that pull fail before the push
+/// and put both on a 30 s backoff, so B's own writes stopped going up. Now
+/// the push goes first and on its own, the automatic pull brings no media,
+/// and the file comes down when a view needs it.
+#[test]
+fn a_slow_media_download_never_holds_back_the_push() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    let b = net.machine("b", "ana@b", "ana");
+    net.start(&a, &["omar", "ana"]);
+    let proxy = slow_media_proxy(net.url(), Duration::from_secs(4));
+    let token = net.token(&a, "ana", "owner", "ana@b");
+    let out = b.ok_env(
+        &[("KONTEXT_TOKEN", &token)],
+        &[
+            "clone",
+            "--server",
+            &proxy,
+            "demo",
+            "--home",
+            b.home.to_str().unwrap(),
+        ],
+    );
+    assert!(out.contains("Project demo cloned"), "{out}");
+
+    a.ok(&[
+        "decide",
+        "The screen follows the mockup",
+        "--attach",
+        capture("payment-v2.png").to_str().unwrap(),
+    ]);
+    // B's commands: each pulls A's decision first (with its picture cited)
+    // and pushes what it wrote.
+    let t = Instant::now();
+    b.ok(&["log", "first from B"]);
+    b.ok(&["log", "second from B"]);
+    assert!(
+        t.elapsed() < Duration::from_secs(12),
+        "B's commands waited on the media: {:?}",
+        t.elapsed()
+    );
+    assert_eq!(
+        b.server_tail(&net),
+        b.lines("ana@b").len() as u64,
+        "B's lines did not go up: {}",
+        b.ok(&["status"])
+    );
+    assert!(
+        b.lines("omar@a")
+            .iter()
+            .any(|l| l.contains("The screen follows"))
+    );
+    // The automatic pull brought no media.
+    assert!(files_in_or_empty(&b.home.join("media")).is_empty());
+    let status = b.ok(&["status"]);
+    assert!(!status.contains("Last error"), "{status}");
+    // A view that needs the file brings it (through the slow link, on demand).
+    let out = b.ok(&["verify"]);
+    assert!(out.contains("OK"), "{out}");
+    assert_eq!(
+        files_in(&b.home.join("media")),
+        files_in(&a.home.join("media"))
+    );
+}
+
+/// When the pull fails (here it never answers in time) the push still goes,
+/// on that command and the next ones, and only the pull backs off.
+#[test]
+fn a_failed_pull_never_holds_back_the_push() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    let b = net.machine("b", "ana@b", "ana");
+    net.start(&a, &["omar", "ana"]);
+    let proxy = stalling_proxy(net.url(), Duration::from_secs(4), |req| {
+        req.starts_with("POST ") && req.contains("/pull ")
+    });
+    let token = net.token(&a, "ana", "owner", "ana@b");
+    b.ok_env(
+        &[("KONTEXT_TOKEN", &token)],
+        &[
+            "clone",
+            "--server",
+            net.url(),
+            "demo",
+            "--home",
+            b.home.to_str().unwrap(),
+        ],
+    );
+    let projects = b.config.join("projects.toml");
+    let t = fs::read_to_string(&projects).unwrap();
+    fs::write(&projects, t.replace(net.url(), &proxy)).unwrap();
+    a.ok(&["log", "from A"]);
+    let t = Instant::now();
+    b.ok(&["log", "first from B"]);
+    b.ok(&["log", "second from B"]);
+    assert!(t.elapsed() < Duration::from_secs(12), "{:?}", t.elapsed());
+    assert_eq!(
+        b.server_tail(&net),
+        b.lines("ana@b").len() as u64,
+        "B's lines did not go up: {}",
+        b.ok(&["status"])
+    );
+    let status = b.ok(&["status"]);
+    assert!(
+        status.contains("Last error") && status.contains("pull"),
+        "{status}"
+    );
+}
+
+fn files_in_or_empty(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    if dir.is_dir() {
+        files_in(dir)
+    } else {
+        BTreeMap::new()
+    }
+}
+
+/// `server connect` goes on past a writer the server refuses (a line over the
+/// cap, written before the project had a server, where nothing limits it),
+/// uploads every other writer, says which one was left out and why, and
+/// exits non-zero.
+#[test]
+fn connect_goes_on_past_a_refused_writer() {
+    let Some(net) = Net::new() else { return };
+    let a = net.machine("a", "omar@a", "omar");
+    let out = a.ok(&["init", "demo", "--home", a.home.to_str().unwrap()]);
+    assert!(out.contains("Project demo created"), "{out}");
+    set_owners(&a.home, &["omar"]);
+    // A writer that sorts first, with one line over 4 MiB (no server yet: no
+    // limit), and the machine's own writer after it.
+    let big = a.config.parent().unwrap().join("config-big");
+    fs::create_dir_all(&big).unwrap();
+    fs::write(
+        big.join("projects.toml"),
+        format!(
+            "writer = \"aaa@big\"\n\n[projects.demo]\nhome = \"{}\"\n",
+            a.home.display()
+        ),
+    )
+    .unwrap();
+    let mut c = a.cmd(&["debug", "append"]);
+    c.env("KONTEXT_CONFIG_DIR", &big)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    let line = json!({ "kind": "journal", "title": "huge", "body": "y".repeat(5 * 1024 * 1024) });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{line}\n").as_bytes())
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    a.ok(&["log", "own 1"]);
+    a.ok(&["log", "own 2"]);
+
+    let out = a.run(
+        &[("KONTEXT_ADMIN_SECRET", ADMIN)],
+        &["server", "connect", net.url()],
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{text}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("REFUSED by the server: aaa@big"), "{text}");
+    assert!(text.contains("too_large"), "{text}");
+    assert!(text.contains("omar@a: 2"), "{text}");
+    assert!(
+        !text.contains("every command now syncs with it (`kontext status`"),
+        "{text}"
+    );
+    let f = frontier(&net, &a.token());
+    assert_eq!(f["tails"]["omar@a"]["n"], 2, "{f}");
+    assert!(f["tails"].get("aaa@big").is_none(), "{f}");
+    // The status says what was left out.
+    let status = a.ok(&["status"]);
+    assert!(
+        status.contains("REFUSED by the server: aaa@big"),
+        "{status}"
+    );
+}
+
 /// `status --json` of a project without a server has no `server` key, as
 /// before servers existed.
 #[test]

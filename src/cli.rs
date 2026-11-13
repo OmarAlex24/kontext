@@ -1828,10 +1828,18 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 print_json(&r)?;
             } else {
                 print!("{}", r.text());
-                println!(
-                    "Project {} is on {}: every command now syncs with it (`kontext status` shows how).",
-                    p.name, r.url
-                );
+                if r.ok() {
+                    println!(
+                        "Project {} is on {}: every command now syncs with it (`kontext status` shows how).",
+                        p.name, r.url
+                    );
+                } else {
+                    println!(
+                        "Project {} is on {}, but not everything went up (see above). Every command now \
+                         syncs with it; `kontext server connect {}` again uploads what can go.",
+                        p.name, r.url, r.url
+                    );
+                }
             }
             Ok(if r.ok() {
                 ExitCode::SUCCESS

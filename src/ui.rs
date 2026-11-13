@@ -1292,6 +1292,13 @@ impl Server {
                 let name = percent_decode(&p["/media/".len()..]);
                 match crate::media::valid_media_name(&name) {
                     Some((_, ext)) if ext != "html" => {
+                        // With a kontext server, a file this copy lacks comes
+                        // down when the page asks for it.
+                        if self.src.server.is_some() {
+                            for w in crate::remote::ensure_media(&self.src.home, [name.clone()]) {
+                                eprintln!("kontext ui: warning: {w}");
+                            }
+                        }
                         match std::fs::read(self.src.home.join("media").join(&name)) {
                             Ok(body) => Response {
                                 status: 200,
