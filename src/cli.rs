@@ -290,11 +290,19 @@ pub enum Cmd {
         /// Git remote for the kontext-home
         #[arg(long)]
         remote: Option<String>,
+        /// Also creates the project on this kontext server (needs its admin secret: the machine that
+        /// ran `kontext server deploy`, or KONTEXT_ADMIN_SECRET) and syncs with it from now on
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
     },
-    /// Brings in an existing kontext-home with git, registers it and builds the index
+    /// Brings in an existing kontext-home with git (or from a kontext server with --server),
+    /// registers it and builds the index
     Clone {
-        /// Git URL of the kontext-home
+        /// Git URL of the kontext-home; with --server, the project's name on the server
         url: String,
+        /// The kontext server to bring the project from, with the token in KONTEXT_TOKEN
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
         /// Where to put it (default: ~/kontext-home/<repo name>)
         #[arg(long)]
         home: Option<PathBuf>,
@@ -302,7 +310,8 @@ pub enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Uploads what's ours (ledger and cursors) and brings in everyone else's: commit, pull --rebase and push of the kontext-home
+    /// Uploads what's ours (ledger and cursors) and brings in everyone else's: with a kontext
+    /// server, push and pull through it; otherwise commit, pull --rebase and push of the kontext-home
     Sync {
         /// Also uploads the changes to project.toml and synonyms.toml
         #[arg(long)]
@@ -775,6 +784,13 @@ pub enum ServerCmd {
         #[arg(long)]
         replace: bool,
     },
+    /// Attaches this project (with all its history) to a kontext server and uploads everything:
+    /// every writer's lines, the cursors, project.toml, synonyms.toml and media. Needs the admin
+    /// secret. Running it again resumes; afterwards every command syncs with the server
+    Connect {
+        /// The server's URL (what `kontext server deploy` printed)
+        url: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1041,7 +1057,49 @@ fn signer(forced: bool) -> Result<Option<crate::sign::Signer>> {
     Ok(key.map(|key| crate::sign::Signer { key }))
 }
 
+/// Runs a command. With a kontext server, an ordinary command pulls first and
+/// pushes what it wrote afterwards (DESIGN §14.1), quietly and with short
+/// timeouts: the network never blocks or breaks it.
 pub fn run(cli: Cli) -> Result<ExitCode> {
+    let auto = auto_sync_target(&cli);
+    let warn = |r: Option<crate::remote::Report>| {
+        for w in r.iter().flat_map(crate::remote::auto_warnings) {
+            eprintln!("kontext: warning: {w}");
+        }
+    };
+    if let Some((home, remote)) = &auto {
+        warn(crate::remote::auto(home, remote, true));
+    }
+    let res = run_cmd(cli);
+    if let Some((home, remote)) = &auto {
+        warn(crate::remote::auto(home, remote, false));
+    }
+    res
+}
+
+/// The kontext-home and server to sync around this command, if it has one.
+fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
+    // These sync on their own, need no project, or never return (`ui`).
+    match &cli.cmd {
+        Cmd::Doctor
+        | Cmd::Measure { .. }
+        | Cmd::Hook { .. }
+        | Cmd::Init { .. }
+        | Cmd::Clone { .. }
+        | Cmd::Sync { .. }
+        | Cmd::Server { .. }
+        | Cmd::Ui { .. } => return None,
+        Cmd::Install {
+            skills_only: true, ..
+        } => return None,
+        _ => {}
+    }
+    let p = config::resolve_project(cli.project.as_deref()).ok()?;
+    let remote = crate::remote::Link::of(&p.name).ok()?.remote()?;
+    Some((p.home, remote))
+}
+
+fn run_cmd(cli: Cli) -> Result<ExitCode> {
     let project = cli.project.as_deref();
     let cx = Ctx {
         project,
@@ -1535,8 +1593,42 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             },
             cx.role.unwrap_or("pm"),
         ),
-        Cmd::Init { name, home, remote } => init(&name, home, remote.as_deref()),
-        Cmd::Clone { url, home, name } => {
+        Cmd::Init {
+            name,
+            home,
+            remote,
+            server,
+        } => init(&name, home, remote.as_deref(), server.as_deref()),
+        Cmd::Clone {
+            url,
+            server: Some(server),
+            home,
+            name,
+        } => {
+            let (c, r) = crate::remote::clone(crate::remote::CloneArgs {
+                url: server,
+                project: url,
+                home,
+                name,
+            })?;
+            if cx.json {
+                print_json(&json!({ "clone": c, "sync": r }))?;
+            } else {
+                print!("{}", c.text());
+                print!("{}", r.text());
+            }
+            Ok(if r.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Cmd::Clone {
+            url,
+            server: None,
+            home,
+            name,
+        } => {
             let c = crate::sync::clone(&url, home, name.as_deref())?;
             if cx.json {
                 print_json(&c)?;
@@ -1546,6 +1638,58 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Sync { include_config } => {
+            let p = config::resolve_project(project)?;
+            match crate::remote::Link::of(&p.name)? {
+                crate::remote::Link::None => {}
+                crate::remote::Link::NoToken(url) => bail!(
+                    "project {} syncs with {url}, and this machine has no token for it: set KONTEXT_TOKEN \
+                     or save it in {}",
+                    p.name,
+                    config::Token::path(&p.name)?.display()
+                ),
+                crate::remote::Link::Ready(remote) => {
+                    let mut store = Store::open(&p.home, &p.writer)?;
+                    let before = store.state()?;
+                    let r = crate::remote::sync(
+                        &p.home,
+                        &remote,
+                        &crate::remote::Options::full(include_config),
+                    )?;
+                    let after = store.state()?;
+                    let new_alerts: Vec<_> = after
+                        .alerts
+                        .iter()
+                        .filter(|a| !before.alerts.contains(a))
+                        .collect();
+                    let v = verify::run(&p.home)?;
+                    if cx.json {
+                        print_json(&json!({
+                            "sync": r,
+                            "new_alerts": new_alerts,
+                            "problems": v.problems.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        }))?;
+                    } else {
+                        print!("{}", r.text());
+                        if !new_alerts.is_empty() {
+                            println!("New alerts ({}):", new_alerts.len());
+                            for a in &new_alerts {
+                                println!("  - {a}");
+                            }
+                        }
+                        if !v.problems.is_empty() {
+                            println!("The chains have problems (`kontext verify`):");
+                            for pr in &v.problems {
+                                println!("  - {pr}");
+                            }
+                        }
+                    }
+                    return Ok(if r.ok() && v.problems.is_empty() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    });
+                }
+            }
             let (mut store, _) = cx.open()?;
             let r = crate::sync::sync(&mut store, include_config)?;
             if cx.json {
@@ -1574,11 +1718,13 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 Some(r) => r,
                 None => crate::ui::default_viewer(cx.actor, &proj, &p.home),
             };
+            let server = crate::remote::Link::of(&p.name)?.remote();
             let src = crate::ui::Source {
                 home: p.home,
                 writer: p.writer,
                 you,
                 cwd: std::env::current_dir().ok(),
+                server,
             };
             crate::ui::serve(src, &crate::ui::Options { host, port, open })?;
             Ok(ExitCode::SUCCESS)
@@ -1672,6 +1818,26 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 );
             }
             Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Server {
+            cmd: ServerCmd::Connect { url },
+        } => {
+            let p = config::resolve_project(project)?;
+            let r = crate::remote::connect(&p.name, &p.home, &p.writer, &url)?;
+            if cx.json {
+                print_json(&r)?;
+            } else {
+                print!("{}", r.text());
+                println!(
+                    "Project {} is on {}: every command now syncs with it (`kontext status` shows how).",
+                    p.name, r.url
+                );
+            }
+            Ok(if r.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
         Cmd::Server {
             cmd:
@@ -2750,7 +2916,12 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn init(name: &str, home: Option<PathBuf>, remote: Option<&str>) -> Result<ExitCode> {
+fn init(
+    name: &str,
+    home: Option<PathBuf>,
+    remote: Option<&str>,
+    server: Option<&str>,
+) -> Result<ExitCode> {
     if !valid_name(name) {
         bail!("invalid name {name:?}: use letters, digits, - _ and .");
     }
@@ -2774,6 +2945,21 @@ fn init(name: &str, home: Option<PathBuf>, remote: Option<&str>) -> Result<ExitC
     if home.exists() && fs::read_dir(&home)?.next().is_some() {
         bail!("{} already exists and is not empty", home.display());
     }
+    // The project on the server first: if that fails, nothing local is made.
+    let server = server.map(crate::server::normalize_url);
+    let token = match &server {
+        Some(url) => {
+            let admin = crate::remote::require_admin(url)?;
+            match crate::remote::create_project(url, &admin, name, &config::human_name(), &writer)?
+            {
+                Some(t) => Some(t),
+                None => bail!(
+                    "project {name} already exists on {url}: bring it with `kontext clone --server {url} {name}`"
+                ),
+            }
+        }
+        None => None,
+    };
     for d in ["ledger", "cursors"] {
         fs::create_dir_all(home.join(d))?;
         fs::write(home.join(d).join(".gitkeep"), "")?;
@@ -2795,6 +2981,23 @@ fn init(name: &str, home: Option<PathBuf>, remote: Option<&str>) -> Result<ExitC
     Store::open(&home, &writer)?;
     println!("Project {name} created in {}", home.display());
     println!("Writer of this machine: {writer}");
+    if let (Some(url), Some(token)) = (server, token) {
+        let saved = token.save(name)?;
+        Machine::set_server(name, Some(&url))?;
+        let remote = crate::remote::Remote {
+            url: url.clone(),
+            token,
+        };
+        let r = crate::remote::sync(&home, &remote, &crate::remote::Options::full(true))?;
+        println!(
+            "Server: {url} (the token is in {}, mode 0600; keep it out of every repo). Every command \
+             syncs with it.",
+            saved.display()
+        );
+        for w in &r.warnings {
+            println!("Warning: {w}");
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 

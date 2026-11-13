@@ -659,7 +659,23 @@ export class Project extends DurableObject {
     return json({ name, stored: true }, 201);
   }
 
-  async tokens(_req, _p, _parts, _project) {
-    throw new HttpError(404, "not_found", "token management is not in this server version");
+  /// `POST tokens` {person, role, epic?, writer}: a token for another writer,
+  /// from an owner token or the admin.
+  async tokens(req, p, parts, project) {
+    if (parts.length === 1 && req.method === "POST") {
+      if (!p.admin && p.role !== "owner") throw new HttpError(403, "forbidden", "only an owner makes tokens");
+      const body = await readJson(req, 4096);
+      const role = String(body.role || "");
+      const person = String(body.person || "").trim();
+      const writer = String(body.writer || "").trim();
+      const epic = body.epic == null ? null : String(body.epic).trim() || null;
+      if (!ROLES.includes(role)) throw new HttpError(400, "bad_role", `role is one of ${ROLES.join(", ")}`);
+      if (!person) throw new HttpError(400, "bad_person", "person is required");
+      if (!WRITER_RE.test(writer)) throw new HttpError(400, "bad_writer", `invalid writer ${JSON.stringify(writer)}`);
+      const spec = this.insertToken({ person, role, epic, writer, expires: null, createdBy: p.admin ? "admin" : p.id });
+      const t = await this.storeToken(spec, project);
+      return json({ project, ...t }, 201);
+    }
+    throw new HttpError(404, "not_found", "no such token route");
   }
 }

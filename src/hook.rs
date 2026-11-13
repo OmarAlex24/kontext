@@ -349,6 +349,18 @@ fn run_inner(
             note.push_str(": unknown event, nothing to do");
             return Ok(note);
         }
+        // With a kontext server: what others wrote comes in before the context
+        // is built (bounded; offline it is skipped and the local copy is used).
+        if let Ok(crate::remote::Link::Ready(remote)) = crate::remote::Link::of(&resolved.name) {
+            match crate::remote::auto(&home, &remote, true) {
+                Some(r) => note.push_str(&format!(
+                    " server: received={} pushed={}",
+                    r.received_total(),
+                    r.pushed_total()
+                )),
+                None => note.push_str(" server: skipped"),
+            }
+        }
         let project = Project::load(&home)?;
         let mut store = Store::open(&home, &resolved.writer)?;
         let role = role_for(&dir);

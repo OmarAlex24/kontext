@@ -215,11 +215,21 @@
           last = key;
           draw(t);
         }
-        live("Updated " + new Date().toLocaleTimeString() + " · reads again every 5 seconds", false);
+        live("Updated " + new Date().toLocaleTimeString() + (streaming ? " · live" : " · reads again every 5 seconds"), false);
       })
       .catch(function (e) {
         live("Could not read the ledger (" + e.message + "). Trying again in 5 seconds.", true);
       });
+  }
+
+  // Live: kontext ui says when the files change (and, with a server, when
+  // another machine writes); the poll stays as the fallback.
+  var streaming = false;
+  if (window.EventSource) {
+    var events = new EventSource("/api/events");
+    events.addEventListener("open", function () { streaming = true; });
+    events.addEventListener("error", function () { streaming = false; });
+    events.addEventListener("change", load);
   }
 
   load();

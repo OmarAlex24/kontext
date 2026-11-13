@@ -388,7 +388,7 @@
       .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.text(); })
       .then(function (text) {
         var now = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-        setLive("Updates every 5 s · last read " + now);
+        setLive((streaming ? "Live" : "Updates every 5 s") + " · last read " + now);
         if (text === lastText) return;
         lastText = text;
         state = JSON.parse(text);
@@ -418,6 +418,16 @@
       })
       .catch(function () { setLive("Could not read the earlier entries", true); });
   });
+
+  // Live: kontext ui says when the files change (and, with a server, when
+  // another machine writes); the poll stays as the fallback.
+  var streaming = false;
+  if (window.EventSource) {
+    var events = new EventSource("/api/events");
+    events.addEventListener("open", function () { streaming = true; });
+    events.addEventListener("error", function () { streaming = false; });
+    events.addEventListener("change", load);
+  }
 
   load();
   setInterval(load, POLL_MS);

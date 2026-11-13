@@ -29,6 +29,7 @@ pub mod media;
 pub mod model;
 pub mod plan;
 pub mod recall;
+pub mod remote;
 pub mod report;
 pub mod repos;
 pub mod scope;
