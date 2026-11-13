@@ -771,6 +771,9 @@ pub enum ServerCmd {
         /// Does not wait for the URL to answer
         #[arg(long)]
         no_check: bool,
+        /// Overwrites a Worker with this name that kontext did not deploy (without it, deploy refuses)
+        #[arg(long)]
+        replace: bool,
     },
 }
 
@@ -1677,6 +1680,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                     account_id,
                     subdomain,
                     no_check,
+                    replace,
                 },
         } => {
             let d = crate::server::deploy(&crate::server::DeployArgs {
@@ -1684,6 +1688,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 account_id,
                 subdomain,
                 no_check,
+                replace,
             })?;
             if cx.json {
                 print_json(&d)?;

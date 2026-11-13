@@ -8,8 +8,10 @@
 //! 1. `GET /accounts`, only without `--account-id`/`$CLOUDFLARE_ACCOUNT_ID`;
 //! 2. `GET /accounts/{a}/workers/subdomain` (the account's `workers.dev` name);
 //!    `PUT` of it only with `--subdomain`, when the account has none;
-//! 3. `GET /accounts/{a}/workers/scripts` (is the Worker there, and which
-//!    Durable Object migration it has);
+//! 3. `GET /accounts/{a}/workers/scripts` (is the Worker there, is it
+//!    kontext's, by the tag `kontext-server` it uploads with, and which
+//!    Durable Object migration it has; one without the tag is refused unless
+//!    `--replace`);
 //! 4. `PUT /accounts/{a}/workers/scripts/{name}`: the module, the Durable
 //!    Object binding, `keep_bindings: ["secret_text"]`, and the migration
 //!    `v1` that declares the SQLite class `Project` only if it is not applied;
@@ -42,6 +44,13 @@ pub const MIGRATION_TAG: &str = "v1";
 pub const DO_CLASS: &str = "Project";
 pub const DO_BINDING: &str = "PROJECT";
 pub const ADMIN_SECRET_NAME: &str = "ADMIN_SECRET";
+/// The tag every Worker kontext uploads carries (`tags` in the upload's
+/// metadata, which the script list returns: "tags: Tags associated with the
+/// Worker", <https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/list/>;
+/// "tags: List of strings to use as tags for this Worker",
+/// <https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/>).
+/// A Worker with the same name and without it is somebody else's.
+pub const SCRIPT_TAG: &str = "kontext-server";
 /// The longest ledger line, in UTF-8 bytes, the server takes (`MAX_LINE_BYTES`
 /// in `server/worker.js`, pinned to this one by a test). A project with a
 /// server refuses to write a longer one, so every line it writes can be pushed.
@@ -133,6 +142,8 @@ pub struct DeployArgs {
     pub subdomain: Option<String>,
     /// Do not wait for the URL to answer afterwards.
     pub no_check: bool,
+    /// Replace a Worker with this name that kontext did not deploy.
+    pub replace: bool,
 }
 
 /// What it did.
@@ -348,6 +359,7 @@ pub fn metadata(with_migration: bool, old_tag: Option<&str>) -> Value {
             { "type": "durable_object_namespace", "name": DO_BINDING, "class_name": DO_CLASS }
         ],
         "keep_bindings": ["secret_text"],
+        "tags": [SCRIPT_TAG],
     });
     if with_migration {
         let mut mig = json!({ "new_tag": MIGRATION_TAG, "new_sqlite_classes": [DO_CLASS] });
@@ -475,6 +487,23 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
                 .find(|s| s.get("id").and_then(Value::as_str) == Some(args.name.as_str()))
         })
         .cloned();
+    // A Worker with this name that kontext did not upload is never
+    // overwritten without --replace.
+    if let Some(s) = &existing {
+        let ours = s
+            .get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|t| t.iter().any(|x| x.as_str() == Some(SCRIPT_TAG)));
+        if !ours && !args.replace {
+            return Err(crate::store::Refused(format!(
+                "account {account} already has a Worker named {name} that kontext did not deploy (it lacks \
+                 the tag {SCRIPT_TAG}); nothing was changed. Deploy under another name (--name <other>), \
+                 or, if that Worker is yours to overwrite, run again with --replace",
+                name = args.name
+            ))
+            .into());
+        }
+    }
     let tag = existing
         .as_ref()
         .and_then(|s| s.get("migration_tag"))
@@ -589,6 +618,7 @@ mod tests {
         assert_eq!(m["migrations"]["new_tag"], "v1");
         assert!(metadata(false, None).get("migrations").is_none());
         assert_eq!(m["keep_bindings"][0], "secret_text");
+        assert_eq!(m["tags"], json!(["kontext-server"]));
         assert_eq!(m["bindings"][0]["type"], "durable_object_namespace");
     }
 

@@ -130,6 +130,10 @@ fn handle(
                     if let Some(t) = &s.migration_tag {
                         v["migration_tag"] = json!(t);
                     }
+                    // The tags the script was uploaded with, as the list returns them.
+                    if let Some(t) = s.metadata.get("tags") {
+                        v["tags"] = t.clone();
+                    }
                     v
                 })
                 .collect();
@@ -398,11 +402,64 @@ fn deploy_refuses_another_workers_migrations_and_a_bad_token() {
     let o = deploy(&config, &api, "wrong", &[]);
     assert!(!o.status.success());
     assert!(text(&o).contains("Workers Scripts: Edit"), "{}", text(&o));
+    // Not kontext's (no tag): refused before anything else.
     let o = deploy(&config, &api, TOKEN, &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    // Even with --replace, a Durable Object migration that is not kontext's is
+    // not built on.
+    let o = deploy(&config, &api, TOKEN, &["--replace"]);
     assert!(!o.status.success());
     assert!(text(&o).contains("v7"), "{}", text(&o));
     // With another name it goes ahead.
     let o = deploy(&config, &api, TOKEN, &["--name", "kontext-2"]);
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("https://kontext-2.omar-kx.workers.dev"));
+}
+
+/// A Worker named `kontext` that kontext did not upload (no `kontext-server`
+/// tag, and no Durable Object migration either) is not overwritten: exit 2,
+/// and nothing changes until `--replace`.
+#[test]
+fn deploy_refuses_an_unrelated_worker_with_the_same_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let (api, cf) = fake_cf();
+    {
+        let mut c = cf.lock().unwrap();
+        c.subdomain = Some("omar-kx".into());
+        c.scripts.insert(
+            "kontext".into(),
+            Script {
+                module: b"export default { fetch() { return new Response('mine') } }".to_vec(),
+                metadata: json!({ "main_module": "index.js", "tags": ["blog"] }),
+                ..Script::default()
+            },
+        );
+    }
+    let o = deploy(&config, &api, TOKEN, &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert!(text(&o).contains("--replace"), "{}", text(&o));
+    {
+        let c = cf.lock().unwrap();
+        let s = &c.scripts["kontext"];
+        assert!(s.module.starts_with(b"export default { fetch()"));
+        assert!(
+            !c.log
+                .iter()
+                .any(|l| l.starts_with("PUT /accounts/acc0123456789/workers/scripts/kontext")),
+            "{:?}",
+            c.log
+        );
+    }
+    assert!(!config.join("servers.json").exists());
+
+    // With --replace it is overwritten, and marked as kontext's from then on.
+    let o = deploy(&config, &api, TOKEN, &["--replace"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        cf.lock().unwrap().scripts["kontext"].metadata["tags"],
+        json!(["kontext-server"])
+    );
+    let o = deploy(&config, &api, TOKEN, &[]);
+    assert!(o.status.success(), "{}", text(&o));
 }
