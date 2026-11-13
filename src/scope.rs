@@ -313,6 +313,9 @@ pub fn pending_line(st: &State) -> Option<String> {
 
 /// The line for the pm when a plan is signed: what it may do alone.
 pub fn pm_line(st: &State) -> Option<String> {
+    if !pm_acts_alone(st) {
+        return None;
+    }
     let s = last(st)?;
     Some(format!(
         "The scope is signed ({}, {}): inside it you decide and log (`kontext decide`, \
@@ -322,6 +325,13 @@ pub fn pm_line(st: &State) -> Option<String> {
         s.id,
         day(&s.hlc)
     ))
+}
+
+/// Does the pm act alone? With a signed plan and without `require_signatures`.
+/// Then, and only then, items move from the owner's inbox to the pm's and the
+/// pm closes them; otherwise every inbox is what it was before scopes.
+pub fn pm_acts_alone(st: &State) -> bool {
+    plan_signed(st) && !st.policy.require_signatures
 }
 
 /// May the pm decide, accept or reject without `--approved-by`? With a signed

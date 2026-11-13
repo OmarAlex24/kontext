@@ -819,7 +819,7 @@ fn build_resume(st: &State, new: &[Entry], o: &ResumeOpts, lv: Level) -> String 
     if o.role == "pm" {
         l.extend(crate::scope::pm_line(st));
         let n = crate::inbox::build_pm(st, &o.project).items.len();
-        if n > 0 {
+        if n > 0 && crate::scope::pm_acts_alone(st) {
             l.push(format!(
                 "Your inbox: {} (proposals, what the distill noted, problems), yours to resolve \
                  without the owner: `kontext inbox --as pm`.",
@@ -830,7 +830,7 @@ fn build_resume(st: &State, new: &[Entry], o: &ResumeOpts, lv: Level) -> String 
     l.extend(crate::scope::pending_line(st));
     l.push(String::new());
     // With a signed plan the pm decides inside the scope (its line above).
-    let others = if o.role == "pm" && crate::scope::plan_signed(st) {
+    let others = if o.role == "pm" && crate::scope::pm_acts_alone(st) {
         "Other agents"
     } else {
         "Agents"

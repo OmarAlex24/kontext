@@ -1352,6 +1352,204 @@ fn with_a_signed_plan_the_owner_inbox_holds_the_signature_and_the_pm_the_rest() 
 }
 
 #[test]
+fn inbox_as_pm_keeps_the_readers_inbox_until_the_pm_acts_alone_then_adds_its_questions() {
+    let t = planned();
+    let task = pm_id(&t.p, &["task", "add", "Charge", "--feature", &t.card]);
+    let q = t.p.id_of(
+        IMPL,
+        &["ask", "Need sandbox keys", "--to", "pm", "--task", &task],
+    );
+    // No signed plan: the reader pm's inbox, as it always was.
+    let pm = pm_inbox(&t.p);
+    assert_eq!(keys(&pm), vec![q.clone()], "{pm}");
+    // Signed: the pm's inbox keeps its questions, with commands on its inbox.
+    sign(&t.p);
+    let pm = pm_inbox(&t.p);
+    assert!(keys(&pm).contains(&q), "{pm}");
+    let text = pm_ok(&t.p, &["inbox", "--as", "pm"]);
+    assert!(
+        text.contains(&format!("kontext inbox --as pm dismiss {q}")),
+        "{text}"
+    );
+    assert!(!keys(&owner_inbox(&t.p)).contains(&q));
+    pm_ok(
+        &t.p,
+        &["inbox", "--as", "pm", "answer", &q, "use the test keys"],
+    );
+    assert!(!keys(&pm_inbox(&t.p)).contains(&q));
+}
+
+/// A project that requires SSH signatures, with omar's key.
+fn require_signatures(p: &Project) {
+    let keys = p.dir.path().join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let key = keys.join("omar");
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "omar", "-f"])
+        .arg(&key)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let public = fs::read_to_string(key.with_extension("pub")).unwrap();
+    let toml = p.home.join("project.toml");
+    let text = fs::read_to_string(&toml)
+        .unwrap()
+        .replace("require_signatures = false", "require_signatures = true");
+    fs::write(
+        &toml,
+        format!(
+            "{text}\n[people]\nomar = {{ emails = [\"omar@example.com\"], keys = [\"{}\"] }}\n",
+            public.trim()
+        ),
+    )
+    .unwrap();
+    let cfg = p.config.join("projects.toml");
+    let text = fs::read_to_string(&cfg).unwrap();
+    fs::write(
+        &cfg,
+        format!(
+            "{text}\n[signing]\nkey = \"{}\"\n",
+            key.with_extension("pub").display()
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn with_require_signatures_the_inbox_does_not_move_to_the_pm() {
+    let t = planned();
+    require_signatures(&t.p);
+    let prop =
+        t.p.id_of(IMPL, &["propose", "Cache the price list", "--why", "slow"]);
+    let q = t.p.id_of(IMPL, &["ask", "Need sandbox keys", "--to", "pm"]);
+    sign(&t.p);
+    let inv = pm_id(&t.p, &["feature", "add", "Invoices", "--epic", "pay"]);
+    // The owner keeps what was theirs, plus the scope signature.
+    let owner = owner_inbox(&t.p);
+    let k = keys(&owner);
+    assert!(k.contains(&prop), "{k:?}");
+    assert!(k.contains(&"scope".to_string()), "{k:?}");
+    assert!(owner.get("pm_items").is_none(), "{owner}");
+    assert!(
+        !t.p.kontext_ok(&["inbox"]).contains("The pm handles"),
+        "no pm footer"
+    );
+    // `--as pm` is the reader pm's inbox, which the pm does not close.
+    assert_eq!(keys(&pm_inbox(&t.p)), vec![q.clone()]);
+    let (c, _, _) = code(
+        &t.p,
+        PM,
+        &["inbox", "--as", "pm", "dismiss", &q, "--why", "x"],
+    );
+    assert_eq!(c, 2);
+    assert!(!pm_ok(&t.p, &["resume", "--as", "pm"]).contains("The scope is signed"));
+    let _ = inv;
+}
+
+#[test]
+fn the_pm_dismisses_the_owners_words_only_with_their_yes() {
+    let t = planned();
+    sign(&t.p);
+    let said = distill_fact(&t.p, "No refunds after 30 days");
+    let (c, _, err) = code(
+        &t.p,
+        PM,
+        &["inbox", "--as", "pm", "dismiss", "review", "--why", "noise"],
+    );
+    assert_eq!(c, 2, "{err}");
+    assert!(
+        err.contains(&format!("{said} carries the owner's own words")),
+        "{err}"
+    );
+    assert!(keys(&pm_inbox(&t.p)).contains(&"review".to_string()));
+    // With their yes it counts; confirming needs no yes.
+    pm_ok(
+        &t.p,
+        &[
+            "inbox",
+            "--as",
+            "pm",
+            "dismiss",
+            "review",
+            "--why",
+            "they said drop it",
+            "--approved-by",
+            "omar",
+        ],
+    );
+    assert!(!keys(&pm_inbox(&t.p)).contains(&"review".to_string()));
+    distill_fact(&t.p, "Prices include tax");
+    pm_ok(&t.p, &["inbox", "--as", "pm", "confirm", "review"]);
+    assert_eq!(pm_inbox(&t.p)["count"], 0);
+}
+
+#[test]
+fn a_pm_dismissal_of_what_is_not_its_own_does_not_count() {
+    let t = planned();
+    sign(&t.p);
+    let q = pm_id(&t.p, &["ask", "Which currency?", "--to", "owner"]);
+    let imp = t
+        .p
+        .append(&format!(
+            "{{\"kind\":\"scope\",\"title\":\"Plan signed\",\"actor\":{{\"type\":\"agent\",\"name\":\"impl1\",\"role\":\"implementer\"}},\"fields\":{{\"type\":\"change\",\"covers\":[],\"adds\":[],\"removes\":[],\"summary\":\"x\",\"summary_hash\":\"{}\"}}}}\n",
+            sha256("x")
+        ))
+        .remove(0);
+    let said = distill_fact(&t.p, "No refunds after 30 days");
+    // Written straight to the ledger (another machine): a pm dismissal of an
+    // owner-only problem, the owner's question and the owner's words.
+    let dismiss = |items: &str| {
+        t.p.append(&format!(
+            "{{\"kind\":\"dismiss\",\"title\":\"x\",\"why\":\"x\",\"actor\":{{\"type\":\"agent\",\"name\":\"pm\",\"role\":\"pm\"}},\"fields\":{{\"items\":[{items}]}}}}\n"
+        ))
+        .remove(0)
+    };
+    let d1 = dismiss(&format!("\"not-counted:{imp}\""));
+    let d2 = dismiss(&format!("\"{q}\""));
+    let d3 = dismiss(&format!("\"{said}\""));
+    let owner = keys(&owner_inbox(&t.p));
+    for k in [format!("not-counted:{imp}"), q.clone()] {
+        assert!(owner.contains(&k), "{k} closed by the pm: {owner:?}");
+    }
+    assert!(keys(&pm_inbox(&t.p)).contains(&"review".to_string()));
+    // Each one is stored, does not count, and is the owner's to see.
+    for d in [&d1, &d2, &d3] {
+        assert!(
+            owner.contains(&format!("not-counted:{d}")),
+            "{d}: {owner:?}"
+        );
+    }
+    let text = t.p.kontext_ok(&["inbox", "--all"]);
+    assert!(
+        text.contains("does not count: the pm may not close it"),
+        "{text}"
+    );
+    // And the pm can't clear them.
+    let (c, _, _) = code(
+        &t.p,
+        PM,
+        &[
+            "inbox",
+            "--as",
+            "pm",
+            "dismiss",
+            &format!("not-counted:{d1}"),
+            "--why",
+            "x",
+        ],
+    );
+    assert_eq!(c, 2);
+    // A problem that is the pm's own does close.
+    let exp = dismiss("\"drift:X-000000\"");
+    assert!(!keys(&owner_inbox(&t.p)).contains(&format!("not-counted:{exp}")));
+}
+
+#[test]
 fn the_scope_signature_is_not_dismissed_from_the_inbox() {
     let t = planned();
     sign(&t.p);

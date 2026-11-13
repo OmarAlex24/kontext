@@ -19,12 +19,15 @@
 //! dismisses it (`dismiss`) or confirms it (`confirm`). "New" is what came in
 //! after the last entry the human wrote, not after their last view.
 //!
-//! With a signed plan (`kontext scope sign`) the inbox splits: the owner's
-//! holds only the pending scope signature (at most one), the questions for
-//! them and the problems only an owner resolves (an invalid signature, two
-//! signed charters); proposals, what the distill noted and the other problems
-//! go to the pm's inbox (`kontext inbox --as pm`), which the pm resolves
-//! alone. Without a signed plan nothing changes.
+//! When the pm acts alone (a signed plan, `kontext scope sign`, and no
+//! `require_signatures`) the inbox splits: the owner's holds only the pending
+//! scope signature (at most one), the questions for them and the problems
+//! only an owner resolves (signatures, conflicts, scope signatures that do not
+//! count, and what the pm did that did not count); the questions for the pm,
+//! proposals, what the distill noted and the other problems go to the pm's
+//! inbox (`kontext inbox --as pm`), which the pm resolves alone, except
+//! dismissing the owner's own words. Otherwise nothing changes, except that a
+//! signed plan's pending scope signature shows to the owner.
 //!
 //! Order: by impact (how many epics and tasks it blocks, directly or
 //! transitively), then by age, oldest first.
@@ -158,6 +161,9 @@ pub struct Inbox {
     /// With a signed plan, in an owner's inbox: how many items the pm handles.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_items: Option<usize>,
+    /// The pm's own inbox (`kontext inbox --as pm` while the pm acts alone).
+    #[serde(skip)]
+    pub pm: bool,
 }
 
 /// The reader of the pm's inbox (`kontext inbox --as pm`).
@@ -420,7 +426,7 @@ pub fn build(st: &State, project: &str, human: &str) -> Inbox {
     let last = last_action(st, human);
     let mut drafts: Vec<Draft> = Vec::new();
     let is_owner = st.policy.owners.is_empty() || st.policy.is_owner(human);
-    if crate::scope::plan_signed(st) {
+    if crate::scope::pm_acts_alone(st) {
         if is_owner {
             scope_draft(st, project, &mut drafts);
         }
@@ -432,7 +438,10 @@ pub fn build(st: &State, project: &str, human: &str) -> Inbox {
         }
         return ib;
     }
+    // As before scopes; a signed plan (under `require_signatures`) only adds
+    // its pending scope signature.
     if is_owner {
+        scope_draft(st, project, &mut drafts);
         sign_drafts(st, Voice::You, &mut drafts);
     }
     answer_drafts(st, &|q| question_is_for(st, q, human), &mut drafts);
@@ -443,24 +452,35 @@ pub fn build(st: &State, project: &str, human: &str) -> Inbox {
     assemble(st, project, human, last, drafts)
 }
 
-/// The pm's inbox, with a signed plan: the proposals and the user's unsigned
-/// rules (the pm accepts or rejects them), what the distill noted (the pm
-/// confirms or dismisses it) and the problems that are not the owner's.
-/// Empty without a signed plan: then all of that is the owner's.
+/// The pm's inbox (`kontext inbox --as pm`). While the pm acts alone: the
+/// questions for the pm, the proposals and the user's unsigned rules (the pm
+/// accepts or rejects them), what the distill noted (the pm confirms or
+/// dismisses it) and the problems that are not the owner's. Otherwise it is
+/// the inbox of the reader `pm`, as it always was.
 pub fn build_pm(st: &State, project: &str) -> Inbox {
-    let mut drafts: Vec<Draft> = Vec::new();
-    if crate::scope::plan_signed(st) {
-        proposal_drafts(st, Voice::All, &mut drafts);
-        review_drafts(st, Voice::All, &mut drafts);
-        owner_problems(st, false, &mut drafts);
+    if !crate::scope::pm_acts_alone(st) {
+        return build(st, project, PM);
     }
+    let mut drafts: Vec<Draft> = Vec::new();
+    answer_drafts(st, &|q| question_is_for(st, q, PM), &mut drafts);
+    proposal_drafts(st, Voice::All, &mut drafts);
+    review_drafts(st, Voice::All, &mut drafts);
+    owner_problems(st, false, &mut drafts);
     let last = st
         .entries
         .values()
         .filter(|e| is_pm(&e.actor))
         .map(|e| e.hlc.clone())
         .max();
-    assemble(st, project, PM, last, drafts)
+    let mut ib = assemble(st, project, PM, last, drafts);
+    ib.pm = true;
+    // Its commands act on the pm's inbox.
+    let here = |c: &str| c.replace("kontext inbox ", "kontext inbox --as pm ");
+    for it in &mut ib.items {
+        it.command = here(&it.command);
+        it.alt = it.alt.as_deref().map(here);
+    }
+    ib
 }
 
 /// The pm agent (`agent:<x>` with role pm).
@@ -475,13 +495,64 @@ fn owner_problems(st: &State, owner: bool, out: &mut Vec<Draft>) {
     out.extend(all.into_iter().filter(|d| owner_only(st, &d.key) == owner));
 }
 
-/// A problem only an owner resolves: a signature that doesn't verify, or more
-/// than one signed charter.
-fn owner_only(st: &State, key: &str) -> bool {
-    key.starts_with("signature:")
-        || key
-            .strip_prefix("conflict:")
-            .is_some_and(|id| st.kind_of(id) == Some("charter"))
+/// A key only an owner resolves: the pending scope signature, a signature
+/// that doesn't verify, a conflict (between decisions or charters), a scope
+/// signature that does not count (its hash, or who wrote it), and anything
+/// the pm wrote that did not count (the pm does not clear its own overreach).
+pub fn owner_only(st: &State, key: &str) -> bool {
+    if key == SCOPE_KEY
+        || ["signature:", "conflict:", "scope:"]
+            .iter()
+            .any(|p| key.starts_with(p))
+    {
+        return true;
+    }
+    key.strip_prefix("not-counted:")
+        .and_then(|id| st.get(id))
+        .is_some_and(|e| e.kind == "scope" || is_pm(&e.actor))
+}
+
+/// The problems the pm resolves alone (by the prefix of their key).
+const PM_PROBLEMS: &[&str] = &[
+    "close:",
+    "not-counted:",
+    "expired:",
+    "claim:",
+    "drift:",
+    "reopened:",
+    "dependency:",
+    "plan:",
+];
+
+/// May the pm close this key with a `dismiss` or `confirm` (`kind`)? Only
+/// what its own inbox holds: questions for the pm, proposals and what the
+/// distill noted, and the problems that are not the owner's. Dismissing the
+/// owner's own words takes their yes (`approved`). The state applies the same
+/// rule to a record that arrives already written.
+pub fn pm_may_close(st: &State, key: &str, kind: &str, approved: bool) -> Result<(), String> {
+    if owner_only(st, key) {
+        return Err(format!("{key} is the owner's to resolve"));
+    }
+    if let Some(e) = st.get(key) {
+        return match e.kind.as_str() {
+            "question" if question_to(e) == PM => Ok(()),
+            "question" => Err(format!("question {key} is for {}", question_to(e))),
+            "proposal" | "fact"
+                if kind == "dismiss" && crate::scope::owners_words(e) && !approved =>
+            {
+                Err(format!(
+                    "{key} carries the owner's own words, and dismissing them takes their yes"
+                ))
+            }
+            "proposal" | "fact" => Ok(()),
+            k => Err(format!("{key} is a {k}: the owner's to resolve")),
+        };
+    }
+    if PM_PROBLEMS.iter().any(|p| key.starts_with(p)) {
+        Ok(())
+    } else {
+        Err(format!("{key} is not an item the pm resolves"))
+    }
 }
 
 /// The scope change that waits for the owner (at most one), with the first
@@ -635,11 +706,12 @@ pub fn everyone(st: &State, project: &str, people: &[String]) -> Everyone {
         }
     }
     let mut drafts = Vec::new();
-    if crate::scope::plan_signed(st) {
+    if crate::scope::pm_acts_alone(st) {
         scope_draft(st, project, &mut drafts);
         answer_drafts(st, &|q| question_to(q) == "owner", &mut drafts);
         owner_problems(st, true, &mut drafts);
     } else {
+        scope_draft(st, project, &mut drafts);
         sign_drafts(st, Voice::All, &mut drafts);
         answer_drafts(st, &|q| question_to(q) == "owner", &mut drafts);
         review_drafts(st, Voice::All, &mut drafts);
@@ -787,6 +859,7 @@ fn assemble(
         now_ms: now,
         items,
         pm_items: None,
+        pm: false,
     }
 }
 
@@ -1169,6 +1242,29 @@ fn problemas(st: &State, out: &mut Vec<Draft>) {
                 vec![id.clone()],
                 Vec::new(),
             ),
+            // What the pm did that did not count says why (and is the
+            // owner's to resolve).
+            Alert::NotCounting {
+                id,
+                kind,
+                actor,
+                reason,
+            } if st
+                .get(id)
+                .is_some_and(|e| is_pm(&e.actor) && !e.actor.is_human())
+                && crate::scope::pm_acts_alone(st) =>
+            {
+                push(
+                    format!("not-counted:{id}"),
+                    format!(
+                        "{} {id} from {actor} does not count: {reason}",
+                        crate::views::kind_label(kind)
+                    ),
+                    "the pm acted on something that is yours to decide",
+                    vec![id.clone()],
+                    Vec::new(),
+                )
+            }
             Alert::NotCounting {
                 id, kind, actor, ..
             } if kind != "dismiss" => push(
@@ -1652,7 +1748,7 @@ pub fn find<'a>(ib: &'a Inbox, st: &State, s: &str) -> Result<(&'a Item, Option<
 /// Who may close an item of `ib`: the pm closes its own inbox's items, a
 /// human closes theirs.
 pub fn require_closer(ib: &Inbox, actor: &Actor) -> Result<()> {
-    if ib.human == PM {
+    if ib.pm {
         if !is_pm(actor) && !actor.is_human() {
             return Err(Refused(format!(
                 "only the pm (or a human) closes the pm's pending items ({} is not)",
@@ -1681,6 +1777,7 @@ pub fn require_human(actor: &Actor) -> Result<()> {
 
 /// `kontext inbox dismiss` (`kind = "dismiss"`) and `kontext inbox confirm`
 /// (`kind = "confirm"`): an entry from the human that closes `keys`.
+#[allow(clippy::too_many_arguments)]
 pub fn close(
     store: &mut Store,
     actor: &Actor,
@@ -1689,12 +1786,34 @@ pub fn close(
     item: &Item,
     sub: Option<&Sub>,
     why: &str,
+    approved_by: Option<&str>,
 ) -> Result<Vec<Entry>> {
     require_closer(ib, actor)?;
     let (keys, ids, title) = match sub {
         Some(s) => (vec![s.id.clone()], vec![s.id.clone()], s.text.clone()),
         None => (item.keys.clone(), item.ids.clone(), item.title.clone()),
     };
+    let approved_by = approved_by.map(str::trim).filter(|a| !a.is_empty());
+    if is_pm(actor) && ib.pm {
+        if let Some(a) = approved_by
+            && !store.policy().is_owner(a)
+        {
+            return Err(Refused(format!("--approved-by {a}: not in owners")).into());
+        }
+        let st = store.state()?;
+        let refused: Vec<String> = keys
+            .iter()
+            .filter_map(|k| pm_may_close(&st, k, kind, approved_by.is_some()).err())
+            .collect();
+        if !refused.is_empty() {
+            return Err(Refused(format!(
+                "the pm does not {kind} this alone: {}. Ask the owner, and on their yes add \
+                 --approved-by <owner>",
+                refused.join("; ")
+            ))
+            .into());
+        }
+    }
     let verb = if kind == "dismiss" {
         "Dismisses"
     } else {
@@ -1705,6 +1824,9 @@ pub fn close(
     r.why = why.trim().to_string();
     r.refs = ids;
     r.fields.insert("items".into(), json!(keys));
+    if let Some(a) = approved_by {
+        r.fields.insert("approved_by".into(), json!(a));
+    }
     let ((), written) = store.transact(|b| {
         b.push(r)?;
         Ok(())

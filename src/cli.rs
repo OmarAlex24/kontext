@@ -249,6 +249,9 @@ pub enum InboxCmd {
         item: String,
         #[arg(long, default_value = "")]
         why: String,
+        /// The owner who said yes (the pm, to dismiss the owner's own words)
+        #[arg(long)]
+        approved_by: Option<String>,
     },
     /// Confirms what the distill noted from your conversations (`review`)
     Confirm { item: String },
@@ -1986,7 +1989,9 @@ impl Ctx<'_> {
         };
         // `--as pm`: the pm's inbox (with a signed plan: proposals, what the
         // distill noted and the problems that are not the owner's).
-        let pm_view = explicit && human == inbox::PM;
+        // Only while the pm acts alone; otherwise `--as pm` is the reader pm's
+        // inbox, as it always was.
+        let pm_view = explicit && human == inbox::PM && crate::scope::pm_acts_alone(&st);
         let view = |st: &crate::state::State, name: &str| {
             if pm_view {
                 inbox::build_pm(st, name)
@@ -2079,11 +2084,15 @@ impl Ctx<'_> {
                     }
                 };
                 self.written("the answer", |s, a| {
-                    inbox::require_human(a)?;
+                    inbox::require_closer(&ib, a)?;
                     write::answer(s, a, &q, &text)
                 })?
             }
-            Some(InboxCmd::Dismiss { item, why }) => {
+            Some(InboxCmd::Dismiss {
+                item,
+                why,
+                approved_by,
+            }) => {
                 let (it, sub) = inbox::find(&ib, &st, &item)?;
                 if it.key == inbox::SCOPE_KEY {
                     return Err(Refused(
@@ -2096,7 +2105,16 @@ impl Ctx<'_> {
                 }
                 let (it, sub) = (it.clone(), sub.cloned());
                 self.written("the dismissal", |s, a| {
-                    inbox::close(s, a, &ib, "dismiss", &it, sub.as_ref(), &why)
+                    inbox::close(
+                        s,
+                        a,
+                        &ib,
+                        "dismiss",
+                        &it,
+                        sub.as_ref(),
+                        &why,
+                        approved_by.as_deref(),
+                    )
                 })?
             }
             Some(InboxCmd::Confirm { item }) => {
@@ -2106,7 +2124,7 @@ impl Ctx<'_> {
                 }
                 let (it, sub) = (it.clone(), sub.cloned());
                 self.written("the confirmation", |s, a| {
-                    inbox::close(s, a, &ib, "confirm", &it, sub.as_ref(), "")
+                    inbox::close(s, a, &ib, "confirm", &it, sub.as_ref(), "", None)
                 })?
             }
         };

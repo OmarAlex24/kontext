@@ -1171,10 +1171,10 @@ impl State {
     /// noted): closes items in the inbox. It only counts if a human writes it:
     /// seeing it closes nothing, and an agent cannot close them on the human's behalf.
     fn close_inbox_items(&mut self, e: &Entry) {
-        // With a signed plan the pm closes the items of its own inbox
-        // (proposals, what the distill noted, problems), never a question.
-        let pm =
-            !self.scopes.is_empty() && e.actor.is_agent() && e.actor.role.as_deref() == Some("pm");
+        // While the pm acts alone (a signed plan, no `require_signatures`) it
+        // closes the items of its own inbox, and only those
+        // (`inbox::pm_may_close`).
+        let pm = crate::inbox::is_pm(&e.actor) && crate::scope::pm_acts_alone(self);
         if !e.actor.is_human() && !pm {
             self.not_counting.insert(
                 e.id.clone(),
@@ -1189,10 +1189,29 @@ impl State {
         if items.is_empty() {
             items = e.refs.clone();
         }
-        for k in items {
-            if pm && self.kind_of(&k) == Some("question") {
-                continue;
+        if pm {
+            let approved = e
+                .fields
+                .get("approved_by")
+                .and_then(Value::as_str)
+                .is_some_and(|a| self.policy.is_owner(a));
+            let refused: Vec<String> = items
+                .iter()
+                .filter_map(|k| crate::inbox::pm_may_close(self, k, &e.kind, approved).err())
+                .collect();
+            if !refused.is_empty() {
+                let reason = format!("the pm may not close it: {}", refused.join("; "));
+                self.not_counting.insert(e.id.clone(), reason.clone());
+                self.alerts.push(Alert::NotCounting {
+                    id: e.id.clone(),
+                    kind: e.kind.clone(),
+                    actor: e.actor.short(),
+                    reason,
+                });
+                return;
             }
+        }
+        for k in items {
             self.inbox_closed.entry(k).or_insert_with(|| e.id.clone());
         }
     }
