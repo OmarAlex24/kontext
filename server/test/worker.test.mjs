@@ -211,3 +211,45 @@ test("the WebSocket announces the frontier, not the lines", async () => {
   const bad = await mf.dispatchFetch(`http://localhost/v1/p/${p.name}/ws`, { headers: { upgrade: "websocket" } });
   assert.equal(bad.status, 401);
 });
+
+/// A line of exactly `size` UTF-8 bytes, mostly two-byte characters (so the
+/// chunks split some of them in half).
+function bigLine(writer, n, prev, size) {
+  const body = { v: 1, id: `J-${sha(writer + n + size).slice(0, 6)}`, writer, n, prev, hlc: "2026-11-13T10:00:00.000Z.0000", actor: { type: "human", name: "omar" }, kind: "journal", title: "" };
+  const hash = sha(writer + n + size);
+  const bytes = (s) => Buffer.byteLength(s, "utf8");
+  const empty = JSON.stringify({ ...body, hash });
+  const room = size - bytes(empty);
+  const title = "ñ".repeat(Math.floor(room / 2)) + "a".repeat(room % 2);
+  const line = JSON.stringify({ ...body, title, hash });
+  assert.equal(bytes(line), size);
+  return { line, hash };
+}
+
+test("long lines: up to 4 MiB, stored in chunks, back byte for byte; one byte more is refused", async () => {
+  const MAX = 4 * 1024 * 1024; // MAX_LINE_BYTES in worker.js and src/server.rs
+  const p = await project();
+  const a = bigLine(p.writer, 1, GENESIS, 3 * 1024 * 1024 + 1);
+  const b = bigLine(p.writer, 2, a.hash, MAX);
+  let r = await call("POST", `/v1/p/${p.name}/push`, { token: p.token, body: { writer: p.writer, lines: [a.line] } });
+  assert.deepEqual([r.status, r.data.accepted], [200, 1], JSON.stringify(r.data.refused));
+  r = await call("POST", `/v1/p/${p.name}/push`, { token: p.token, body: { writer: p.writer, lines: [b.line] } });
+  assert.deepEqual([r.status, r.data.accepted], [200, 1], JSON.stringify(r.data.refused));
+  // A re-push of the chunked line is a no-op.
+  r = await call("POST", `/v1/p/${p.name}/push`, { token: p.token, body: { writer: p.writer, lines: [a.line, b.line] } });
+  assert.deepEqual([r.data.accepted, r.data.duplicates], [0, 2]);
+  const over = bigLine(p.writer, 3, b.hash, MAX + 1);
+  r = await call("POST", `/v1/p/${p.name}/push`, { token: p.token, body: { writer: p.writer, lines: [over.line] } });
+  assert.equal(r.data.refused.reason, "too_large");
+  // Pulled back exactly as pushed, however the pages fall.
+  const got = [];
+  let since = {};
+  for (;;) {
+    r = await call("POST", `/v1/p/${p.name}/pull`, { token: p.token, body: { since } });
+    got.push(...r.data.lines.map((l) => l.line));
+    if (!r.data.more) break;
+    since = { [p.writer]: got.length };
+  }
+  assert.equal(got.length, 2);
+  assert.ok(got[0] === a.line && got[1] === b.line, "the long lines came back changed");
+});

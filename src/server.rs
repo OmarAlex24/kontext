@@ -42,6 +42,10 @@ pub const MIGRATION_TAG: &str = "v1";
 pub const DO_CLASS: &str = "Project";
 pub const DO_BINDING: &str = "PROJECT";
 pub const ADMIN_SECRET_NAME: &str = "ADMIN_SECRET";
+/// The longest ledger line, in UTF-8 bytes, the server takes (`MAX_LINE_BYTES`
+/// in `server/worker.js`, pinned to this one by a test). A project with a
+/// server refuses to write a longer one, so every line it writes can be pushed.
+pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const CF_API: &str = "https://api.cloudflare.com/client/v4";
 
 /// One server this machine deployed (or was given the admin secret of).
@@ -595,6 +599,22 @@ mod tests {
         assert!(!valid_script_name("Kontext"));
         assert!(!valid_script_name("-x"));
         assert!(!valid_script_name(""));
+    }
+
+    /// The worker and the binary agree on the longest line, and it is 4 MiB.
+    #[test]
+    fn the_line_cap_is_the_same_on_both_sides() {
+        let decl = WORKER_JS
+            .lines()
+            .find_map(|l| l.strip_prefix("const MAX_LINE_BYTES = "))
+            .expect("MAX_LINE_BYTES in worker.js");
+        let js: usize = decl
+            .trim_end_matches(';')
+            .split('*')
+            .map(|f| f.trim().parse::<usize>().unwrap())
+            .product();
+        assert_eq!(js, MAX_LINE_BYTES);
+        assert_eq!(MAX_LINE_BYTES, 4_194_304);
     }
 
     #[test]

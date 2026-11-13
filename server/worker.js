@@ -31,7 +31,20 @@ const MEDIA_RE = /^([0-9a-f]{64})\.(png|jpg|jpeg|webp|html)$/;
 const CONFIG_FILES = ["project.toml", "synonyms.toml"];
 const ROLES = ["owner", "pm", "coordinator", "implementer", "tester", "scout"];
 
-const MAX_LINE_BYTES = 512 * 1024;
+// The longest ledger line (UTF-8 bytes) the server takes. The binary refuses
+// to write a longer one in a project with a server (`MAX_LINE_BYTES` in
+// src/server.rs, pinned to this one by a test), so every line it writes can
+// be pushed. 4 MiB is about a thousand times the largest entry kontext writes
+// (an entry carries text, and images go to media/), and it keeps a push of one
+// such line, JSON-escaped (at most twice its size), far below the 100 MB
+// request body and the 128 MB of memory of an isolate (Workers limits).
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
+// A line longer than this is stored in rows of this many bytes, as media are
+// (a row holds at most 8 MB); shorter ones in one row, as before.
+const LINE_CHUNK = 512 * 1024;
+// A push body: one batch of the binary (2 MiB of lines) or a single line of
+// up to MAX_LINE_BYTES, JSON-escaped, with room to spare.
+const MAX_PUSH_BODY = 2 * MAX_LINE_BYTES + 1024 * 1024;
 const MAX_PUSH_LINES = 1000;
 const PULL_MAX_LINES = 2000;
 const PULL_MAX_BYTES = 4 * 1024 * 1024;
@@ -169,6 +182,8 @@ export class Project extends DurableObject {
         stamp INTEGER NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(reader, writer)) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS config(name TEXT PRIMARY KEY, version INTEGER NOT NULL, sha256 TEXT NOT NULL,
         body TEXT NOT NULL, by TEXT NOT NULL, at TEXT NOT NULL) WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS line_chunks(writer TEXT NOT NULL, n INTEGER NOT NULL, i INTEGER NOT NULL,
+        data BLOB NOT NULL, PRIMARY KEY(writer, n, i)) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS media(name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL,
         chunks INTEGER NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS media_chunks(name TEXT NOT NULL, i INTEGER NOT NULL, data BLOB NOT NULL,
@@ -276,6 +291,35 @@ export class Project extends DurableObject {
     return { token, id, person: spec.person, role: spec.role, epic: spec.epic, writer: spec.writer, expires: spec.expires };
   }
 
+  /// A line as received. One longer than LINE_CHUNK bytes goes in
+  /// `line_chunks`, by its UTF-8 bytes (so it comes back byte for byte), with
+  /// an empty `line` in `lines` (a real line is never empty).
+  storeLine(writer, n, hash, line, bytes) {
+    if (bytes.length <= LINE_CHUNK) {
+      this.sql.exec("INSERT INTO lines(writer, n, hash, line) VALUES(?, ?, ?, ?)", writer, n, hash, line);
+      return;
+    }
+    for (let i = 0; i * LINE_CHUNK < bytes.length; i++) {
+      const part = bytes.slice(i * LINE_CHUNK, Math.min(bytes.length, (i + 1) * LINE_CHUNK));
+      this.sql.exec("INSERT OR REPLACE INTO line_chunks(writer, n, i, data) VALUES(?, ?, ?, ?)", writer, n, i, part.buffer);
+    }
+    this.sql.exec("INSERT INTO lines(writer, n, hash, line) VALUES(?, ?, ?, '')", writer, n, hash);
+  }
+
+  chunkedLine(writer, n) {
+    const parts = this.sql
+      .exec("SELECT data FROM line_chunks WHERE writer = ? AND n = ? ORDER BY i", writer, n)
+      .toArray()
+      .map((r) => new Uint8Array(r.data));
+    const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0));
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.length;
+    }
+    return new TextDecoder().decode(out);
+  }
+
   // ---- routes ----
 
   async fetch(req) {
@@ -368,7 +412,7 @@ export class Project extends DurableObject {
   /// chain; the first one that does not stops the batch and is refused with
   /// the server's tail. What the server already has is skipped.
   async push(req, p) {
-    const body = await readJson(req, MAX_PUSH_LINES * MAX_LINE_BYTES);
+    const body = await readJson(req, MAX_PUSH_BODY);
     const writer = String(body.writer || "");
     const lines = body.lines;
     if (!WRITER_RE.test(writer)) throw new HttpError(400, "bad_writer", `invalid writer ${JSON.stringify(writer)}`);
@@ -393,8 +437,13 @@ export class Project extends DurableObject {
     };
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (typeof line !== "string" || line.length === 0 || line.length > MAX_LINE_BYTES || /[\r\n]/.test(line)) {
+      if (typeof line !== "string" || line.length === 0 || /[\r\n]/.test(line)) {
         refuse(i, null, "invalid", "a line is a non-empty JSON object on one line");
+        break;
+      }
+      const bytes = enc.encode(line);
+      if (bytes.length > MAX_LINE_BYTES) {
+        refuse(i, null, "too_large", `the line is ${bytes.length} bytes; the most is ${MAX_LINE_BYTES}`);
         break;
       }
       let e;
@@ -441,7 +490,7 @@ export class Project extends DurableObject {
           break;
         }
       }
-      this.sql.exec("INSERT INTO lines(writer, n, hash, line) VALUES(?, ?, ?, ?)", writer, n, e.hash, line);
+      this.storeLine(writer, n, e.hash, line, bytes);
       tail = { n, hash: e.hash };
       accepted++;
     }
@@ -474,12 +523,14 @@ export class Project extends DurableObject {
         .exec("SELECT n, line FROM lines WHERE writer = ? AND n > ? ORDER BY n LIMIT ?", writer, from, limit - lines.length + 1)
         .toArray();
       for (const r of rows) {
-        if (lines.length >= limit || (lines.length > 0 && bytes + r.line.length > PULL_MAX_BYTES)) {
+        const line = r.line === "" ? this.chunkedLine(writer, r.n) : r.line;
+        const size = line.length;
+        if (lines.length >= limit || (lines.length > 0 && bytes + size > PULL_MAX_BYTES)) {
           more = true;
           break outer;
         }
-        lines.push({ writer, n: r.n, line: r.line });
-        bytes += r.line.length;
+        lines.push({ writer, n: r.n, line });
+        bytes += size;
       }
     }
     return json({ lines, more, seq: this.seq(), tails });
