@@ -294,6 +294,13 @@ pub fn blocked(st: &State, task: &Entry) -> Option<String> {
     ))
 }
 
+/// Does this entry carry the owner's own words (`origin = user`: what the
+/// user said, their rules)? The pm may accept or confirm it alone, never
+/// reject or dismiss it: that takes the owner's yes (`--approved-by`).
+pub fn owners_words(e: &Entry) -> bool {
+    crate::views::from_user(e)
+}
+
 /// One line for the views when a scope change waits for the owner.
 pub fn pending_line(st: &State) -> Option<String> {
     let d = pending(st)?;

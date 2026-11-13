@@ -882,18 +882,45 @@ impl State {
     /// without `approved_by`. Not with `require_signatures`: there, what
     /// becomes law still needs an owner's key.
     fn pm_decides_alone(&self, e: &Entry) -> bool {
-        !self.scopes.is_empty()
-            && !self.policy.require_signatures
+        self.pm_alone_here()
             && matches!(e.kind.as_str(), "decision" | "accept" | "reject")
             && e.actor.is_agent()
             && e.actor.role.as_deref() == Some("pm")
             && !e.fields.contains_key("v0_id")
+            && !self.rejects_owners_words(e)
+    }
+
+    /// A signed plan (at this point of the walk) and no `require_signatures`.
+    fn pm_alone_here(&self) -> bool {
+        !self.scopes.is_empty() && !self.policy.require_signatures
+    }
+
+    /// A `reject` of something that carries the owner's own words: never the
+    /// pm's alone, signed plan or not (it needs `approved_by`).
+    fn rejects_owners_words(&self, e: &Entry) -> bool {
+        e.kind == "reject"
+            && e.refs
+                .first()
+                .and_then(|t| self.get(t))
+                .is_some_and(crate::scope::owners_words)
     }
 
     /// Checks the owner rule. If it does not count, records it as an alert.
     fn authorize(&mut self, e: &Entry) -> bool {
         let checked = match self.policy.check_entry(e) {
             Err(_) if self.pm_decides_alone(e) => Ok(()),
+            // Only where the pm otherwise decides alone does it need its own
+            // reason; without a signed plan the alert reads as it always did.
+            Err(_)
+                if self.pm_alone_here()
+                    && self.rejects_owners_words(e)
+                    && e.actor.role.as_deref() == Some("pm") =>
+            {
+                Err(format!(
+                    "{} rejected the owner's own words without approved_by from an owner",
+                    e.actor.short()
+                ))
+            }
             other => other,
         };
         match checked {

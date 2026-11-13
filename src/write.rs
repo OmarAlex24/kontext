@@ -357,7 +357,19 @@ pub fn reject(
         "If you think it should be rejected, say so in a question: kontext ask \"Should we reject <id>?\" --to owner",
     )?;
     write(store, |b| {
-        let pid = pending_proposal(b.state()?, id)?;
+        let st = b.state()?;
+        let pid = pending_proposal(st, id)?;
+        // The pm decides alone inside a signed scope, but never drops what
+        // the owner said: that takes their yes.
+        if crate::scope::pm_decides_alone(st, actor, approved_by)
+            && st.get(&pid).is_some_and(crate::scope::owners_words)
+        {
+            return Err(Refused(format!(
+                "{pid} carries the owner's own words: the pm does not reject it alone. Ask them, \
+                 and on their yes: `kontext reject {pid} --why \"…\" --approved-by <owner>`"
+            ))
+            .into());
+        }
         let mut r = raw("reject", actor, &format!("Rejects {pid}"));
         r.why = why.trim().to_string();
         r.refs = vec![pid];

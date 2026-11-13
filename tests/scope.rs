@@ -1092,7 +1092,6 @@ fn a_feature_replaced_and_signed_out_keeps_its_tasks_off_the_board() {
     assert!(err.contains("it was never in a signed scope"), "{err}");
 }
 
-
 #[test]
 fn a_goal_holds_only_the_tasks_that_cite_it_on_their_own() {
     let t = planned();
@@ -1134,6 +1133,79 @@ fn a_goal_holds_only_the_tasks_that_cite_it_on_their_own() {
     pm_ok(&t.p, &["assign", &plain, "--to", "impl1"]);
 }
 
+#[test]
+fn the_pm_does_not_reject_the_owners_words_alone() {
+    let t = planned();
+    sign(&t.p);
+    let rule = |title: &str| {
+        t.p.append(&format!(
+            "{{\"kind\":\"proposal\",\"title\":\"{title}\",\"actor\":{{\"type\":\"agent\",\"name\":\"distill\"}},\
+             \"fields\":{{\"source\":\"distill\",\"origin\":\"user\",\"user_rule\":true}}}}\n"
+        ))
+        .remove(0)
+    };
+    let euros = rule("Prices in euros");
+    let (c, _, err) = code(&t.p, PM, &["reject", &euros, "--why", "not now"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("carries the owner's own words"), "{err}");
+    assert_eq!(status(&t.p, &euros), "pending");
+    // Accepting it alone is fine: it applies anyway.
+    let tax = rule("Show prices with tax");
+    pm_ok(&t.p, &["accept", &tax]);
+    assert_eq!(status(&t.p, &tax), "accepted");
+    // A reject written straight to the ledger is stored and does not count.
+    let raw = t
+        .p
+        .append(&format!(
+            "{{\"kind\":\"reject\",\"title\":\"Rejects {euros}\",\"why\":\"x\",\"refs\":[\"{euros}\"],\
+             \"actor\":{{\"type\":\"agent\",\"name\":\"pm\",\"role\":\"pm\"}},\"fields\":{{}}}}\n"
+        ))
+        .remove(0);
+    assert_eq!(status(&t.p, &euros), "pending");
+    let show = t.p.kontext_ok(&["show", &raw]);
+    assert!(
+        show.contains("rejected the owner's own words without approved_by"),
+        "{show}"
+    );
+    // With their yes it counts.
+    pm_ok(
+        &t.p,
+        &[
+            "reject",
+            &euros,
+            "--why",
+            "they said no",
+            "--approved-by",
+            "omar",
+        ],
+    );
+    assert_eq!(status(&t.p, &euros), "rejected");
+
+    // Without a signed plan the same raw reject reads as it did before scope.
+    let u = planned();
+    let rule = |title: &str| {
+        u.p.append(&format!(
+            "{{\"kind\":\"proposal\",\"title\":\"{title}\",\"actor\":{{\"type\":\"agent\",\"name\":\"distill\"}},\
+             \"fields\":{{\"source\":\"distill\",\"origin\":\"user\",\"user_rule\":true}}}}\n"
+        ))
+        .remove(0)
+    };
+    let euros = rule("Prices in euros");
+    let raw = u
+        .p
+        .append(&format!(
+            "{{\"kind\":\"reject\",\"title\":\"Rejects {euros}\",\"why\":\"x\",\"refs\":[\"{euros}\"],\
+             \"actor\":{{\"type\":\"agent\",\"name\":\"pm\",\"role\":\"pm\"}},\"fields\":{{}}}}\n"
+        ))
+        .remove(0);
+    assert_eq!(status(&u.p, &euros), "pending");
+    let show = u.p.kontext_ok(&["show", &raw]);
+    assert!(
+        show.contains("is the pm but has no approved_by from an owner")
+            && !show.contains("own words"),
+        "{show}"
+    );
+}
 
 #[test]
 fn a_feature_leaving_the_scope_holds_its_tasks_until_signed() {
