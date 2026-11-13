@@ -853,9 +853,12 @@ pub fn assign(store: &mut Store, actor: &Actor, task: &str, to: &str) -> Result<
             ));
         }
         if let Some(why) = st.get(&id).and_then(|t| crate::scope::blocked(st, t)) {
-            return refused(format!(
-                "{id} is not handed out: {why}. The pm shows the owner `kontext scope summary` and signs it with them"
-            ));
+            let then = if why.starts_with(crate::scope::WAITING) {
+                ". The pm shows the owner `kontext scope summary` and signs it with them"
+            } else {
+                ""
+            };
+            return refused(format!("{id} is not handed out: {why}{then}"));
         }
         let mut r = raw("assign", actor, &format!("Assigns {id} to {to}"));
         r.refs = vec![id];

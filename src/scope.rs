@@ -211,44 +211,87 @@ pub fn diff_line(st: &State, d: &Diff) -> String {
 /// assign` say it.
 pub const WAITING: &str = "waiting for your signature: scope change";
 
-/// Why a task is not handed out: with a signed plan, its feature, its epic or
-/// one of its goals entered the scope after the last signature, or is
-/// leaving it and the owner has not signed that yet. Tasks are not scope: a
-/// task added under a signed feature is not held. `None` without a signed
-/// plan.
+/// The last signature that listed this id as leaving the scope (`removes`).
+pub fn signed_out_by<'a>(st: &'a State, id: &str) -> Option<&'a str> {
+    st.scopes.iter().rev().find_map(|s| {
+        let e = st.get(s)?;
+        string_list(e.fields.get("removes"))
+            .iter()
+            .any(|r| r == id)
+            .then_some(e.id.as_str())
+    })
+}
+
+/// The goals a task cites on its own (`--goal`), not the ones it got from its
+/// feature or epic: `task add` copies those, so they are told apart by being
+/// absent from both.
+fn own_goals(st: &State, task: &Entry, feature: Option<&str>) -> Vec<String> {
+    let inherited: BTreeSet<String> = feature
+        .into_iter()
+        .chain(field(task, "epic"))
+        .filter_map(|id| st.get(id))
+        .flat_map(|e| string_list(e.fields.get("goals")))
+        .collect();
+    string_list(task.fields.get("goals"))
+        .into_iter()
+        .filter(|g| !inherited.contains(g))
+        .collect()
+}
+
+/// Why a task is not handed out: with a signed plan, its feature or its epic
+/// entered the scope after the last signature, or is leaving it and the owner
+/// has not signed that yet; or its feature is out of the scope (signed out,
+/// dropped or replaced). A goal holds a task only when it entered after the
+/// signature and the task cites it on its own (`--goal`): a goal leaving
+/// holds nothing, its tasks still serve their signed feature and epic. Tasks
+/// are not scope: a task added under a signed feature is not held. `None`
+/// without a signed plan.
 pub fn blocked(st: &State, task: &Entry) -> Option<String> {
     if !plan_signed(st) {
         return None;
     }
     let covers = signed_covers(st);
     let now: BTreeSet<String> = current(st).into_iter().collect();
-    let feature = crate::features::feature_of(task)
-        .filter(|f| st.kind_of(f) == Some("feature"))
-        .map(str::to_string);
-    let ids = feature
-        .into_iter()
-        .chain(field(task, "epic").map(str::to_string))
-        .chain(string_list(task.fields.get("goals")));
-    for id in ids {
-        if now.contains(&id) && !covers.contains(&id) {
-            return Some(format!("{WAITING} ({} is not signed yet)", label(st, &id)));
+    // The feature it counts toward (one that does not count, or of another
+    // epic, leaves it a task of its epic without a feature).
+    let feature = crate::features::counted_feature(st, task).map(str::to_string);
+    for id in feature
+        .iter()
+        .map(String::as_str)
+        .chain(field(task, "epic"))
+    {
+        if now.contains(id) && !covers.contains(id) {
+            return Some(format!("{WAITING} ({} is not signed yet)", label(st, id)));
         }
-        if covers.contains(&id) && !now.contains(&id) {
+        if covers.contains(id) && !now.contains(id) {
             return Some(format!(
                 "{WAITING} ({} is leaving the scope)",
-                label(st, &id)
-            ));
-        }
-        // A feature the owner already signed out: its work is not handed out
-        // again (it raises an alert until it is closed or moved).
-        if let Some(s) = st.drop_signed.get(&id) {
-            return Some(format!(
-                "{} was dropped from the scope ({s}); close the task or move its work to a feature in force",
-                label(st, &id)
+                label(st, id)
             ));
         }
     }
-    None
+    for g in own_goals(st, task, crate::features::feature_of(task)) {
+        if now.contains(&g) && !covers.contains(&g) {
+            return Some(format!("{WAITING} ({} is not signed yet)", label(st, &g)));
+        }
+    }
+    // A feature out of the scope: its work is not handed out again (it raises
+    // an alert until it is closed or moved), whether the owner signed it out,
+    // dropped or replaced, or it left before any signature covered it.
+    let f = feature.as_deref().filter(|f| !now.contains(*f))?;
+    let how = match (st.dropped.contains_key(f), st.superseded_by.get(f)) {
+        (true, _) => "was dropped".to_string(),
+        (false, Some(by)) => format!("was replaced by {by}"),
+        (false, None) => "is not in force".to_string(),
+    };
+    let when = match signed_out_by(st, f) {
+        Some(s) => format!("the owner signed it out in {s}"),
+        None => "it was never in a signed scope".to_string(),
+    };
+    Some(format!(
+        "{} {how} ({when}); close the task or move its work to a feature in force",
+        label(st, f)
+    ))
 }
 
 /// One line for the views when a scope change waits for the owner.

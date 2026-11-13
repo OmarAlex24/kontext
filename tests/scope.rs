@@ -1055,6 +1055,87 @@ fn new_scope_waits_for_the_signature_and_signed_work_keeps_moving() {
 }
 
 #[test]
+fn a_feature_replaced_and_signed_out_keeps_its_tasks_off_the_board() {
+    let t = planned();
+    sign(&t.p);
+    let rt = pm_id(
+        &t.p,
+        &["task", "add", "Refund API", "--feature", &t.refunds],
+    );
+    let v2 = pm_id(&t.p, &["feature", "add", "Refunds v2", "--epic", "pay"]);
+    pm_ok(&t.p, &["supersede", &t.refunds, &v2, "--why", "redesigned"]);
+    let (c, _, err) = code(&t.p, PM, &["assign", &rt, "--to", "impl1"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("is leaving the scope"), "{err}");
+    let s = sign(&t.p);
+    // Signed out: still not handed out, with the same refusal as a drop.
+    let (c, _, err) = code(&t.p, PM, &["assign", &rt, "--to", "impl1"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(
+        err.contains(&format!(
+            "{} Refunds was replaced by {v2} (the owner signed it out in {s}); close the task or move its work to a feature in force",
+            t.refunds
+        )),
+        "{err}"
+    );
+    assert!(!err.contains("kontext scope summary"), "{err}");
+    let (c, _, err) = code(&t.p, IMPL, &["next", "--epic", "pay", "--claim"]);
+    assert!(c == 2 || !err.contains(&rt), "{err}");
+    // A feature that entered and was replaced before any signature covered
+    // it: its tasks stay off the board too.
+    let gift = pm_id(&t.p, &["feature", "add", "Gift cards", "--epic", "pay"]);
+    let gt = pm_id(&t.p, &["task", "add", "Codes", "--feature", &gift]);
+    let gift2 = pm_id(&t.p, &["feature", "add", "Gift cards v2", "--epic", "pay"]);
+    pm_ok(&t.p, &["supersede", &gift, &gift2, "--why", "simpler"]);
+    let (c, _, err) = code(&t.p, PM, &["assign", &gt, "--to", "impl1"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("it was never in a signed scope"), "{err}");
+}
+
+
+#[test]
+fn a_goal_holds_only_the_tasks_that_cite_it_on_their_own() {
+    let t = planned();
+    let charge = pm_id(&t.p, &["task", "add", "Charge", "--feature", &t.card]);
+    sign(&t.p);
+    // The goal is replaced: a pending change, but the signed task under a
+    // signed feature and epic keeps going.
+    let g2 = pm_id(&t.p, &["goal", "add", "Card and wallet payments"]);
+    pm_ok(
+        &t.p,
+        &[
+            "supersede",
+            &t.goal,
+            &g2,
+            "--why",
+            "wallets",
+            "--approved-by",
+            "omar",
+        ],
+    );
+    assert!(
+        pm_ok(&t.p, &["plan"]).contains(&format!("leaves {} Card payments", t.goal)),
+        "the goal leaving is still a pending change"
+    );
+    pm_ok(&t.p, &["assign", &charge, "--to", "impl1"]);
+    // A task that cites the new goal on its own waits; one that only
+    // inherits its feature's goals does not.
+    let wallet = pm_id(
+        &t.p,
+        &["task", "add", "Wallet", "--feature", &t.card, "--goal", &g2],
+    );
+    let plain = pm_id(&t.p, &["task", "add", "Receipt", "--feature", &t.card]);
+    let (c, _, err) = code(&t.p, PM, &["assign", &wallet, "--to", "impl1"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(
+        err.contains(&format!("{g2} Card and wallet payments is not signed yet")),
+        "{err}"
+    );
+    pm_ok(&t.p, &["assign", &plain, "--to", "impl1"]);
+}
+
+
+#[test]
 fn a_feature_leaving_the_scope_holds_its_tasks_until_signed() {
     let t = planned();
     sign(&t.p);
@@ -1073,7 +1154,13 @@ fn a_feature_leaving_the_scope_holds_its_tasks_until_signed() {
     sign(&t.p);
     let (c, _, err) = code(&t.p, PM, &["assign", &rt, "--to", "impl1"]);
     assert_eq!(c, 2, "{err}");
-    assert!(err.contains("was dropped from the scope"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "{} Refunds was dropped (the owner signed it out in S-",
+            t.refunds
+        )),
+        "{err}"
+    );
     pm_ok(&t.p, &["feature", "drop", &t.card, "--why", "later"]);
     let plan = pm_ok(&t.p, &["plan"]);
     assert!(
