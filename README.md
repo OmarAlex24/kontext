@@ -209,8 +209,8 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 | `KONTEXT_DISTILL_DISABLE` | If set to anything, the `pre-compact` and `session-end` hooks don't run the distill |
 | `KONTEXT_CAPTURE_DISABLE` | If set to anything, the capture hooks (`user-prompt-submit`, `stop`, `session-end`) write nothing |
 | `KONTEXT_GH_BIN` | Another binary instead of `gh` for `changelog` (tests) |
-| `KONTEXT_SERVER` | The project's kontext server, instead of `server` in `projects.toml` (a sandbox) |
-| `KONTEXT_TOKEN` | A token for the kontext server (`kxt1.…`), instead of the one saved in the config folder; with `KONTEXT_SERVER`, a sandbox sets the project up on its first command |
+| `KONTEXT_SERVER` | A sandbox's kontext server: with `KONTEXT_TOKEN`, the first command sets up the token's project if this machine does not have it. A registered project always uses `server` in `projects.toml`, and its token never goes here |
+| `KONTEXT_TOKEN` | A token for the kontext server (`kxt1.…`) for `clone --server`, `server connect`, and a sandbox's first command (with `KONTEXT_SERVER`); it is then saved in the config folder (0600), and a registered project uses the saved one |
 | `KONTEXT_ADMIN_SECRET` | The server's admin secret, on a machine other than the one that deployed it (`init --server`, `server connect`) |
 | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | For `kontext server deploy` |
 
@@ -582,7 +582,7 @@ Two ways to share a project: a **kontext server** (below: every command syncs on
 
 ### With a kontext server
 
-The server is a Cloudflare Worker that you deploy on your own account (the free plan is enough); it relays ledger lines and never decides anything. Every command pulls before it reads and pushes what it wrote, with short timeouts: offline, commands work on the local copy and what you wrote goes up with the next command that reaches the server.
+The server is a Cloudflare Worker that you deploy on your own account (the free plan is enough); it relays ledger lines and never decides anything. Every command pulls before it reads and pushes what it wrote, with short timeouts. Push and pull go on their own, push first, so a slow pull never holds back what you wrote. Offline, commands work on the local copy and what you wrote goes up with the next command that reaches the server. Screenshots and other media come down when a view needs them, or with `kontext sync`.
 
 ```sh
 # Once per Cloudflare account. The API token needs the account permission
@@ -592,6 +592,9 @@ CLOUDFLARE_API_TOKEN=… kontext server deploy          # prints https://kontext
 # A new project on it, or an existing one with all its history
 kontext init billing --server https://kontext.<subdomain>.workers.dev
 kontext server connect https://kontext.<subdomain>.workers.dev
+
+# A copy that started without the server joins it with a token of its own
+KONTEXT_TOKEN=kxt1.… kontext server connect https://kontext.<subdomain>.workers.dev
 
 # Someone else, or another machine of yours: the owner makes a token (shown once)
 kontext token create --role owner --person ana
@@ -606,16 +609,19 @@ kontext token revoke tok_…
 
 | Command | What it does |
 |---|---|
-| `kontext server deploy [--name kontext] [--account-id] [--subdomain] [--no-check]` | Uploads the server with the Cloudflare API (no wrangler or Node) and prints its URL; running it again updates it and keeps its admin secret |
+| `kontext server deploy [--name kontext] [--account-id] [--subdomain] [--no-check] [--replace]` | Uploads the server with the Cloudflare API (no wrangler or Node) and prints its URL; running it again updates it and keeps its admin secret. It refuses (exit 2) a Worker of that name that kontext did not deploy, unless `--replace` |
 | `kontext init <name> --server <url>` | Creates the project on the server (with the admin secret) and locally, and saves this machine's owner token (0600) |
-| `kontext server connect <url>` | Attaches an existing project and uploads every writer's lines, the cursors, the config and the media; changes nothing local; running it again resumes |
+| `kontext server connect <url>` | Attaches an existing project. With the admin secret: uploads every writer's lines, the cursors, the config and the media, going on past a writer the server refuses (exit 1 if anything was left out). With only `KONTEXT_TOKEN`: this machine's own lines. Changes nothing local; running it again resumes |
 | `kontext clone --server <url> <project> [--home] [--name]` | Brings a project down with the token in `KONTEXT_TOKEN` |
 | `kontext token create --role <owner\|pm\|coordinator\|implementer\|tester\|scout> [--epic] [--person] [--ttl] [--writer]` | A token bound to a person, a role and its own writer; prints the variables for a sandbox |
 | `kontext token list` / `revoke <id>` | The project's tokens (never their secrets); a revoked one stops at once |
-| `kontext sync [--include-config]` | With a server: pull and push now, and say what arrived, what went up and what was refused (exit 1 if a line was refused or did not continue a chain) |
+| `kontext sync [--include-config]` | With a server: push and pull now, media included, and say what arrived, what went up and what was refused (exit 1 if a line was refused or did not continue a chain) |
 | `kontext ui` | Also listens to the server: a change on another machine shows up in a second or two |
 
 - **Who may write what:** each token's role (DESIGN §14.2). A sandbox's coordinator token writes as that epic's coordinator and its workers, never as a human, the pm or another epic's coordinator, and never decisions or signatures. kontext refuses such a line before writing it (exit 2).
+- **A name is not an identity:** with a server, assigning, releasing or closing another's task, or validating a feature, counts as the coordinator's only from a coordinator token of that epic (as one of its names, with role `coordinator`), a pm or owner token, or a writer with no token. Any other line is kept, does not count, and shows up as an alert. kontext reads every token's claims (never a secret) from the server for this.
+- **A line holds at most 4 MiB** with a server; kontext refuses a longer one before writing it (exit 2).
+- **Sandboxes never wait on the network:** a sandbox's set-up has the same short timeouts as every command, and after a failure no process on that machine tries again for 30 s. Token claims are not trusted until the server confirms them, and nothing outside a folder kontext set up is ever removed.
 - **Nothing in the repo:** no token, server URL or ledger goes in the code repo. Tokens live in the config folder (0600) or in the environment.
 - **If two copies write as the same writer** (a token used in two places), the server keeps the first and refuses the other's lines; `kontext status` says so, and nothing is overwritten.
 - **Old binaries** read a synced kontext-home as before (the format did not change); they just don't sync it.
