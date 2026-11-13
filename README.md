@@ -490,7 +490,7 @@ PRs come from `gh pr list --repo <owner/repo> --state merged --search "merged:>=
 
 | Command | What it does |
 |---|---|
-| `kontext ui [--port 4700] [--host 127.0.0.1] [--open] [--as <reader>]` | Serves a local read-only page with the ledger, the cursors, the alerts and the epic boards. It refreshes itself every 5 s. `--port 0` takes a free port; `--open` opens it in the browser; `--as` says who is looking (for "Signed by you" and "For you"; by default, as in `standup`) |
+| `kontext ui [--port 4700] [--host 127.0.0.1] [--open] [--as <reader>]` | Serves a local read-only page. `/` is the tree (as `kontext tree`: waves, epics, features, your ideas not placed); `/ledger` has the ledger, the cursors, the alerts and the epic boards; `/report` is the report. It refreshes itself every 5 s. `--port 0` takes a free port; `--open` opens it in the browser; `--as` says who is looking (for "Signed by you" and "For you"; by default, as in `standup`) |
 
 ### The page
 

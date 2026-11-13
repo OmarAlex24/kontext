@@ -110,7 +110,8 @@ fn binds_loopback_by_default_and_serves_an_offline_page() {
     let ui = start(&d, &[]);
     assert!(ui.addr.starts_with("127.0.0.1:"), "{}", ui.addr);
 
-    let (code, head, body) = request(&ui.addr, "GET", "/", None);
+    // The ledger page moved to /ledger, as it was.
+    let (code, head, body) = request(&ui.addr, "GET", "/ledger", None);
     assert_eq!(code, 200);
     assert!(head.contains("text/html"), "{head}");
     assert!(head.contains("Content-Security-Policy"), "{head}");
@@ -464,4 +465,51 @@ fn report_reads_the_ideas_on_each_request_and_its_csp_covers_them() {
         "{body}"
     );
     assert!(body.contains("Send reminders"));
+}
+
+#[test]
+fn the_root_is_the_tree_and_its_api_is_kontext_tree_json() {
+    let d = demo();
+    let ui = start(&d, &[]);
+    let (code, head, body) = request(&ui.addr, "GET", "/", None);
+    assert_eq!(code, 200);
+    assert!(head.contains("text/html"), "{head}");
+    // The same CSP as the ledger page.
+    let (_, ledger_head, _) = request(&ui.addr, "GET", "/ledger", None);
+    let csp = |h: &str| {
+        h.lines()
+            .find(|l| l.starts_with("Content-Security-Policy: "))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(csp(&head), csp(&ledger_head));
+    assert!(body.contains("/api/tree"), "{body}");
+    assert!(body.contains("href=\"/ledger\"") && body.contains("href=\"/report\""));
+    assert!(!body.to_lowercase().contains("http"), "no external URLs");
+    assert!(!body.contains("/*KONTEXT_STYLE*/") && !body.contains("/*KONTEXT_SCRIPT*/"));
+    assert_eq!(request(&ui.addr, "GET", "/index.html", None).0, 200);
+
+    // /api/tree is what `kontext tree --json` gives.
+    let v = get_json(&ui.addr, "/api/tree");
+    let out = Command::new(BIN)
+        .args(["--project", "billing", "--json", "tree"])
+        .env("KONTEXT_CONFIG_DIR", d.root.join("config"))
+        .env("KONTEXT_ACTOR", "human:omar")
+        .env_remove("KONTEXT_PROJECT")
+        .current_dir(&d.root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v, cli);
+    assert!(v["waves"].as_array().is_some_and(|w| !w.is_empty()), "{v}");
+    assert_eq!(
+        request(&ui.addr, "GET", "/api/tree", Some("evil.example:80")).0,
+        403
+    );
+    assert_eq!(request(&ui.addr, "POST", "/api/tree", None).0, 405);
 }

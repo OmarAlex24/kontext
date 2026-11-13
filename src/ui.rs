@@ -4,8 +4,11 @@
 //! A minimal HTTP/1.1 server over `std::net::TcpListener` (no runtime or
 //! dependencies): one thread per connection, `Connection: close`. Nothing writes.
 //!
-//! - `GET /`: the page, with the CSS and the JS of `templates/ui/` inside (it
-//!   asks nothing of the internet).
+//! - `GET /`: the tree (`templates/ui/tree.*`): waves, epics, features and the
+//!   ideas not placed, from `/api/tree`, read again every 5 seconds.
+//! - `GET /ledger`: the ledger page, with the CSS and the JS of `templates/ui/`
+//!   inside (it asks nothing of the internet).
+//! - `GET /api/tree`: what `kontext tree --json` gives.
 //! - `GET /api/state[?before=<hlc>&limit=<n>]`: everything the page draws,
 //!   built from what the views already compute (`State`, `standup`,
 //!   `epic_line`, `status`), and the ledger from the newest to the oldest, in
@@ -44,12 +47,22 @@ pub const MAX_LIMIT: usize = 1000;
 const INDEX_HTML: &str = include_str!("../templates/ui/index.html");
 const STYLE_CSS: &str = include_str!("../templates/ui/style.css");
 const APP_JS: &str = include_str!("../templates/ui/app.js");
+const TREE_HTML: &str = include_str!("../templates/ui/tree.html");
+const TREE_CSS: &str = include_str!("../templates/ui/tree.css");
+const TREE_JS: &str = include_str!("../templates/ui/tree.js");
 
 /// The page with its CSS and JS inside.
 pub fn page() -> String {
     INDEX_HTML
         .replace("/*KONTEXT_STYLE*/", STYLE_CSS)
         .replace("/*KONTEXT_SCRIPT*/", APP_JS)
+}
+
+/// The tree page with its CSS and JS inside.
+pub fn tree_page() -> String {
+    TREE_HTML
+        .replace("/*KONTEXT_STYLE*/", TREE_CSS)
+        .replace("/*KONTEXT_SCRIPT*/", TREE_JS)
 }
 
 // ------------------------------------------------------------ the state
@@ -746,6 +759,21 @@ pub fn entry_json(src: &Source, id: &str) -> Result<Option<Value>> {
 /// through `/media/` instead of embedded (those of the ideas, embedded). The
 /// ideas are read on each request, so an edited `items.md` shows on reload.
 /// The second value says whether it carries "Your ideas" (for its CSP).
+/// `/api/tree`: `kontext tree --json`, with the ideas of the `.pm/` found
+/// from where `kontext ui` was started (as `/report`).
+pub fn tree_json(src: &Source) -> Result<Value> {
+    let (mut store, project) = src.open()?;
+    let st = app::state(&mut store, &project)?;
+    let people: Vec<String> = project.people.keys().cloned().collect();
+    let ideas = src.cwd.as_deref().and_then(|cwd| {
+        let repos = crate::repos::Repos::load(&project, cwd).ok()?;
+        let own = crate::capture::Settings::of(&project).worktrees;
+        let pm = crate::ideas::locate(&repos, own)?;
+        crate::ideas::load(&st, &project.name, &people, &pm).ok()
+    });
+    Ok(crate::tree::build(&st, &project.name, &people, ideas.as_ref()).json())
+}
+
 pub fn report_html(src: &Source) -> Result<(String, bool)> {
     let (mut store, project) = src.open()?;
     let st = app::state(&mut store, &project)?;
@@ -826,6 +854,7 @@ pub fn serve(src: Source, opts: &Options) -> Result<()> {
         port: addr.port(),
         lock: Mutex::new(()),
         page: page(),
+        tree_page: tree_page(),
     });
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -862,6 +891,7 @@ struct Server {
     /// One request at a time builds the state (they share the index).
     lock: Mutex<()>,
     page: String,
+    tree_page: String,
 }
 
 pub struct Response {
@@ -1024,9 +1054,22 @@ impl Server {
             "/" | "/index.html" => Response {
                 status: 200,
                 content_type: "text/html; charset=utf-8",
+                body: self.tree_page.as_bytes().to_vec(),
+                csp: None,
+            },
+            "/ledger" => Response {
+                status: 200,
+                content_type: "text/html; charset=utf-8",
                 body: self.page.as_bytes().to_vec(),
                 csp: None,
             },
+            "/api/tree" => {
+                let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+                match tree_json(&self.src) {
+                    Ok(v) => Response::json(200, &v),
+                    Err(e) => Response::json(500, &json!({"error": format!("{e:#}")})),
+                }
+            }
             "/api/state" => {
                 let limit = match q.get("limit").map(|l| l.parse::<usize>()) {
                     None => DEFAULT_LIMIT,
@@ -1156,11 +1199,12 @@ mod tests {
 
     #[test]
     fn page_has_no_placeholders_and_no_remote_urls() {
-        let p = page();
-        assert!(!p.contains("/*KONTEXT_STYLE*/") && !p.contains("/*KONTEXT_SCRIPT*/"));
-        assert!(
-            !p.contains("http"),
-            "the page must not ask anything of the internet"
-        );
+        for p in [page(), tree_page()] {
+            assert!(!p.contains("/*KONTEXT_STYLE*/") && !p.contains("/*KONTEXT_SCRIPT*/"));
+            assert!(
+                !p.contains("http"),
+                "the page must not ask anything of the internet"
+            );
+        }
     }
 }
