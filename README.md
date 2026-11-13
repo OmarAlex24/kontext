@@ -22,7 +22,7 @@ From the source instead, with Rust 1.89 or newer (`rustup`):
 cargo install --path . --locked
 ```
 
-That leaves the `kontext` binary in `~/.cargo/bin`. Install it either way before `kontext install` before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
+That leaves the `kontext` binary in `~/.cargo/bin`. Install it either way before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
 
 ### Have an agent install it and migrate the memory
 
