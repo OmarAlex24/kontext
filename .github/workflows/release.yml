@@ -84,7 +84,10 @@ jobs:
           cp dist/kontext-${{ matrix.target }}.sha256 dist/SHA256SUMS
           KONTEXT_DOWNLOAD_BASE="file://$PWD/dist" KONTEXT_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
           "$RUNNER_TEMP/bin/kontext" --version
-          sed 's/^./0/' dist/SHA256SUMS > dist/bad && mv dist/bad dist/SHA256SUMS
+          # Always a different first digit (a sum that starts with 0 stayed the same before).
+          awk '{ c = substr($0, 1, 1); print (c == "0" ? "1" : "0") substr($0, 2) }' dist/SHA256SUMS > dist/bad
+          if cmp -s dist/bad dist/SHA256SUMS; then echo "the corrupted sums are the real ones"; exit 1; fi
+          mv dist/bad dist/SHA256SUMS
           if KONTEXT_DOWNLOAD_BASE="file://$PWD/dist" KONTEXT_INSTALL_DIR="$RUNNER_TEMP/bad" sh install.sh; then
             echo "install.sh accepted a bad checksum"; exit 1
           fi
