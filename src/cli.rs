@@ -174,6 +174,35 @@ pub enum FeatureCmd {
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
     },
+    /// Takes a feature out of the scope with no replacement (the pm or an owner). With a signed
+    /// plan it waits for the owner's signature like any scope change. `kontext reopen <U>` puts
+    /// it back
+    Drop {
+        /// The feature (U-…)
+        feature: String,
+        #[arg(long)]
+        why: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScopeCmd {
+    /// What the owner would sign now: the plan, or the scope change since the last signature,
+    /// ending with its hash. Writes nothing
+    Summary,
+    /// Signs the scope whose summary has this hash (an owner, or the pm with --approved-by).
+    /// Refuses if the scope changed since that summary
+    Sign {
+        /// The hash `kontext scope summary` printed (or its first 8 characters or more)
+        #[arg(long)]
+        hash: String,
+        /// The owner's words, verbatim, when the pm signs for them
+        #[arg(long)]
+        said: Option<String>,
+        /// Owner who approved it (only for the pm)
+        #[arg(long)]
+        approved_by: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -220,6 +249,9 @@ pub enum InboxCmd {
         item: String,
         #[arg(long, default_value = "")]
         why: String,
+        /// The owner who said yes (the pm, to dismiss the owner's own words)
+        #[arg(long)]
+        approved_by: Option<String>,
     },
     /// Confirms what the distill noted from your conversations (`review`)
     Confirm { item: String },
@@ -454,6 +486,11 @@ pub enum Cmd {
     Feature {
         #[command(subcommand)]
         cmd: FeatureCmd,
+    },
+    /// The scope the owner signs: the plan once, then each change (`summary`, `sign`)
+    Scope {
+        #[command(subcommand)]
+        cmd: ScopeCmd,
     },
     /// Tasks
     Task {
@@ -1053,7 +1090,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Decide { d, approved_by } => cx.written("the decision", |s, a| {
             let mut args = d.args();
             // Without permission, `decide` refuses: don't store the attachment for nothing.
-            if s.policy().check(a, approved_by.as_deref()).is_ok() {
+            if write::may_decide(s, a, approved_by.as_deref())? {
                 args.attachments = store_media(s, &d.attach, &d.screen, true)?;
             }
             write::decide(s, a, &args, approved_by.as_deref())
@@ -1151,6 +1188,26 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 Ok((w.entries, w.warnings))
             })
         }
+        Cmd::Feature {
+            cmd: FeatureCmd::Drop { feature, why },
+        } => cx.written("the drop", |s, a| {
+            crate::features::drop(s, a, &feature, &why)
+        }),
+        Cmd::Scope {
+            cmd: ScopeCmd::Summary,
+        } => cx.scope_summary(),
+        Cmd::Scope {
+            cmd:
+                ScopeCmd::Sign {
+                    hash,
+                    said,
+                    approved_by,
+                },
+        } => cx.scope_sign(crate::scope::SignArgs {
+            hash,
+            said,
+            approved_by,
+        }),
         Cmd::Task {
             cmd:
                 TaskCmd::Add {
@@ -1203,10 +1260,18 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             let (mut store, _) = cx.open()?;
             let st = store.state()?;
             let plan = crate::plan::of_state(&st);
+            let pending = crate::scope::pending_line(&st);
             if cx.json {
-                print_json(&plan.json())?;
+                let mut v = plan.json();
+                if let Some(p) = pending {
+                    v["pending_scope"] = serde_json::json!(p);
+                }
+                print_json(&v)?;
             } else {
                 print!("{}", plan.text());
+                if let Some(p) = pending {
+                    println!("\n{p}");
+                }
             }
             Ok(if plan.ok {
                 ExitCode::SUCCESS
@@ -1508,6 +1573,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 .problems
                 .iter()
                 .chain(&report.media_problems)
+                .chain(&report.scope_problems)
                 .chain(&report.newer)
             {
                 println!("{pr}");
@@ -1921,7 +1987,19 @@ impl Ctx<'_> {
             Some(h) if !explicit && !self.who()?.is_human() => h,
             _ => human,
         };
-        let ib = inbox::build(&st, &project.name, &human);
+        // `--as pm`: the pm's inbox (with a signed plan: proposals, what the
+        // distill noted and the problems that are not the owner's).
+        // Only while the pm acts alone; otherwise `--as pm` is the reader pm's
+        // inbox, as it always was.
+        let pm_view = explicit && human == inbox::PM && crate::scope::pm_acts_alone(&st);
+        let view = |st: &crate::state::State, name: &str| {
+            if pm_view {
+                inbox::build_pm(st, name)
+            } else {
+                inbox::build(st, name, &human)
+            }
+        };
+        let ib = view(&st, &project.name);
         let wrong = |it: &inbox::Item, what: &str| -> anyhow::Error {
             Refused(format!(
                 "pending item {} is in the \"{}\" group, not \"{what}\": {}",
@@ -1959,9 +2037,18 @@ impl Ctx<'_> {
                     return Err(wrong(it, "sign"));
                 }
                 let id = it.key.clone();
+                if id == inbox::SCOPE_KEY {
+                    return Err(Refused(
+                        "a scope change is signed on its full summary: read it with `kontext scope \
+                         summary`, then `kontext scope sign --hash <hash>` (or say yes to the pm, \
+                         who signs it with you)"
+                            .into(),
+                    )
+                    .into());
+                }
                 if st.kind_of(&id) == Some("proposal") {
                     self.written("the acceptance", |s, a| {
-                        inbox::require_human(a)?;
+                        inbox::require_closer(&ib, a)?;
                         write::accept(s, a, &id, false, None, "")
                     })?
                 } else {
@@ -1997,15 +2084,37 @@ impl Ctx<'_> {
                     }
                 };
                 self.written("the answer", |s, a| {
-                    inbox::require_human(a)?;
+                    inbox::require_closer(&ib, a)?;
                     write::answer(s, a, &q, &text)
                 })?
             }
-            Some(InboxCmd::Dismiss { item, why }) => {
+            Some(InboxCmd::Dismiss {
+                item,
+                why,
+                approved_by,
+            }) => {
                 let (it, sub) = inbox::find(&ib, &st, &item)?;
+                if it.key == inbox::SCOPE_KEY {
+                    return Err(Refused(
+                        "a scope change is not dismissed: it waits until the owner signs it \
+                         (`kontext scope summary`), or until the pm undoes it (`kontext feature \
+                         drop` what entered, `kontext reopen` what left)"
+                            .into(),
+                    )
+                    .into());
+                }
                 let (it, sub) = (it.clone(), sub.cloned());
                 self.written("the dismissal", |s, a| {
-                    inbox::close(s, a, "dismiss", &it, sub.as_ref(), &why)
+                    inbox::close(
+                        s,
+                        a,
+                        &ib,
+                        "dismiss",
+                        &it,
+                        sub.as_ref(),
+                        &why,
+                        approved_by.as_deref(),
+                    )
                 })?
             }
             Some(InboxCmd::Confirm { item }) => {
@@ -2015,17 +2124,18 @@ impl Ctx<'_> {
                 }
                 let (it, sub) = (it.clone(), sub.cloned());
                 self.written("the confirmation", |s, a| {
-                    inbox::close(s, a, "confirm", &it, sub.as_ref(), "")
+                    inbox::close(s, a, &ib, "confirm", &it, sub.as_ref(), "", None)
                 })?
             }
         };
         if !self.json {
             let (mut store, project) = self.open()?;
             let st = app::state(&mut store, &project)?;
-            let left = inbox::build(&st, &project.name, &human);
+            let left = view(&st, &project.name);
             println!(
-                "{} See them with `kontext inbox`.",
-                inbox::count_line(&left)
+                "{} See them with `kontext inbox{}`.",
+                inbox::count_line(&left),
+                if pm_view { " --as pm" } else { "" }
             );
         }
         Ok(code)
@@ -2104,6 +2214,52 @@ impl Ctx<'_> {
             print!("{}", crate::ideas::text(&ideas));
         }
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// The `.pm/` folder and its `items.md` (what `kontext ideas` and
+    /// `kontext tree` read), or the folder where none was found.
+    fn ideas_source(&self, project: &Project) -> Result<crate::scope::IdeasSource> {
+        let cwd = std::env::current_dir()?;
+        let repos = Repos::load(project, &cwd)?;
+        let own = crate::capture::Settings::of(project).worktrees;
+        let not_found = || crate::scope::IdeasSource::NotFound(cwd.display().to_string());
+        let Some(pm) = crate::ideas::locate(&repos, own) else {
+            return Ok(not_found());
+        };
+        let Ok(items_md) = fs::read_to_string(pm.join("items.md")) else {
+            return Ok(not_found());
+        };
+        Ok(crate::scope::IdeasSource::Found {
+            pm,
+            items_md,
+            people: project.people.keys().cloned().collect(),
+        })
+    }
+
+    /// `kontext scope summary`: read-only.
+    fn scope_summary(&self) -> Result<ExitCode> {
+        let (mut store, project) = self.open()?;
+        let src = self.ideas_source(&project)?;
+        let st = app::state(&mut store, &project)?;
+        let ideas = src.check(&st, &project.name);
+        let s = crate::scope::summary(&st, &project.name, &ideas);
+        if self.json {
+            print_json(&s.json())?;
+        } else {
+            print!("{}", s.text());
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// `kontext scope sign --hash <h>`.
+    fn scope_sign(&self, args: crate::scope::SignArgs) -> Result<ExitCode> {
+        let (store, project) = self.open()?;
+        let src = self.ideas_source(&project)?;
+        drop(store);
+        let code = self.written("the scope signature", |s, a| {
+            crate::scope::sign(s, a, &project.name, &src, &args)
+        })?;
+        Ok(code)
     }
 
     fn tree(&self) -> Result<ExitCode> {

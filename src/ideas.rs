@@ -524,7 +524,14 @@ pub fn id_tokens(s: &str) -> Vec<String> {
 /// The prefixes an id of this ledger can have: kontext's and those of the
 /// v0 ids imported. A token with another prefix (`CVE-2024`) is plain text.
 fn known_prefixes(st: &State) -> BTreeSet<String> {
-    let mut out: BTreeSet<String> = ENTITY_KINDS.iter().map(|(_, p)| p.to_string()).collect();
+    // `S` (a scope signature) is an id only once the ledger has one: before
+    // that, an `S-12` in items.md stays plain text, as it always was.
+    let has_scope = st.of_kind("scope").next().is_some();
+    let mut out: BTreeSet<String> = ENTITY_KINDS
+        .iter()
+        .filter(|(k, _)| *k != "scope" || has_scope)
+        .map(|(_, p)| p.to_string())
+        .collect();
     out.insert(RECORD_PREFIX.to_string());
     for v0 in st.v0_ids.keys() {
         if let Some((p, _)) = v0.split_once('-') {
@@ -674,6 +681,12 @@ fn cites_text(st: &State, cited: &[&Entry], where_: &str) -> Option<String> {
         .map(|e| match e.kind.as_str() {
             "epic" => format!("{}, no feature", one_line(&e.title, 60)),
             "question" | "proposal" => format!("{} {} {}", e.kind, e.id, status_text(st, e)),
+            "feature" if crate::scope::leaving(st, &e.id) => {
+                format!("feature {} dropped, waiting for your signature", e.id)
+            }
+            "feature" if st.dropped.contains_key(&e.id) => {
+                format!("feature {} dropped (it was never in a signed scope)", e.id)
+            }
             "feature" | "task" | "decision" => {
                 format!("{} {} {}", e.kind, e.id, status_text(st, e))
             }
@@ -804,8 +817,24 @@ fn idea(
         }
     }
     let written = normalize(&row.state);
-    let (state, from) = derive(st, people, &row, &written, &entries, &evidence, &mut notes);
-    let placed = is_placed(st, state, &cited);
+    let (mut state, mut from) = derive(st, people, &row, &written, &entries, &evidence, &mut notes);
+    let mut placed = is_placed(st, state, &cited);
+    // Its only home was a feature that was dropped, and the owner signed the
+    // scope without it: the idea counts as discarded, by that signature.
+    if !placed
+        && let Some((f, sc)) = cited.iter().find_map(|e| {
+            st.drop_signed
+                .get(&e.id)
+                .map(|sc| (e.id.clone(), sc.clone()))
+        })
+    {
+        notes.push(format!(
+            "{f} was dropped and the owner signed it in {sc}: discarded"
+        ));
+        state = IdeaState::Discarded;
+        from = StateFrom::Ledger;
+        placed = true;
+    }
     let cites = if placed {
         None
     } else {

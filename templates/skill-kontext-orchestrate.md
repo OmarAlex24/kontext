@@ -47,7 +47,7 @@ Count like this: one coordinator per epic; as many implementers as tasks ready a
 
 ## 3. Waves
 
-**Phase 0, no code (XXL).** With the user, in the conversation: the charter (`kontext charter`), the goals (`kontext goal add`), and the architecture decisions (`kontext decide`). The user signs them (`kontext sign`); you only use `--approved-by` once they have approved them in the conversation. Then, the epic map, with the features of each epic: what the human will see working, each with its acceptance written as what they see:
+**Phase 0, no code (XXL).** With the user, in the conversation: the charter (`kontext charter`), the goals (`kontext goal add`), and the architecture decisions (`kontext decide`). They are signed together with the plan, at the end of phase 0 (below), not one by one; a decision you write before then needs `--approved-by`, only once they have approved it in the conversation. Then, the epic map, with the features of each epic: what the human will see working, each with its acceptance written as what they see:
 
 ```sh
 kontext epic add "Foundations" --goal <G> --name foundations
@@ -69,6 +69,8 @@ kontext decide "The screens follow the approved mockup" --epic <epic> \
 ```
 
 The coordinators build against that reference (it appears in "How it looks" in the report), and each worker closes with a screenshot of the same screen (`--evidence screenshot.png --screen <screen>`), so the human sees the before and after.
+
+**Sign the plan: phase 0 ends here.** Show the user `kontext scope summary` verbatim, run from the repo that has `.pm/` (elsewhere it says "Ideas not checked", and a signature run from another folder than the summary is refused): the charter, the goals, each wave with its epics, features and acceptance, and the ideas not placed (a plan with any is refused: place or discard them first). On their yes ("sí" is enough), sign it with the hash it ends with: `kontext scope sign --hash <hash> --approved-by <owner> --said "<their words>"`. From then on you decide alone inside it (section 10 of the `kontext-pm` skill), and a change of features, epics, goals or the charter is a scope change they sign the same way; its new work is not handed out until they do. Launch no wave before the plan is signed.
 
 - **Wave 1:** the foundations epic, in series (one coordinator).
 - **Middle waves:** the independent epics in parallel, one coordinator each (what `kontext plan` puts in the same wave).

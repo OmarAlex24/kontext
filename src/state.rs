@@ -198,6 +198,12 @@ pub enum Alert {
     /// An open task of a superseded feature: it no longer keeps its epic open,
     /// so the work would be lost unless it is closed or moved.
     SupersededFeatureTask { task: String, feature: String },
+    /// An open task of a dropped feature (`kontext feature drop`): like a
+    /// superseded feature's, its work is lost unless it is closed or moved.
+    DroppedFeatureTask { task: String, feature: String },
+    /// A `scope` entry whose content does not hold (its summary was changed
+    /// after the hash was computed): it does not count.
+    ScopeInvalid { id: String, reason: String },
     /// Phase 4: a fact whose fingerprint no longer matches `HEAD` (it is not
     /// written; [`crate::facts::annotate`] adds it when reading).
     FactStale {
@@ -235,6 +241,8 @@ impl Alert {
             Alert::ClaimLost { task, record, .. } => vec![task, record],
             Alert::ProposalSupersedes { proposal, decision } => vec![proposal, decision],
             Alert::SupersededFeatureTask { task, feature } => vec![task, feature],
+            Alert::DroppedFeatureTask { task, feature } => vec![task, feature],
+            Alert::ScopeInvalid { id, .. } => vec![id],
         }
     }
 
@@ -255,6 +263,7 @@ impl Alert {
                     | Alert::ClaimLost { .. }
                     | Alert::ProposalSupersedes { .. }
                     | Alert::SupersededFeatureTask { .. }
+                    | Alert::DroppedFeatureTask { .. }
             )
     }
 
@@ -345,6 +354,13 @@ impl fmt::Display for Alert {
                 f,
                 "open task {task} of superseded feature {feature}: close it with evidence or move the work to a feature in force"
             ),
+            Alert::DroppedFeatureTask { task, feature } => write!(
+                f,
+                "open task {task} of dropped feature {feature}: close it with evidence, move the work to a feature in force, or put {feature} back with `kontext reopen {feature} --why …`"
+            ),
+            Alert::ScopeInvalid { id, reason } => {
+                write!(f, "{id} (scope signature) does not count: {reason}")
+            }
             Alert::FactStale {
                 id,
                 path,
@@ -540,6 +556,15 @@ pub struct State {
     /// The old id of each entry imported from v0 (`fields.v0_id`, `D-0030`) →
     /// its id here. [`State::resolve`] looks them up.
     pub v0_ids: BTreeMap<String, String>,
+    /// The `scope` entries that count, in `hlc` order (the last one is the
+    /// signed scope). Empty: no signed plan, and nothing about scopes applies.
+    pub scopes: Vec<String>,
+    /// Feature → the `supersede` without a replacement that dropped it (while
+    /// it stays dropped).
+    pub dropped: BTreeMap<String, String>,
+    /// Dropped feature → the `scope` entry whose signature covered its removal
+    /// (it was in that entry's `removes`).
+    pub drop_signed: BTreeMap<String, String>,
     /// Charters in the order they were signed.
     sign_order: Vec<String>,
 }
@@ -852,9 +877,53 @@ impl State {
         }
     }
 
+    /// With a signed plan (at this point of the walk), the pm decides alone
+    /// inside it: a `decision`, `accept` or `reject` from the pm counts
+    /// without `approved_by`. Not with `require_signatures`: there, what
+    /// becomes law still needs an owner's key.
+    fn pm_decides_alone(&self, e: &Entry) -> bool {
+        self.pm_alone_here()
+            && matches!(e.kind.as_str(), "decision" | "accept" | "reject")
+            && e.actor.is_agent()
+            && e.actor.role.as_deref() == Some("pm")
+            && !e.fields.contains_key("v0_id")
+            && !self.rejects_owners_words(e)
+    }
+
+    /// A signed plan (at this point of the walk) and no `require_signatures`.
+    fn pm_alone_here(&self) -> bool {
+        !self.scopes.is_empty() && !self.policy.require_signatures
+    }
+
+    /// A `reject` of something that carries the owner's own words: never the
+    /// pm's alone, signed plan or not (it needs `approved_by`).
+    fn rejects_owners_words(&self, e: &Entry) -> bool {
+        e.kind == "reject"
+            && e.refs
+                .first()
+                .and_then(|t| self.get(t))
+                .is_some_and(crate::scope::owners_words)
+    }
+
     /// Checks the owner rule. If it does not count, records it as an alert.
     fn authorize(&mut self, e: &Entry) -> bool {
-        match self.policy.check_entry(e) {
+        let checked = match self.policy.check_entry(e) {
+            Err(_) if self.pm_decides_alone(e) => Ok(()),
+            // Only where the pm otherwise decides alone does it need its own
+            // reason; without a signed plan the alert reads as it always did.
+            Err(_)
+                if self.pm_alone_here()
+                    && self.rejects_owners_words(e)
+                    && e.actor.role.as_deref() == Some("pm") =>
+            {
+                Err(format!(
+                    "{} rejected the owner's own words without approved_by from an owner",
+                    e.actor.short()
+                ))
+            }
+            other => other,
+        };
+        match checked {
             Ok(())
                 if self.policy.require_signatures && crate::sign::wants_signature(e).is_some() =>
             {
@@ -966,6 +1035,9 @@ impl State {
             if e.kind == "journal" {
                 self.touch_task(e);
             }
+            if e.kind == "scope" {
+                self.apply_scope(e);
+            }
             if e.kind == "decision" && self.authorize(e) {
                 for old in string_list(e.fields.get("supersedes")) {
                     self.supersede(&old, &e.id);
@@ -1059,7 +1131,12 @@ impl State {
                 }
                 match e.refs.get(1) {
                     Some(by) => self.supersede(&target, by),
-                    None => self.set(&target, Status::Superseded),
+                    // Without a replacement: the feature is dropped.
+                    None => {
+                        self.set(&target, Status::Superseded);
+                        self.dropped.insert(target.clone(), e.id.clone());
+                        self.drop_signed.remove(&target);
+                    }
                 }
             }
             "supersede" => {
@@ -1094,7 +1171,11 @@ impl State {
     /// noted): closes items in the inbox. It only counts if a human writes it:
     /// seeing it closes nothing, and an agent cannot close them on the human's behalf.
     fn close_inbox_items(&mut self, e: &Entry) {
-        if !e.actor.is_human() {
+        // While the pm acts alone (a signed plan, no `require_signatures`) it
+        // closes the items of its own inbox, and only those
+        // (`inbox::pm_may_close`).
+        let pm = crate::inbox::is_pm(&e.actor) && crate::scope::pm_acts_alone(self);
+        if !e.actor.is_human() && !pm {
             self.not_counting.insert(
                 e.id.clone(),
                 format!(
@@ -1107,6 +1188,28 @@ impl State {
         let mut items = string_list(e.fields.get("items"));
         if items.is_empty() {
             items = e.refs.clone();
+        }
+        if pm {
+            let approved = e
+                .fields
+                .get("approved_by")
+                .and_then(Value::as_str)
+                .is_some_and(|a| self.policy.is_owner(a));
+            let refused: Vec<String> = items
+                .iter()
+                .filter_map(|k| crate::inbox::pm_may_close(self, k, &e.kind, approved).err())
+                .collect();
+            if !refused.is_empty() {
+                let reason = format!("the pm may not close it: {}", refused.join("; "));
+                self.not_counting.insert(e.id.clone(), reason.clone());
+                self.alerts.push(Alert::NotCounting {
+                    id: e.id.clone(),
+                    kind: e.kind.clone(),
+                    actor: e.actor.short(),
+                    reason,
+                });
+                return;
+            }
         }
         for k in items {
             self.inbox_closed.entry(k).or_insert_with(|| e.id.clone());
@@ -1357,9 +1460,69 @@ impl State {
         self.feature_event(f, e, true, note);
     }
 
+    /// A `scope` entry: an owner (or the pm with `approved_by`) signed the
+    /// summary it stores. It counts if its hash matches its summary.
+    fn apply_scope(&mut self, e: &Entry) {
+        if !self.authorize(e) {
+            return;
+        }
+        if let Some(reason) = crate::scope::content_problem(e) {
+            self.not_counting.insert(e.id.clone(), reason.clone());
+            self.alerts.push(Alert::ScopeInvalid {
+                id: e.id.clone(),
+                reason,
+            });
+            self.status.insert(e.id.clone(), Status::Ignored);
+            return;
+        }
+        self.scopes.push(e.id.clone());
+        let covers: BTreeSet<String> = string_list(e.fields.get("covers")).into_iter().collect();
+        // The charter and goals it covers count as signed, as a `sign` would
+        // make them (the decisions it covers are already in force).
+        let order: Vec<String> = self.order.clone();
+        for id in order.iter().filter(|id| covers.contains(*id)) {
+            let kind = self.kind_of(id).map(str::to_string);
+            if !matches!(kind.as_deref(), Some("charter" | "goal"))
+                || self.status_of(id) != Some(Status::Unsigned)
+            {
+                continue;
+            }
+            self.set(id, Status::Signed);
+            self.signed_by.insert(id.clone(), e.id.clone());
+            if kind.as_deref() == Some("charter") {
+                for old in self.fields_list(id, "supersedes") {
+                    self.supersede(&old, id);
+                }
+                self.sign_order.push(id.clone());
+            }
+        }
+        // A dropped feature is signed out only if this signature's summary
+        // listed it as leaving (`removes`): the owner saw it go. One added and
+        // dropped between two signatures never entered the scope, so no
+        // signature covers its removal (an idea placed only on it is not placed).
+        let removes: BTreeSet<String> = string_list(e.fields.get("removes")).into_iter().collect();
+        let dropped: Vec<String> = self.dropped.keys().cloned().collect();
+        for f in dropped {
+            if removes.contains(&f) {
+                self.drop_signed.entry(f).or_insert_with(|| e.id.clone());
+            }
+        }
+    }
+
     /// `done` (validate) and `reopen` on a feature.
     fn apply_feature(&mut self, e: &Entry, f: &str) {
         let info = self.features.get(f).cloned().unwrap_or_default();
+        // A reopen of a dropped feature puts it back; its validation, if it
+        // had one, is kept.
+        if e.kind == "reopen" && self.dropped.contains_key(f) {
+            if let Err(reason) = crate::features::may_write(self, &e.actor) {
+                return self.feature_ignored(f, e, reason.replace("add or supersede", "put back"));
+            }
+            self.dropped.remove(f);
+            self.drop_signed.remove(f);
+            self.set(f, Status::Active);
+            return self.feature_event(f, e, true, "put back in the scope".into());
+        }
         match e.kind.as_str() {
             "done" => {
                 if info.validated.is_some() {
@@ -1449,9 +1612,11 @@ impl State {
             if self.status_of(f) == Some(Status::Superseded)
                 && self.task_status(&t.id) != Some(TaskStatus::Closed)
             {
-                alerts.push(Alert::SupersededFeatureTask {
-                    task: t.id.clone(),
-                    feature: f.to_string(),
+                let (task, feature) = (t.id.clone(), f.to_string());
+                alerts.push(if self.dropped.contains_key(f) {
+                    Alert::DroppedFeatureTask { task, feature }
+                } else {
+                    Alert::SupersededFeatureTask { task, feature }
                 });
             }
         }
@@ -1549,6 +1714,9 @@ impl State {
             for g in goals {
                 let reason = match (self.kind_of(&g), self.status_of(&g)) {
                     (Some("goal"), Some(Status::Signed)) => continue,
+                    // With a signed plan, an unsigned goal is part of the
+                    // pending scope change, which says so on its own.
+                    (Some("goal"), Some(Status::Unsigned)) if !self.scopes.is_empty() => continue,
                     (Some("goal"), Some(Status::Unsigned)) => {
                         drift.push(Alert::UnsignedGoal {
                             id: e.id.clone(),

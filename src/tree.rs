@@ -24,6 +24,12 @@
 //! Tasks are never listed. "Not placed" comes from [`crate::ideas`] and is
 //! absent without `.pm/items.md`. Read-only: it writes nothing and advances no
 //! cursor.
+//!
+//! With a signed plan (`kontext scope sign`) the header says so ("plan signed
+//! Nov 12"), or that a scope change waits for the owner, with what enters
+//! and leaves on one line; a feature or epic that entered after the
+//! signature says "not signed", and a feature dropped since, "dropping,
+//! waiting for you" (it stays listed until the owner signs).
 
 use std::collections::BTreeSet;
 
@@ -55,6 +61,57 @@ impl Progress {
     }
 }
 
+/// Where a feature or an epic stands against the signed scope.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeMark {
+    /// It entered after the last signature.
+    NotSigned,
+    /// It was dropped and the owner has not signed that yet.
+    Dropping,
+}
+
+impl ScopeMark {
+    pub fn label(self) -> &'static str {
+        match self {
+            ScopeMark::NotSigned => "not signed",
+            ScopeMark::Dropping => "dropping, waiting for you",
+        }
+    }
+}
+
+/// The signed scope, in the header (only with a signed plan).
+#[derive(Serialize, Clone, Debug)]
+pub struct TreeScope {
+    /// The last scope signature (`S-…`) and its day ("Nov 12").
+    pub signed: String,
+    pub signed_on: String,
+    /// The change that waits for the owner, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingScope>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct PendingScope {
+    /// Titles of what enters and leaves.
+    pub enters: Vec<String>,
+    pub leaves: Vec<String>,
+}
+
+impl PendingScope {
+    /// "enters Invoices · leaves Refunds".
+    pub fn line(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.enters.is_empty() {
+            parts.push(format!("enters {}", self.enters.join(", ")));
+        }
+        if !self.leaves.is_empty() {
+            parts.push(format!("leaves {}", self.leaves.join(", ")));
+        }
+        parts.join(" · ")
+    }
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Count {
     pub done: usize,
@@ -73,6 +130,8 @@ pub struct TreeFeature {
     pub waiting_for_you: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeMark>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -91,6 +150,8 @@ pub struct TreeEpic {
     /// Why it has no wave (only in `no_wave`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeMark>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -121,6 +182,9 @@ pub struct Tree {
     pub no_wave: Vec<TreeEpic>,
     /// `None` without `.pm/items.md`.
     pub not_placed: Option<TreeIdeas>,
+    /// `None` without a signed plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<TreeScope>,
 }
 
 // ------------------------------------------------------------ build
@@ -155,7 +219,40 @@ fn waiting_features(st: &State, people: &[String]) -> BTreeSet<String> {
     out
 }
 
-fn feature_node(st: &State, f: &crate::model::Entry, waiting: &BTreeSet<String>) -> TreeFeature {
+/// What enters and leaves the signed scope (empty without a pending change).
+#[derive(Default)]
+struct Marks {
+    adds: BTreeSet<String>,
+    removes: BTreeSet<String>,
+}
+
+impl Marks {
+    fn of(st: &State) -> Marks {
+        crate::scope::pending(st)
+            .map(|d| Marks {
+                adds: d.adds.into_iter().collect(),
+                removes: d.removes.into_iter().collect(),
+            })
+            .unwrap_or_default()
+    }
+
+    fn mark(&self, id: &str) -> Option<ScopeMark> {
+        if self.adds.contains(id) {
+            Some(ScopeMark::NotSigned)
+        } else if self.removes.contains(id) {
+            Some(ScopeMark::Dropping)
+        } else {
+            None
+        }
+    }
+}
+
+fn feature_node(
+    st: &State,
+    f: &crate::model::Entry,
+    waiting: &BTreeSet<String>,
+    marks: &Marks,
+) -> TreeFeature {
     let info = st.feature(&f.id).cloned().unwrap_or_default();
     let progress = match info.status {
         FeatureStatus::Done => Progress::Done,
@@ -173,13 +270,20 @@ fn feature_node(st: &State, f: &crate::model::Entry, waiting: &BTreeSet<String>)
         },
         waiting_for_you: waiting.contains(&f.id),
         acceptance: features::acceptance(f).map(str::to_string),
+        scope: marks.mark(&f.id),
     }
 }
 
-fn epic_node(st: &State, n: &Node, waiting: &BTreeSet<String>) -> TreeEpic {
-    let feature_list: Vec<TreeFeature> = features::of_epic(st, &n.id)
-        .into_iter()
-        .map(|f| feature_node(st, f, waiting))
+fn epic_node(st: &State, n: &Node, waiting: &BTreeSet<String>, marks: &Marks) -> TreeEpic {
+    // Its features in force, and the dropped ones the owner has not signed
+    // yet (they stay listed, marked, until they do).
+    let feature_list: Vec<TreeFeature> = st
+        .of_kind("feature")
+        .filter(|f| field(f, "epic") == Some(n.id.as_str()))
+        .filter(|f| {
+            marks.removes.contains(&f.id) || st.feature(&f.id).is_some_and(|i| i.status.in_force())
+        })
+        .map(|f| feature_node(st, f, waiting, marks))
         .collect();
     let closed = n.closed();
     let started = feature_list.iter().any(|f| f.progress != Progress::Pending)
@@ -211,6 +315,7 @@ fn epic_node(st: &State, n: &Node, waiting: &BTreeSet<String>) -> TreeEpic {
         }),
         feature_list,
         reason: None,
+        scope: marks.mark(&n.id),
     }
 }
 
@@ -220,11 +325,12 @@ pub fn build(st: &State, project: &str, people: &[String], ideas: Option<&Ideas>
     let nodes = plan::nodes(st);
     let layout = plan::compute(&nodes);
     let waiting = waiting_features(st, people);
+    let marks = Marks::of(st);
     let node = |e: &PlanEpic| nodes.iter().find(|n| n.id == e.id);
     let epics = |list: &[PlanEpic]| -> Vec<TreeEpic> {
         list.iter()
             .filter_map(node)
-            .map(|n| epic_node(st, n, &waiting))
+            .map(|n| epic_node(st, n, &waiting, &marks))
             .collect()
     };
     let done = epics(&layout.closed);
@@ -242,7 +348,7 @@ pub fn build(st: &State, project: &str, people: &[String], ideas: Option<&Ideas>
         .filter_map(|b| {
             node(&b.epic).map(|n| TreeEpic {
                 reason: Some(b.reason.clone()),
-                ..epic_node(st, n, &waiting)
+                ..epic_node(st, n, &waiting, &marks)
             })
         })
         .collect();
@@ -273,7 +379,25 @@ pub fn build(st: &State, project: &str, people: &[String], ideas: Option<&Ideas>
         done,
         waves,
         no_wave,
+        scope: tree_scope(st),
     }
+}
+
+fn tree_scope(st: &State) -> Option<TreeScope> {
+    let s = crate::scope::last(st)?;
+    let title = |id: &String| {
+        st.get(id)
+            .map(|e| one_line(&e.title, 40))
+            .unwrap_or_else(|| id.clone())
+    };
+    Some(TreeScope {
+        signed: s.id.clone(),
+        signed_on: crate::scope::day(&s.hlc),
+        pending: crate::scope::pending(st).map(|d| PendingScope {
+            enters: d.adds.iter().map(title).collect(),
+            leaves: d.removes.iter().map(title).collect(),
+        }),
+    })
 }
 
 // ------------------------------------------------------------ text
@@ -298,6 +422,9 @@ fn epic_count(e: &TreeEpic) -> String {
 
 fn feature_note(f: &TreeFeature) -> String {
     let mut parts = Vec::new();
+    if let Some(m) = f.scope {
+        parts.push(m.label());
+    }
     if f.status == FeatureStatus::ToValidate {
         parts.push("to validate");
     }
@@ -314,6 +441,9 @@ fn epic_lines(e: &TreeEpic, indent: &str, last: bool, out: &mut Vec<Line>) {
         ("├─ ", "│   ")
     };
     let mut right = epic_count(e);
+    if let Some(m) = e.scope {
+        right.push_str(&format!(" · {}", m.label()));
+    }
     if let Some(r) = &e.reason {
         right.push_str(&format!(" · {r}"));
     }
@@ -361,6 +491,13 @@ fn header(t: &Tree) -> String {
     if n == 0 && t.no_wave.is_empty() && !t.done.is_empty() {
         parts.push("all done".to_string());
     }
+    match &t.scope {
+        Some(TreeScope {
+            pending: Some(_), ..
+        }) => parts.push("1 scope change waiting for you".to_string()),
+        Some(s) => parts.push(format!("plan signed {}", s.signed_on)),
+        None => {}
+    }
     parts.join(" · ")
 }
 
@@ -370,6 +507,12 @@ pub fn text(t: &Tree) -> String {
         left: t.project.clone(),
         right: header(t),
     }];
+    if let Some(p) = t.scope.as_ref().and_then(|s| s.pending.as_ref()) {
+        lines.push(Line {
+            left: String::new(),
+            right: p.line(),
+        });
+    }
     if t.done.is_empty() && t.waves.is_empty() && t.no_wave.is_empty() {
         lines.push(Line {
             left: "(no epics yet: `kontext epic add \"<title>\" --goal <G>`)".into(),

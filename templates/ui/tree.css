@@ -53,6 +53,11 @@ a:hover { text-decoration-color: currentColor; }
 .summary b { color: var(--ink); font-weight: 700; }
 .nav { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 1.25rem; font-weight: 600; align-self: end; }
 
+/* the signed scope: muted when signed, red ink when a change waits for you */
+.summary .waits { color: var(--margin); font-weight: 700; }
+.scope { grid-column: 1; color: var(--muted); font-size: 0.92rem; overflow-wrap: anywhere; }
+.scope b { color: var(--ink); font-weight: 600; }
+
 /* ---------------------------------------------------------------- the book */
 .book {
   width: min(64rem - 2 * clamp(1rem, 3vw, 2.5rem), 100% - 2 * clamp(1rem, 3vw, 2.5rem));
@@ -103,8 +108,11 @@ a:hover { text-decoration-color: currentColor; }
 }
 .features .line .title { font-size: 0.97rem; }
 .note { margin-left: auto; white-space: nowrap; padding-left: 1rem; color: var(--muted); font-size: 0.9rem; }
-.note .you { color: var(--margin); font-weight: 700; }
+.note .you, .count .you { color: var(--margin); font-weight: 700; }
 .acc { color: var(--muted); font-size: 0.86rem; margin-left: 1.3rem; overflow-wrap: anywhere; }
+/* a feature on its way out of the scope: struck through in red ink, as a
+   book strikes a line until the owner initials it */
+.features .dropping .title { text-decoration: line-through; text-decoration-color: var(--margin); text-decoration-thickness: 1.5px; color: var(--muted); }
 
 /* ---------------------------------------------------------------- marks */
 .mk {

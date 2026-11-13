@@ -564,6 +564,10 @@ pub fn goal_warnings(st: &State, goals: &[String]) -> Vec<String> {
     for g in goals {
         match st.status_of(g) {
             Some(Status::Signed) => {}
+            Some(Status::Unsigned) if crate::scope::plan_signed(st) => out.push(format!(
+                "unsigned goal: {g} enters with the next scope signature; its tasks wait until \
+                 the owner signs (`kontext scope summary`)"
+            )),
             Some(Status::Unsigned) => out.push(format!(
                 "unsigned goal: {g} is not signed by an owner yet (`kontext sign {g}`)"
             )),
@@ -848,6 +852,14 @@ pub fn assign(store: &mut Store, actor: &Actor, task: &str, to: &str) -> Result<
                 "{id} is already closed; reopen it with `kontext reopen {id} --why …`"
             ));
         }
+        if let Some(why) = st.get(&id).and_then(|t| crate::scope::blocked(st, t)) {
+            let then = if why.starts_with(crate::scope::WAITING) {
+                ". The pm shows the owner `kontext scope summary` and signs it with them"
+            } else {
+                ""
+            };
+            return refused(format!("{id} is not handed out: {why}{then}"));
+        }
         let mut r = raw("assign", actor, &format!("Assigns {id} to {to}"));
         r.refs = vec![id];
         r.fields.insert("to".into(), json!(to));
@@ -888,8 +900,17 @@ pub fn reopen(store: &mut Store, actor: &Actor, task: &str, why: &str) -> Result
         let st = b.state()?;
         let id = st.resolve(task)?;
         if st.kind_of(&id) == Some("feature") {
-            crate::features::check_reopen(st, &id)?;
-            let mut r = raw("reopen", actor, &format!("Reopens {id}"));
+            crate::features::check_reopen(st, actor, &id)?;
+            let back = st.dropped.contains_key(&id);
+            let title = if back {
+                format!("Puts back {id}")
+            } else {
+                format!("Reopens {id}")
+            };
+            let mut r = raw("reopen", actor, &title);
+            if back {
+                r.fields.insert("restore".into(), json!(true));
+            }
             r.why = why.trim().to_string();
             r.refs = vec![id];
             b.push(r)?;
@@ -925,9 +946,14 @@ pub fn pick(st: &State, epic: &str, actor: &Actor) -> Option<(String, bool)> {
             return Some((t.id.clone(), true));
         }
     }
+    // A task whose feature, epic or goal waits for the owner's signature
+    // (a scope change) is not handed out.
     tasks
         .iter()
-        .find(|t| st.task_status(&t.id) == Some(TaskStatus::Ready))
+        .find(|t| {
+            st.task_status(&t.id) == Some(TaskStatus::Ready)
+                && crate::scope::blocked(st, t).is_none()
+        })
         .map(|t| (t.id.clone(), false))
 }
 
@@ -935,7 +961,23 @@ pub fn pick(st: &State, epic: &str, actor: &Actor) -> Option<(String, bool)> {
 pub fn nothing_ready(st: &State, epic: &str, actor: &Actor) -> String {
     let e = st.get(epic);
     let name = e.map(epic_name).unwrap_or_default();
-    let mut l = vec![format!("No ready tasks in epic {name} ({epic}).")];
+    let waiting: Vec<(&Entry, String)> = st
+        .tasks_of(epic)
+        .into_iter()
+        .filter(|t| st.task_status(&t.id) == Some(TaskStatus::Ready))
+        .filter_map(|t| crate::scope::blocked(st, t).map(|why| (t, why)))
+        .collect();
+    let mut l = vec![if !waiting
+        .iter()
+        .any(|(_, why)| why.starts_with(crate::scope::WAITING))
+    {
+        format!("No ready tasks in epic {name} ({epic}).")
+    } else {
+        format!(
+            "No task to hand out in epic {name} ({epic}): {}.",
+            crate::scope::WAITING
+        )
+    }];
     let blocked: Vec<&Entry> = st
         .tasks_of(epic)
         .into_iter()
@@ -959,6 +1001,16 @@ pub fn nothing_ready(st: &State, epic: &str, actor: &Actor) -> String {
                 t.id,
                 crate::views::one_line(&t.title, 100),
                 by.join(", ")
+            ));
+        }
+    }
+    if !waiting.is_empty() {
+        l.push("Not handed out (outside the signed scope; the pm shows the owner `kontext scope summary`):".into());
+        for (t, why) in waiting {
+            l.push(format!(
+                "- {} {} → {why}",
+                t.id,
+                crate::views::one_line(&t.title, 100)
             ));
         }
     }

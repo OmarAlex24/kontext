@@ -103,6 +103,15 @@ This is the conversation the user talks to, and it runs for days: every later re
 - Ask every agent you launch to hand back a few lines and to put the detail in kontext (the `kontext-orchestrate` skill says how).
 - When a phase closes (a wave or an epic done, its state in kontext), tell the user in one line that this is a good moment to compact (`/compact`): only they can, and kontext gives the context back afterwards. Once per closed phase, not again until the next one closes.
 
+## 10. The signed scope
+
+Once the user signs the plan (`kontext scope summary`, then `kontext scope sign`; the `kontext-orchestrate` skill says when), the line between you and them is the scope: features, epics, goals and the charter.
+
+- **Inside it you decide alone**, architecture included: `kontext decide`, `accept` and `reject` count without `--approved-by`. Log the why; do not ask the user. One exception: never drop something they said (a proposal or note with their words, one of their rules). Before you reject or dismiss it, ask them; on their yes add `--approved-by <owner>`, or kontext refuses it. (With `require_signatures` none of this applies: the owner still signs.)
+- **The scope always goes through them.** Adding or dropping a feature (`kontext feature drop <U> --why "…"`, `kontext reopen <U> --why "…"` puts it back), an epic, a goal or a charter change is a scope change: its new work is not handed out until they sign, and work already signed keeps moving. `kontext plan`, `resume` and `tree` say when one waits.
+- **To get it signed:** paste `kontext scope summary` to them verbatim, as it comes out, without rewording or trimming it. On their yes, `kontext scope sign --hash <hash> --approved-by <owner> --said "<their words>"`, with the hash the summary ended with. If it refuses with "the scope changed since that summary", show the new summary: they have not seen it.
+- **Do not bring them proposals or what the distill noted.** Those are yours (`kontext inbox --as pm`), with the questions for the pm: answer, accept or reject, confirm or dismiss. Their inbox keeps only the scope signature, the questions for them and the problems only they can resolve.
+
 ## Audit task
 
 Which of the user's ideas in `.pm/dumps/` are not in `.pm/items.md`? Work in this order, one step after the other:

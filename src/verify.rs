@@ -54,11 +54,14 @@ pub struct Report {
     /// their chain and hash are fine, they are not a problem, and the state
     /// leaves them out.
     pub newer: Vec<Problem>,
+    /// `scope` entries whose `summary_hash` does not match their `summary`:
+    /// the chain is fine, but what was signed is not what is stored.
+    pub scope_problems: Vec<Problem>,
 }
 
 impl Report {
     pub fn ok(&self) -> bool {
-        self.problems.is_empty() && self.media_problems.is_empty()
+        self.problems.is_empty() && self.media_problems.is_empty() && self.scope_problems.is_empty()
     }
 
     pub fn summary(&self) -> String {
@@ -75,7 +78,7 @@ impl Report {
             format!(
                 "FAILED: {} in {e} checked across {w}{m}",
                 plural(
-                    self.problems.len() + self.media_problems.len(),
+                    self.problems.len() + self.media_problems.len() + self.scope_problems.len(),
                     "problem",
                     "problems"
                 )
@@ -125,6 +128,7 @@ fn run_inner(home: &Path, media: bool) -> Result<Report> {
         ) {
             report.problems.push(p);
         }
+        check_scopes(&rel, &bytes, &mut report);
         if media {
             check_media(home, &rel, &bytes, &mut report);
         }
@@ -151,6 +155,35 @@ fn check_media(home: &Path, file: &str, bytes: &[u8], report: &mut Report) {
                     message,
                 });
             }
+        }
+    }
+}
+
+/// Each `scope` entry's `summary_hash` must be the sha256 of its `summary`:
+/// what is stored has to be exactly what the owner read.
+fn check_scopes(file: &str, bytes: &[u8], report: &mut Report) {
+    for (i, raw) in bytes.split(|b| *b == b'\n').enumerate() {
+        let Ok(v) = serde_json::from_slice::<Value>(raw) else {
+            continue;
+        };
+        if v.get("kind").and_then(Value::as_str) != Some("scope") {
+            continue;
+        }
+        let f = |k: &str| {
+            v.get("fields")
+                .and_then(|x| x.get(k))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        };
+        if f("summary_hash") != crate::scope::hash_of(f("summary")) {
+            report.scope_problems.push(Problem {
+                file: file.to_string(),
+                line: i + 1,
+                message: format!(
+                    "{}: the summary_hash of the scope signature does not match its summary (the text was changed after it was signed)",
+                    v.get("id").and_then(Value::as_str).unwrap_or("?")
+                ),
+            });
         }
     }
 }
@@ -446,21 +479,21 @@ mod tests {
     fn an_entry_from_a_newer_version_is_listed_not_a_problem() {
         let (dir, p) = ledger();
         let mut ls = lines(&p);
-        ls.push(newer_line(ls.last().unwrap(), "scope", "S"));
+        ls.push(newer_line(ls.last().unwrap(), "roadmap", "W"));
         write_lines(&p, &ls);
         let r = run(dir.path()).unwrap();
         assert!(r.ok(), "{:?}", r.problems);
         assert_eq!(r.entries, 5);
         assert_eq!(r.newer.len(), 1);
         let n = r.newer[0].to_string();
-        assert!(n.starts_with("ledger/omar@mac.jsonl:5: S-"), "{n}");
+        assert!(n.starts_with("ledger/omar@mac.jsonl:5: W-"), "{n}");
         assert!(
-            n.ends_with("is from a newer kontext version (kind scope): upgrade to read it"),
+            n.ends_with("is from a newer kontext version (kind roadmap): upgrade to read it"),
             "{n}"
         );
         // Its id still has to be `<UPPERCASE>-<6 hex>` with the hex from its
         // content (the hash stays right, so only the id is wrong).
-        let lowercase = newer_line(&ls[3], "scope", "s");
+        let lowercase = newer_line(&ls[3], "roadmap", "w");
         let mut v: Value = serde_json::from_str(&ls[4]).unwrap();
         let id = v["id"].as_str().unwrap().to_string();
         let flipped = if id.ends_with('0') { '1' } else { '0' };
@@ -473,7 +506,7 @@ mod tests {
             let pr = first_problem(dir.path());
             assert_eq!(pr.line, 5);
             assert!(
-                pr.message.contains("of kind \"scope\" does not match"),
+                pr.message.contains("of kind \"roadmap\" does not match"),
                 "{pr}"
             );
         }

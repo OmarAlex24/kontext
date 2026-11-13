@@ -5,6 +5,7 @@
   var POLL_MS = 5000;
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var LABEL = { done: "done", in_progress: "started", pending: "not started" };
+  var SCOPE = { not_signed: "not signed", dropping: "dropping, waiting for you" };
   var last = "";
 
   function el(tag, cls, text) {
@@ -32,12 +33,18 @@
     return epic.tasks.done + "/" + epic.tasks.total + " tasks";
   }
 
+  // A feature or epic outside the signed scope waits for the owner too.
+  function waits(x) {
+    return x.waiting_for_you || !!x.scope;
+  }
+
   function feature(f) {
-    var li = el("li");
+    var li = el("li", f.scope === "dropping" ? "dropping" : null);
     var line = el("div", "line");
-    line.appendChild(mark(f.progress, f.waiting_for_you));
+    line.appendChild(mark(f.progress, waits(f)));
     line.appendChild(el("span", "title", f.title));
     var notes = [];
+    if (f.scope) notes.push(el("span", "you", SCOPE[f.scope] || f.scope));
     if (f.status === "to validate") notes.push(el("span", "", "to validate"));
     if (f.waiting_for_you) notes.push(el("span", "you", "waiting for you"));
     if (notes.length) {
@@ -59,15 +66,20 @@
   function epic(e) {
     var div = el("div", "epic" + (e.closed ? " closed" : ""));
     var line = el("div", "line");
-    line.appendChild(mark(e.progress, false));
+    line.appendChild(mark(e.progress, !!e.scope));
     line.appendChild(el("span", "title", e.title));
     if (e.feature_list.length && !e.closed) {
       var t = el("span", "tally");
       t.setAttribute("aria-hidden", "true");
-      e.feature_list.forEach(function (f) { t.appendChild(mark(f.progress, f.waiting_for_you)); });
+      e.feature_list.forEach(function (f) { t.appendChild(mark(f.progress, waits(f))); });
       line.appendChild(t);
     }
-    line.appendChild(el("span", "count tab", count(e)));
+    var c = el("span", "count tab", count(e));
+    if (e.scope) {
+      c.appendChild(document.createTextNode(" · "));
+      c.appendChild(el("span", "you", SCOPE[e.scope] || e.scope));
+    }
+    line.appendChild(c);
     div.appendChild(line);
     div.title = e.id + " · " + e.name;
     if (e.reason) div.appendChild(el("p", "reason", e.reason));
@@ -115,6 +127,25 @@
     if (t.no_wave.length) rest.push(t.no_wave.length + " with no wave");
     if (!t.waves.length && !t.no_wave.length && t.done.length) rest.push("all done");
     if (rest.length) s.appendChild(document.createTextNode(" · " + rest.join(" · ")));
+    // The signed scope (only with a signed plan).
+    var sc = document.getElementById("scope");
+    sc.textContent = "";
+    sc.hidden = true;
+    if (t.scope && t.scope.pending) {
+      s.appendChild(document.createTextNode(" · "));
+      s.appendChild(el("span", "waits", "1 scope change waiting for you"));
+      var parts = [];
+      if (t.scope.pending.enters.length) parts.push(["enters ", t.scope.pending.enters.join(", ")]);
+      if (t.scope.pending.leaves.length) parts.push(["leaves ", t.scope.pending.leaves.join(", ")]);
+      parts.forEach(function (p, i) {
+        if (i) sc.appendChild(document.createTextNode(" · "));
+        sc.appendChild(document.createTextNode(p[0]));
+        sc.appendChild(el("b", "", p[1]));
+      });
+      sc.hidden = !parts.length;
+    } else if (t.scope) {
+      s.appendChild(document.createTextNode(" · plan signed " + t.scope.signed_on));
+    }
 
     var book = document.getElementById("book");
     book.textContent = "";
