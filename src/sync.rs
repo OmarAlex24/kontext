@@ -511,6 +511,8 @@ pub struct Status {
     pub require_signatures: bool,
     pub signing_key: Option<String>,
     /// The kontext server, if the project has one (without the network).
+    /// Absent from the JSON of a project without one, as before servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub server: Option<crate::remote::Status>,
 }
 

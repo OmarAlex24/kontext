@@ -755,3 +755,13 @@ fn an_old_binary_reads_a_synced_copy() {
     let out = run(&["status"]);
     assert!(out.contains("Chains: OK"), "{out}");
 }
+
+/// `status --json` of a project without a server has no `server` key, as
+/// before servers existed.
+#[test]
+fn status_json_has_no_server_key_without_a_server() {
+    let p = common::Project::new();
+    let j = p.kontext_ok(&["--json", "status"]);
+    let v: Value = serde_json::from_str(&j).unwrap();
+    assert!(v.get("server").is_none(), "{j}");
+}
