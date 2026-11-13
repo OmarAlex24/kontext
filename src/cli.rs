@@ -1984,7 +1984,17 @@ impl Ctx<'_> {
             Some(h) if !explicit && !self.who()?.is_human() => h,
             _ => human,
         };
-        let ib = inbox::build(&st, &project.name, &human);
+        // `--as pm`: the pm's inbox (with a signed plan: proposals, what the
+        // distill noted and the problems that are not the owner's).
+        let pm_view = explicit && human == inbox::PM;
+        let view = |st: &crate::state::State, name: &str| {
+            if pm_view {
+                inbox::build_pm(st, name)
+            } else {
+                inbox::build(st, name, &human)
+            }
+        };
+        let ib = view(&st, &project.name);
         let wrong = |it: &inbox::Item, what: &str| -> anyhow::Error {
             Refused(format!(
                 "pending item {} is in the \"{}\" group, not \"{what}\": {}",
@@ -2022,9 +2032,18 @@ impl Ctx<'_> {
                     return Err(wrong(it, "sign"));
                 }
                 let id = it.key.clone();
+                if id == inbox::SCOPE_KEY {
+                    return Err(Refused(
+                        "a scope change is signed on its full summary: read it with `kontext scope \
+                         summary`, then `kontext scope sign --hash <hash>` (or say yes to the pm, \
+                         who signs it with you)"
+                            .into(),
+                    )
+                    .into());
+                }
                 if st.kind_of(&id) == Some("proposal") {
                     self.written("the acceptance", |s, a| {
-                        inbox::require_human(a)?;
+                        inbox::require_closer(&ib, a)?;
                         write::accept(s, a, &id, false, None, "")
                     })?
                 } else {
@@ -2068,7 +2087,7 @@ impl Ctx<'_> {
                 let (it, sub) = inbox::find(&ib, &st, &item)?;
                 let (it, sub) = (it.clone(), sub.cloned());
                 self.written("the dismissal", |s, a| {
-                    inbox::close(s, a, "dismiss", &it, sub.as_ref(), &why)
+                    inbox::close(s, a, &ib, "dismiss", &it, sub.as_ref(), &why)
                 })?
             }
             Some(InboxCmd::Confirm { item }) => {
@@ -2078,17 +2097,18 @@ impl Ctx<'_> {
                 }
                 let (it, sub) = (it.clone(), sub.cloned());
                 self.written("the confirmation", |s, a| {
-                    inbox::close(s, a, "confirm", &it, sub.as_ref(), "")
+                    inbox::close(s, a, &ib, "confirm", &it, sub.as_ref(), "")
                 })?
             }
         };
         if !self.json {
             let (mut store, project) = self.open()?;
             let st = app::state(&mut store, &project)?;
-            let left = inbox::build(&st, &project.name, &human);
+            let left = view(&st, &project.name);
             println!(
-                "{} See them with `kontext inbox`.",
-                inbox::count_line(&left)
+                "{} See them with `kontext inbox{}`.",
+                inbox::count_line(&left),
+                if pm_view { " --as pm" } else { "" }
             );
         }
         Ok(code)

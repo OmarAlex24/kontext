@@ -1240,3 +1240,113 @@ fn a_feature_leaving_the_scope_holds_its_tasks_until_signed() {
         "{plan}"
     );
 }
+
+// ── The inbox with a signed plan (phase 2, PR 3) ────────────────────────
+
+fn owner_inbox(p: &Project) -> Value {
+    serde_json::from_str(&p.kontext_ok(&["--json", "inbox", "--all"])).unwrap()
+}
+
+fn pm_inbox(p: &Project) -> Value {
+    serde_json::from_str(&pm_ok(p, &["--json", "inbox", "--as", "pm", "--all"])).unwrap()
+}
+
+fn keys(v: &Value) -> Vec<String> {
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn distill_fact(p: &Project, title: &str) -> String {
+    p.append(&format!(
+        "{{\"kind\":\"fact\",\"title\":\"{title}\",\"actor\":{{\"type\":\"agent\",\"name\":\"distill\"}},\
+         \"fields\":{{\"source\":\"distill\",\"origin\":\"user\",\"fingerprints\":[]}}}}\n"
+    ))
+    .remove(0)
+}
+
+#[test]
+fn with_a_signed_plan_the_owner_inbox_holds_the_signature_and_the_pm_the_rest() {
+    let t = planned();
+    let prop =
+        t.p.id_of(IMPL, &["propose", "Cache the price list", "--why", "slow"]);
+    distill_fact(&t.p, "Prices are in euros");
+    // Without a signed plan: unchanged, the proposal and the review are the
+    // owner's, and the pm's inbox is empty.
+    let before = keys(&owner_inbox(&t.p));
+    assert!(before.contains(&prop), "{before:?}");
+    assert!(before.contains(&"review".to_string()), "{before:?}");
+    assert!(owner_inbox(&t.p).get("pm_items").is_none());
+    assert_eq!(pm_inbox(&t.p)["count"], 0);
+
+    sign(&t.p);
+    let q = pm_id(&t.p, &["ask", "Which currency?", "--to", "owner"]);
+    let v = owner_inbox(&t.p);
+    assert_eq!(keys(&v), vec![q.clone()], "only the question");
+    assert_eq!(v["pm_items"], 2);
+    let text = t.p.kontext_ok(&["inbox"]);
+    assert!(
+        text.contains("The pm handles 2 more items inside the signed scope"),
+        "{text}"
+    );
+    let pm = pm_inbox(&t.p);
+    assert_eq!(keys(&pm), vec![prop.clone(), "review".to_string()]);
+    assert!(pm_ok(&t.p, &["resume", "--as", "pm"]).contains("Your inbox: 2 pending items"));
+
+    // A scope change: at most one signature, with the summary's first lines.
+    let inv = pm_id(
+        &t.p,
+        &[
+            "feature",
+            "add",
+            "Invoices",
+            "--epic",
+            "pay",
+            "--acceptance",
+            "a PDF per order",
+        ],
+    );
+    pm_id(&t.p, &["task", "add", "PDF", "--feature", &inv]);
+    let v = owner_inbox(&t.p);
+    let scope = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "scope")
+        .expect("the scope signature");
+    assert_eq!(scope["class"], "sign");
+    assert_eq!(
+        scope["title"],
+        format!("Scope change: enters {inv} Invoices").as_str()
+    );
+    assert_eq!(scope["blocks_tasks"], 1);
+    assert!(
+        scope["subs"].as_array().unwrap().iter().any(|s| s["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invoices, in epic Payments")),
+        "{scope:#?}"
+    );
+    let (c, _, err) = code(&t.p, &[], &["inbox", "sign", "scope"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("kontext scope summary"), "{err}");
+    // The report follows the same split.
+    let report = t.p.kontext_ok(&["report"]);
+    assert!(report.contains("Scope change: enters"), "{report}");
+    assert!(!report.contains("Cache the price list"), "{report}");
+
+    // The pm resolves its inbox alone; an implementer does not.
+    let (c, _, _) = code(&t.p, IMPL, &["inbox", "--as", "pm", "confirm", "review"]);
+    assert_eq!(c, 2);
+    pm_ok(&t.p, &["inbox", "--as", "pm", "sign", &prop]);
+    assert_eq!(status(&t.p, &prop), "accepted");
+    pm_ok(&t.p, &["inbox", "--as", "pm", "confirm", "review"]);
+    assert_eq!(pm_inbox(&t.p)["count"], 0);
+    // The owner's question is not the pm's to close.
+    let (c, _, _) = code(&t.p, PM, &["inbox", "--as", "pm", "dismiss", &q]);
+    assert_eq!(c, 2);
+    assert!(keys(&owner_inbox(&t.p)).contains(&q));
+}

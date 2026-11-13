@@ -1171,7 +1171,11 @@ impl State {
     /// noted): closes items in the inbox. It only counts if a human writes it:
     /// seeing it closes nothing, and an agent cannot close them on the human's behalf.
     fn close_inbox_items(&mut self, e: &Entry) {
-        if !e.actor.is_human() {
+        // With a signed plan the pm closes the items of its own inbox
+        // (proposals, what the distill noted, problems), never a question.
+        let pm =
+            !self.scopes.is_empty() && e.actor.is_agent() && e.actor.role.as_deref() == Some("pm");
+        if !e.actor.is_human() && !pm {
             self.not_counting.insert(
                 e.id.clone(),
                 format!(
@@ -1186,6 +1190,9 @@ impl State {
             items = e.refs.clone();
         }
         for k in items {
+            if pm && self.kind_of(&k) == Some("question") {
+                continue;
+            }
             self.inbox_closed.entry(k).or_insert_with(|| e.id.clone());
         }
     }

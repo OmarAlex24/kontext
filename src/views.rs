@@ -818,6 +818,14 @@ fn build_resume(st: &State, new: &[Entry], o: &ResumeOpts, lv: Level) -> String 
     ));
     if o.role == "pm" {
         l.extend(crate::scope::pm_line(st));
+        let n = crate::inbox::build_pm(st, &o.project).items.len();
+        if n > 0 {
+            l.push(format!(
+                "Your inbox: {} (proposals, what the distill noted, problems), yours to resolve \
+                 without the owner: `kontext inbox --as pm`.",
+                plural(n, "pending item", "pending items")
+            ));
+        }
     }
     l.extend(crate::scope::pending_line(st));
     l.push(String::new());
