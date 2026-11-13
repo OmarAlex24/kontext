@@ -1069,9 +1069,15 @@ fn a_feature_leaving_the_scope_holds_its_tasks_until_signed() {
     let (c, _, err) = code(&t.p, PM, &["assign", &rt, "--to", "impl1"]);
     assert_eq!(c, 2, "{err}");
     assert!(err.contains("is leaving the scope"), "{err}");
+    // Signed out, its work is still not handed out.
+    sign(&t.p);
+    let (c, _, err) = code(&t.p, PM, &["assign", &rt, "--to", "impl1"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("was dropped from the scope"), "{err}");
+    pm_ok(&t.p, &["feature", "drop", &t.card, "--why", "later"]);
     let plan = pm_ok(&t.p, &["plan"]);
     assert!(
-        plan.contains(&format!("leaves {} Refunds", t.refunds)),
+        plan.contains(&format!("leaves {} Card charge", t.card)),
         "{plan}"
     );
 }

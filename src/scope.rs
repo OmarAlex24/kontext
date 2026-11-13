@@ -239,6 +239,14 @@ pub fn blocked(st: &State, task: &Entry) -> Option<String> {
                 label(st, &id)
             ));
         }
+        // A feature the owner already signed out: its work is not handed out
+        // again (it raises an alert until it is closed or moved).
+        if let Some(s) = st.drop_signed.get(&id) {
+            return Some(format!(
+                "{} was dropped from the scope ({s}); close the task or move its work to a feature in force",
+                label(st, &id)
+            ));
+        }
     }
     None
 }

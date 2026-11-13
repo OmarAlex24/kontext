@@ -564,6 +564,10 @@ pub fn goal_warnings(st: &State, goals: &[String]) -> Vec<String> {
     for g in goals {
         match st.status_of(g) {
             Some(Status::Signed) => {}
+            Some(Status::Unsigned) if crate::scope::plan_signed(st) => out.push(format!(
+                "unsigned goal: {g} enters with the next scope signature; its tasks wait until \
+                 the owner signs (`kontext scope summary`)"
+            )),
             Some(Status::Unsigned) => out.push(format!(
                 "unsigned goal: {g} is not signed by an owner yet (`kontext sign {g}`)"
             )),
@@ -960,7 +964,10 @@ pub fn nothing_ready(st: &State, epic: &str, actor: &Actor) -> String {
         .filter(|t| st.task_status(&t.id) == Some(TaskStatus::Ready))
         .filter_map(|t| crate::scope::blocked(st, t).map(|why| (t, why)))
         .collect();
-    let mut l = vec![if waiting.is_empty() {
+    let mut l = vec![if !waiting
+        .iter()
+        .any(|(_, why)| why.starts_with(crate::scope::WAITING))
+    {
         format!("No ready tasks in epic {name} ({epic}).")
     } else {
         format!(
@@ -995,7 +1002,7 @@ pub fn nothing_ready(st: &State, epic: &str, actor: &Actor) -> String {
         }
     }
     if !waiting.is_empty() {
-        l.push("Not handed out until the owner signs the scope change (the pm shows them `kontext scope summary`):".into());
+        l.push("Not handed out (outside the signed scope; the pm shows the owner `kontext scope summary`):".into());
         for (t, why) in waiting {
             l.push(format!(
                 "- {} {} → {why}",
