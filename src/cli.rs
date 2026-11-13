@@ -2085,6 +2085,15 @@ impl Ctx<'_> {
             }
             Some(InboxCmd::Dismiss { item, why }) => {
                 let (it, sub) = inbox::find(&ib, &st, &item)?;
+                if it.key == inbox::SCOPE_KEY {
+                    return Err(Refused(
+                        "a scope change is not dismissed: it waits until the owner signs it \
+                         (`kontext scope summary`), or until the pm undoes it (`kontext feature \
+                         drop` what entered, `kontext reopen` what left)"
+                            .into(),
+                    )
+                    .into());
+                }
                 let (it, sub) = (it.clone(), sub.cloned());
                 self.written("the dismissal", |s, a| {
                     inbox::close(s, a, &ib, "dismiss", &it, sub.as_ref(), &why)

@@ -1350,3 +1350,17 @@ fn with_a_signed_plan_the_owner_inbox_holds_the_signature_and_the_pm_the_rest() 
     assert_eq!(c, 2);
     assert!(keys(&owner_inbox(&t.p)).contains(&q));
 }
+
+#[test]
+fn the_scope_signature_is_not_dismissed_from_the_inbox() {
+    let t = planned();
+    sign(&t.p);
+    pm_id(&t.p, &["feature", "add", "Invoices", "--epic", "pay"]);
+    let before = t.p.entries("omar@test").len();
+    let (c, _, err) = code(&t.p, &[], &["inbox", "dismiss", "scope", "--why", "x"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("is not dismissed"), "{err}");
+    let (c, _, _) = code(&t.p, &[], &["inbox", "confirm", "scope"]);
+    assert_eq!(c, 2);
+    assert_eq!(t.p.entries("omar@test").len(), before, "nothing written");
+}
