@@ -1,6 +1,6 @@
 [package]
 name = "kontext"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Project memory for coding agents: an append-only ledger, one chain per writer"
