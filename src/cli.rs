@@ -2161,23 +2161,24 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// The `.pm/` folder and its `items.md`, if there is one (what `kontext
-    /// ideas` and `kontext tree` read).
-    fn ideas_source(&self, project: &Project) -> Result<Option<crate::scope::IdeasSource>> {
+    /// The `.pm/` folder and its `items.md` (what `kontext ideas` and
+    /// `kontext tree` read), or the folder where none was found.
+    fn ideas_source(&self, project: &Project) -> Result<crate::scope::IdeasSource> {
         let cwd = std::env::current_dir()?;
         let repos = Repos::load(project, &cwd)?;
         let own = crate::capture::Settings::of(project).worktrees;
+        let not_found = || crate::scope::IdeasSource::NotFound(cwd.display().to_string());
         let Some(pm) = crate::ideas::locate(&repos, own) else {
-            return Ok(None);
+            return Ok(not_found());
         };
         let Ok(items_md) = fs::read_to_string(pm.join("items.md")) else {
-            return Ok(None);
+            return Ok(not_found());
         };
-        Ok(Some(crate::scope::IdeasSource {
+        Ok(crate::scope::IdeasSource::Found {
             pm,
             items_md,
             people: project.people.keys().cloned().collect(),
-        }))
+        })
     }
 
     /// `kontext scope summary`: read-only.
@@ -2185,8 +2186,8 @@ impl Ctx<'_> {
         let (mut store, project) = self.open()?;
         let src = self.ideas_source(&project)?;
         let st = app::state(&mut store, &project)?;
-        let ideas = src.as_ref().map(|i| i.build(&st, &project.name));
-        let s = crate::scope::summary(&st, &project.name, ideas.as_ref());
+        let ideas = src.check(&st, &project.name);
+        let s = crate::scope::summary(&st, &project.name, &ideas);
         if self.json {
             print_json(&s.json())?;
         } else {
@@ -2201,7 +2202,7 @@ impl Ctx<'_> {
         let src = self.ideas_source(&project)?;
         drop(store);
         let code = self.written("the scope signature", |s, a| {
-            crate::scope::sign(s, a, &project.name, src.as_ref(), &args)
+            crate::scope::sign(s, a, &project.name, &src, &args)
         })?;
         Ok(code)
     }

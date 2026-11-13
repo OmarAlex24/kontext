@@ -383,7 +383,7 @@ fn a_change_is_derived_from_the_signed_scope() {
         "Refunds (dropped)",
         &format!("Work thrown away: 1 closed task ({rt})"),
         "## Epics it touches\nPayments",
-        "Unchanged: Wave 1: Foundations; Wave 2: Payments.",
+        "## Epic order (by their dependencies, every epic counted as open)\nUnchanged: 1. Foundations; 2. Payments.",
     ] {
         assert!(text.contains(want), "missing {want:?} in:\n{text}");
     }
@@ -401,7 +401,7 @@ fn a_change_is_derived_from_the_signed_scope() {
 }
 
 #[test]
-fn an_epic_that_enters_lists_its_features_and_the_waves_say_what_changes() {
+fn an_epic_that_enters_lists_its_features_and_the_epic_order_says_what_changes() {
     let t = planned();
     sign(&t.p);
     pm_id(
@@ -430,11 +430,11 @@ fn an_epic_that_enters_lists_its_features_and_the_waves_say_what_changes() {
         "a feature of an epic that enters is listed under it:\n{text}"
     );
     assert!(
-        text.contains("Now: Wave 1: Foundations; Wave 2: Payments, Catalog."),
+        text.contains("Now: 1. Foundations; 2. Payments, Catalog."),
         "{text}"
     );
     assert!(
-        text.contains("Before: Wave 1: Foundations; Wave 2: Payments."),
+        text.contains("Before: 1. Foundations; 2. Payments."),
         "{text}"
     );
 }
@@ -709,6 +709,151 @@ fn an_idea_on_a_feature_no_signature_covered_is_not_placed_not_discarded() {
     );
 }
 
+#[test]
+fn the_summary_says_whether_the_ideas_were_checked() {
+    let t = planned();
+    let repo = pm_repo(&t.p, "| I1 | a loyalty program | | | | |\n");
+    // From a folder with no .pm/items.md the summary says so, in the text
+    // that is signed.
+    let elsewhere = summary(&t.p);
+    let text = elsewhere["summary"].as_str().unwrap();
+    assert!(
+        text.contains("Ideas not checked: no .pm/items.md found from "),
+        "{text}"
+    );
+    assert!(!text.contains("Not placed"), "{text}");
+    // From the repo it says how many are not placed, so the hash shown there
+    // is refused by a signature run elsewhere.
+    let v: Value =
+        serde_json::from_str(&in_dir(&t.p, &repo, &["--json", "scope", "summary"]).1).unwrap();
+    assert!(
+        v["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Not placed: 1 of your ideas.")
+    );
+    let (c, _, err) = code(
+        &t.p,
+        PM,
+        &[
+            "scope",
+            "sign",
+            "--hash",
+            v["hash"].as_str().unwrap(),
+            "--approved-by",
+            "omar",
+        ],
+    );
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("show it again"), "{err}");
+    // A change carries the line too.
+    sign(&t.p);
+    pm_ok(&t.p, &["feature", "add", "Invoices", "--epic", "pay"]);
+    let text = summary(&t.p)["summary"].as_str().unwrap().to_string();
+    assert!(
+        text.contains("## Your ideas\nIdeas not checked: no .pm/items.md found from "),
+        "{text}"
+    );
+    let (_, out, _) = in_dir(&t.p, &repo, &["scope", "summary"]);
+    assert!(
+        out.contains("## Your ideas\nNot placed: 1 of your ideas.\n- I1"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_summary_never_cuts_what_the_signature_binds() {
+    let p = Project::new();
+    let long = |what: &str, n: usize| -> String {
+        let words: Vec<String> = (0..n).map(|i| format!("{what}{i:03}")).collect();
+        words.join(" ")
+    };
+    let (objective, non_goal, done) = (long("obj", 120), long("non", 60), long("done", 60));
+    pm_ok(
+        &p,
+        &[
+            "charter",
+            "--objective",
+            &objective,
+            "--non-goal",
+            &non_goal,
+            "--done-when",
+            &done,
+            "--title",
+            "Tickets",
+        ],
+    );
+    let (goal_title, goal_done) = (long("goal", 30), long("gdone", 50));
+    let goal = pm_id(&p, &["goal", "add", &goal_title, "--done-when", &goal_done]);
+    // A goal written by another tool, with a body.
+    let body_goal = p
+        .append(
+            "{\"kind\":\"goal\",\"title\":\"Fast checkout\",\"body\":\"Line one of the body.\\nLine two.\",\"actor\":{\"type\":\"human\",\"name\":\"omar\"},\"fields\":{}}\n",
+        )
+        .remove(0);
+    let epic_title = long("epic", 30);
+    pm_ok(
+        &p,
+        &["epic", "add", &epic_title, "--goal", &goal, "--name", "e1"],
+    );
+    let (feature_title, acceptance) = (long("feat", 30), long("acc", 80));
+    pm_ok(
+        &p,
+        &[
+            "feature",
+            "add",
+            &feature_title,
+            "--epic",
+            "e1",
+            "--acceptance",
+            &acceptance,
+        ],
+    );
+    let text = summary(&p)["summary"].as_str().unwrap().to_string();
+    assert!(!text.contains('…'), "{text}");
+    for whole in [
+        "Charter: Tickets".to_string(),
+        format!("Objective: {objective}"),
+        format!("- {non_goal}"),
+        format!("Done when: {done}"),
+        format!("{goal_title}. Done when: {goal_done}"),
+        format!("- {body_goal} Fast checkout\n  > Line one of the body.\n  > Line two."),
+        format!("{epic_title} (coordinator epic:e1)"),
+        format!("{feature_title}: when it works, the human sees: {acceptance}"),
+    ] {
+        assert!(text.contains(&whole), "missing {whole:?} in:\n{text}");
+    }
+}
+
+#[test]
+fn the_plan_summary_has_the_waves_of_kontext_plan() {
+    let t = planned();
+    // Foundations is finished: `kontext plan` closes it, Payments is wave 1.
+    let schema = summary(&t.p)["covers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .find(|id| id.starts_with("U-") && *id != t.card && *id != t.refunds)
+        .unwrap();
+    let task = pm_id(&t.p, &["task", "add", "Tables", "--feature", &schema]);
+    t.p.kontext_ok(&["done", &task, "--evidence", "cmd:\"true\"=0"]);
+    t.p.kontext_ok(&["done", &schema, "--evidence", "cmd:\"true\"=0"]);
+    let plan: Value = serde_json::from_str(&pm_ok(&t.p, &["--json", "plan"])).unwrap();
+    assert_eq!(plan["closed"][0]["id"], t.found.as_str(), "{plan}");
+    assert_eq!(plan["waves"][0]["epics"][0]["id"], t.pay.as_str(), "{plan}");
+    let text = summary(&t.p)["summary"].as_str().unwrap().to_string();
+    assert!(
+        text.contains(&format!("## Done (1)\n- {} Foundations", t.found)),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("## Wave 1 (in series)\n- {} Payments", t.pay)),
+        "{text}"
+    );
+    assert!(!text.contains("## Wave 2"), "{text}");
+    assert!(text.contains("2 epics, 3 features, 1 wave;"), "{text}");
+}
 
 #[test]
 fn a_scope_signature_that_does_not_count_is_a_problem_for_the_owner() {
@@ -743,7 +888,6 @@ fn a_scope_signature_that_does_not_count_is_a_problem_for_the_owner() {
         "{keys:?}"
     );
 }
-
 
 #[test]
 fn verify_checks_the_summary_hash() {

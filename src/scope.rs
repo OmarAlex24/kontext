@@ -267,17 +267,34 @@ fn day(hlc: &str) -> String {
     crate::ideas::month_day(hlc.get(..10).unwrap_or(hlc))
 }
 
+/// A text the signature binds, on one line and whole: never cut.
+fn whole(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A body the signature binds, line by line under `indent` (nothing if empty).
+fn body_lines(body: &str, indent: &str, l: &mut Vec<String>) {
+    if body.trim().is_empty() {
+        return;
+    }
+    l.extend(
+        body.trim()
+            .lines()
+            .map(|x| format!("{indent}{}", x.trim_end()).trim_end().to_string()),
+    );
+}
+
 fn acceptance_line(f: &Entry) -> String {
     match crate::features::acceptance(f) {
-        Some(a) => format!("when it works, the human sees: {}", one_line(a, 300)),
+        Some(a) => format!("when it works, the human sees: {}", whole(a)),
         None => "no acceptance written".into(),
     }
 }
 
-/// The epics as `kontext plan` lays them in waves, computed as if every one
-/// were open: the summary's waves must not move when work closes (the hash
-/// would change under the human's feet), and at plan time they are the same.
-fn structural_waves(st: &State, keep: &dyn Fn(&str) -> bool) -> plan::Plan {
+/// The epics in dependency order counted as if every one were open, so that
+/// closing work does not move it: what a change compares, before and after.
+/// It is not `kontext plan` (that one moves closed epics out of the waves).
+fn epic_order(st: &State, keep: &dyn Fn(&str) -> bool) -> plan::Plan {
     let nodes: Vec<plan::Node> = plan::nodes(st)
         .into_iter()
         .map(|mut n| {
@@ -293,19 +310,19 @@ fn structural_waves(st: &State, keep: &dyn Fn(&str) -> bool) -> plan::Plan {
     plan::compute(&nodes)
 }
 
-/// The waves in one line: "Wave 1: Foundations; Wave 2: Payments, Catalog".
-fn waves_line(p: &plan::Plan) -> String {
+/// The epic order in one line: "1. Foundations; 2. Payments, Catalog".
+fn order_line(p: &plan::Plan) -> String {
     let mut parts: Vec<String> = p
         .waves
         .iter()
         .map(|w| {
-            let names: Vec<&str> = w.epics.iter().map(|e| e.title.as_str()).collect();
-            format!("Wave {}: {}", w.n, names.join(", "))
+            let names: Vec<String> = w.epics.iter().map(|e| whole(&e.title)).collect();
+            format!("{}. {}", w.n, names.join(", "))
         })
         .collect();
     if !p.blocked.is_empty() {
-        let names: Vec<&str> = p.blocked.iter().map(|b| b.epic.title.as_str()).collect();
-        parts.push(format!("no wave: {}", names.join(", ")));
+        let names: Vec<String> = p.blocked.iter().map(|b| whole(&b.epic.title)).collect();
+        parts.push(format!("no place: {}", names.join(", ")));
     }
     if parts.is_empty() {
         "no epics".into()
@@ -326,7 +343,7 @@ fn feature_lines(st: &State, epic: &str, indent: &str, l: &mut Vec<String>) {
         l.push(format!(
             "{indent}- {} {}: {}",
             f.id,
-            one_line(&f.title, 100),
+            whole(&f.title),
             acceptance_line(f)
         ));
     }
@@ -336,40 +353,38 @@ fn epic_line(e: &Entry) -> String {
     format!(
         "- {} {} (coordinator {})",
         e.id,
-        one_line(&e.title, 100),
+        whole(&e.title),
         tasks::coordinator_of(e)
     )
 }
 
 fn charter_lines(c: &Entry, l: &mut Vec<String>) {
-    l.push(format!(
-        "Objective: {}",
-        one_line(field(c, "objective").unwrap_or(&c.title), 600)
-    ));
+    let objective = field(c, "objective").unwrap_or(&c.title);
+    if whole(&c.title) != whole(objective) {
+        l.push(format!("Charter: {}", whole(&c.title)));
+    }
+    l.push(format!("Objective: {}", whole(objective)));
     let non = string_list(c.fields.get("non_goals"));
     if non.is_empty() {
         l.push("Not doing: (nothing written)".into());
     } else {
         l.push("Not doing:".into());
         for n in non {
-            l.push(format!("- {}", one_line(&n, 300)));
+            l.push(format!("- {}", whole(&n)));
         }
     }
     if let Some(d) = field(c, "done_when") {
-        l.push(format!("Done when: {}", one_line(d, 300)));
+        l.push(format!("Done when: {}", whole(d)));
     }
+    body_lines(&c.body, "> ", l);
 }
 
-fn goal_line(g: &Entry) -> String {
-    match field(g, "done_when") {
-        Some(d) => format!(
-            "- {} {}. Done when: {}",
-            g.id,
-            one_line(&g.title, 120),
-            one_line(d, 200)
-        ),
-        None => format!("- {} {}", g.id, one_line(&g.title, 120)),
-    }
+fn goal_lines(g: &Entry, l: &mut Vec<String>) {
+    l.push(match field(g, "done_when") {
+        Some(d) => format!("- {} {}. Done when: {}", g.id, whole(&g.title), whole(d)),
+        None => format!("- {} {}", g.id, whole(&g.title)),
+    });
+    body_lines(&g.body, "  > ", l);
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -381,7 +396,56 @@ fn not_placed_line(np: &NotPlaced) -> String {
     format!("- {} \"{}\"", np.id, one_line(words, 100))
 }
 
-fn plan_text(st: &State, project: &str, ideas: Option<&Ideas>) -> String {
+/// What the summary knows of the user's ideas: what `kontext ideas` reads
+/// from `.pm/items.md`, or that there was none to read from where it ran.
+pub enum IdeasCheck {
+    Read(Ideas),
+    /// No `.pm/items.md` found from this folder (nor in the mapped repos).
+    NotFound(String),
+}
+
+impl IdeasCheck {
+    fn ideas(&self) -> Option<&Ideas> {
+        match self {
+            IdeasCheck::Read(i) => Some(i),
+            IdeasCheck::NotFound(_) => None,
+        }
+    }
+
+    fn not_placed(&self) -> Vec<NotPlaced> {
+        self.ideas()
+            .map(|i| i.not_placed.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// The line (and list) about the user's ideas that every summary carries:
+/// it is part of the signed text, so a summary shown where `.pm/` was read
+/// and a signature run where it was not never match.
+fn ideas_lines(ic: &IdeasCheck, plan: bool, l: &mut Vec<String>) {
+    match ic {
+        IdeasCheck::NotFound(dir) => l.push(format!(
+            "Ideas not checked: no .pm/items.md found from {dir}."
+        )),
+        IdeasCheck::Read(i) if i.not_placed.is_empty() => {
+            l.push("Not placed: 0 of your ideas.".into())
+        }
+        IdeasCheck::Read(i) => {
+            l.push(format!(
+                "Not placed: {} of your ideas.{}",
+                i.not_placed.len(),
+                if plan {
+                    " Place or discard them before signing:"
+                } else {
+                    ""
+                }
+            ));
+            l.extend(i.not_placed.iter().map(not_placed_line));
+        }
+    }
+}
+
+fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
     let mut l = vec![format!("# Plan for {project}"), String::new()];
     if let Some(c) = st.latest_charter() {
         charter_lines(c, &mut l);
@@ -392,8 +456,11 @@ fn plan_text(st: &State, project: &str, ideas: Option<&Ideas>) -> String {
     if goals.is_empty() {
         l.push("(no goals yet)".into());
     }
-    l.extend(goals.iter().map(|g| goal_line(g)));
-    let waves = structural_waves(st, &|id| st.status_of(id) == Some(Status::Active));
+    for g in &goals {
+        goal_lines(g, &mut l);
+    }
+    // The same waves as `kontext plan` and `kontext tree`.
+    let plan = plan::of_state(st);
     let epics = st.epics();
     let features = features_in_force(st).len();
     if epics.is_empty() {
@@ -401,7 +468,17 @@ fn plan_text(st: &State, project: &str, ideas: Option<&Ideas>) -> String {
         l.push("## Epics".into());
         l.push("(no epics yet: each one added later is a scope change)".into());
     }
-    for w in &waves.waves {
+    if !plan.closed.is_empty() {
+        l.push(String::new());
+        l.push(format!("## Done ({})", plan.closed.len()));
+        for pe in &plan.closed {
+            if let Some(e) = st.get(&pe.id) {
+                l.push(epic_line(e));
+                feature_lines(st, &e.id, "  ", &mut l);
+            }
+        }
+    }
+    for w in &plan.waves {
         l.push(String::new());
         if w.parallel {
             l.push(format!(
@@ -419,10 +496,10 @@ fn plan_text(st: &State, project: &str, ideas: Option<&Ideas>) -> String {
             }
         }
     }
-    if !waves.blocked.is_empty() {
+    if !plan.blocked.is_empty() {
         l.push(String::new());
-        l.push(format!("## No wave ({})", waves.blocked.len()));
-        for b in &waves.blocked {
+        l.push(format!("## No wave ({})", plan.blocked.len()));
+        for b in &plan.blocked {
             if let Some(e) = st.get(&b.epic.id) {
                 l.push(format!("{}: {}", epic_line(e), b.reason));
                 feature_lines(st, &e.id, "  ", &mut l);
@@ -435,7 +512,7 @@ fn plan_text(st: &State, project: &str, ideas: Option<&Ideas>) -> String {
         "{}, {}, {}; one coordinator per epic ({}).",
         plural(epics.len(), "epic", "epics"),
         plural(features, "feature", "features"),
-        plural(waves.waves.len(), "wave", "waves"),
+        plural(plan.waves.len(), "wave", "waves"),
         epics.len()
     ));
     let law = st.law().len();
@@ -445,17 +522,7 @@ fn plan_text(st: &State, project: &str, ideas: Option<&Ideas>) -> String {
             plural(law, "decision", "decisions")
         ));
     }
-    if let Some(i) = ideas {
-        if i.not_placed.is_empty() {
-            l.push("Not placed: 0 of your ideas.".into());
-        } else {
-            l.push(format!(
-                "Not placed: {} of your ideas. Place or discard them before signing:",
-                i.not_placed.len()
-            ));
-            l.extend(i.not_placed.iter().map(not_placed_line));
-        }
-    }
+    ideas_lines(ideas, true, &mut l);
     l.join("\n")
 }
 
@@ -491,7 +558,7 @@ fn touched_epics(st: &State, d: &Diff) -> Vec<String> {
     out
 }
 
-fn change_text(st: &State, project: &str, d: &Diff, ideas: Option<&Ideas>) -> String {
+fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> String {
     let signed = last(st);
     let mut l = vec![format!("# Scope change for {project}")];
     if let Some(s) = signed {
@@ -512,7 +579,12 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: Option<&Ideas>) -> St
                 charter_lines(e, &mut c);
                 l.extend(c.into_iter().map(|x| format!("  {x}")));
             }
-            "goal" => l.push(format!("- Goal {}", &goal_line(e)[2..])),
+            "goal" => {
+                let mut g = Vec::new();
+                goal_lines(e, &mut g);
+                g[0] = format!("- Goal {}", &g[0][2..]);
+                l.extend(g);
+            }
             "epic" => {
                 l.push(format!("- Epic {}", &epic_line(e)[2..]));
                 feature_lines(st, &e.id, "  ", &mut l);
@@ -524,12 +596,12 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: Option<&Ideas>) -> St
                 }
                 let epic = field(e, "epic")
                     .and_then(|ep| st.get(ep))
-                    .map(|ep| one_line(&ep.title, 60))
+                    .map(|ep| whole(&ep.title))
                     .unwrap_or_else(|| "?".into());
                 l.push(format!(
                     "- Feature {} {}, in epic {epic}: {}",
                     e.id,
-                    one_line(&e.title, 100),
+                    whole(&e.title),
                     acceptance_line(e)
                 ));
             }
@@ -554,11 +626,7 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: Option<&Ideas>) -> St
             "epic" => "Epic",
             _ => "Feature",
         };
-        l.push(format!(
-            "- {kind} {} {}{why}",
-            e.id,
-            one_line(&e.title, 100)
-        ));
+        l.push(format!("- {kind} {} {}{why}", e.id, whole(&e.title)));
         if e.kind == "feature" {
             let closed: Vec<String> = crate::features::task_ids(st, id)
                 .into_iter()
@@ -573,7 +641,7 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: Option<&Ideas>) -> St
                     closed.join(", ")
                 ));
             }
-            if let Some(i) = ideas {
+            if let Some(i) = ideas.ideas() {
                 let theirs: Vec<String> = i
                     .ideas
                     .iter()
@@ -602,29 +670,34 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: Option<&Ideas>) -> St
         let names: Vec<String> = touched
             .iter()
             .filter_map(|id| st.get(id))
-            .map(|e| one_line(&e.title, 60))
+            .map(|e| whole(&e.title))
             .collect();
         l.push(names.join(", "));
     }
     l.push(String::new());
-    l.push("## Waves".into());
+    // Not `kontext plan`'s waves (those move as work closes): the order the
+    // epics' dependencies give, counting every one as open.
+    l.push("## Epic order (by their dependencies, every epic counted as open)".into());
     let covers = signed_covers(st);
-    let before = structural_waves(st, &|id| covers.contains(id));
-    let now = structural_waves(st, &|id| st.status_of(id) == Some(Status::Active));
-    let (b, n) = (waves_line(&before), waves_line(&now));
+    let before = epic_order(st, &|id| covers.contains(id));
+    let now = epic_order(st, &|id| st.status_of(id) == Some(Status::Active));
+    let (b, n) = (order_line(&before), order_line(&now));
     if b == n {
         l.push(format!("Unchanged: {n}."));
     } else {
         l.push(format!("Now: {n}."));
         l.push(format!("Before: {b}."));
     }
+    l.push(String::new());
+    l.push("## Your ideas".into());
+    ideas_lines(ideas, false, &mut l);
     l.join("\n")
 }
 
-/// What would be signed now. `ideas`: what `kontext ideas` reads, if there is
-/// a `.pm/items.md`.
-pub fn summary(st: &State, project: &str, ideas: Option<&Ideas>) -> Summary {
-    let not_placed = ideas.map(|i| i.not_placed.clone()).unwrap_or_default();
+/// What would be signed now. `ideas`: what `kontext ideas` reads from
+/// `.pm/items.md`, or where none was found (the summary says which).
+pub fn summary(st: &State, project: &str, ideas: &IdeasCheck) -> Summary {
+    let not_placed = ideas.not_placed();
     let signed = last(st).map(|s| s.id.clone());
     let nothing = |text: String| Summary {
         kind: SummaryKind::Nothing,
@@ -691,17 +764,28 @@ pub struct SignArgs {
 }
 
 /// Where the ideas come from, read before taking the lock: `.pm/` and its
-/// `items.md`, so the summary under the lock is the one `kontext scope
-/// summary` showed.
-pub struct IdeasSource {
-    pub pm: std::path::PathBuf,
-    pub items_md: String,
-    pub people: Vec<String>,
+/// `items.md` (or the folder where none was found), so the summary under the
+/// lock is the one `kontext scope summary` showed from the same place.
+pub enum IdeasSource {
+    Found {
+        pm: std::path::PathBuf,
+        items_md: String,
+        people: Vec<String>,
+    },
+    /// The folder it ran from.
+    NotFound(String),
 }
 
 impl IdeasSource {
-    pub fn build(&self, st: &State, project: &str) -> Ideas {
-        crate::ideas::build(st, project, &self.people, &self.pm, &self.items_md)
+    pub fn check(&self, st: &State, project: &str) -> IdeasCheck {
+        match self {
+            IdeasSource::Found {
+                pm,
+                items_md,
+                people,
+            } => IdeasCheck::Read(crate::ideas::build(st, project, people, pm, items_md)),
+            IdeasSource::NotFound(dir) => IdeasCheck::NotFound(dir.clone()),
+        }
     }
 }
 
@@ -712,7 +796,7 @@ pub fn sign(
     store: &mut Store,
     actor: &Actor,
     project: &str,
-    ideas: Option<&IdeasSource>,
+    ideas: &IdeasSource,
     a: &SignArgs,
 ) -> Result<Vec<Entry>> {
     let h = a.hash.trim().to_lowercase();
@@ -729,8 +813,8 @@ pub fn sign(
     }
     let ((), written) = store.transact(|b| {
         let st = b.state()?;
-        let ideas = ideas.map(|i| i.build(st, project));
-        let s = summary(st, project, ideas.as_ref());
+        let ideas = ideas.check(st, project);
+        let s = summary(st, project, &ideas);
         if s.kind == SummaryKind::Nothing {
             return refused(s.summary.clone());
         }
