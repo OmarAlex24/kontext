@@ -47,6 +47,9 @@ pub enum FeatureStatus {
     Done,
     #[serde(rename = "superseded")]
     Superseded,
+    /// Taken out of the scope with no replacement (`kontext feature drop`).
+    #[serde(rename = "dropped")]
+    Dropped,
     #[serde(rename = "not counted")]
     NotCounted,
 }
@@ -59,13 +62,17 @@ impl FeatureStatus {
             FeatureStatus::ToValidate => "to validate",
             FeatureStatus::Done => "done",
             FeatureStatus::Superseded => "superseded",
+            FeatureStatus::Dropped => "dropped",
             FeatureStatus::NotCounted => "not counted",
         }
     }
 
     /// Still part of its epic (not superseded, and counted).
     pub fn in_force(self) -> bool {
-        !matches!(self, FeatureStatus::Superseded | FeatureStatus::NotCounted)
+        !matches!(
+            self,
+            FeatureStatus::Superseded | FeatureStatus::Dropped | FeatureStatus::NotCounted
+        )
     }
 }
 
@@ -220,6 +227,7 @@ pub fn unready(st: &State, feature: &str) -> Option<String> {
 /// The final state of a feature, from its tasks (called at the end of the walk).
 pub fn derive(st: &State, id: &str, info: &FeatureInfo) -> FeatureStatus {
     match st.status_of(id) {
+        Some(Status::Superseded) if st.dropped.contains_key(id) => return FeatureStatus::Dropped,
         Some(Status::Superseded) => return FeatureStatus::Superseded,
         Some(Status::Ignored) => return FeatureStatus::NotCounted,
         _ => {}
@@ -263,6 +271,18 @@ pub fn status_text(st: &State, id: &str) -> Option<String> {
         FeatureStatus::Superseded => {
             if let Some(by) = st.superseded_by.get(id) {
                 s.push_str(&format!(" by {by}"));
+            }
+        }
+        FeatureStatus::Dropped => {
+            if let Some(r) = st.dropped.get(id) {
+                s.push_str(&format!(" ({r})"));
+            }
+            match st.drop_signed.get(id) {
+                Some(sc) => s.push_str(&format!("; the owner signed it in {sc}")),
+                None if crate::scope::plan_signed(st) => {
+                    s.push_str("; waiting for the owner's signature (scope change)")
+                }
+                None => {}
             }
         }
         FeatureStatus::NotCounted => {}
@@ -396,6 +416,10 @@ pub fn in_force(st: &State, s: &str) -> Result<String> {
             "{id} was superseded by {}",
             st.superseded_by.get(&id).map(String::as_str).unwrap_or("?")
         )),
+        Some(FeatureStatus::Dropped) => refused(format!(
+            "{id} was dropped ({}); put it back with `kontext reopen {id} --why …`",
+            st.dropped.get(&id).map(String::as_str).unwrap_or("?")
+        )),
         Some(FeatureStatus::NotCounted) | None => refused(format!(
             "{id} does not count (it was not written by the pm or an owner)"
         )),
@@ -435,11 +459,46 @@ pub fn check_validate(st: &State, actor: &Actor, a: &DoneArgs) -> Result<String>
     Ok(id)
 }
 
-/// What `kontext reopen <U>` checks: it was validated.
-pub fn check_reopen(st: &State, id: &str) -> Result<()> {
+/// What `kontext reopen <U>` checks: it was validated, or it was dropped
+/// (then the pm or an owner puts it back).
+pub fn check_reopen(st: &State, actor: &Actor, id: &str) -> Result<()> {
+    if st.dropped.contains_key(id) {
+        if let Err(why) = may_write(st, actor) {
+            return refused(why.replace("add or supersede", "put back"));
+        }
+        return Ok(());
+    }
     match st.feature(id) {
         Some(i) if i.validated.is_some() => Ok(()),
         Some(i) => refused(format!("{id} is not validated ({})", i.status)),
         None => refused(format!("{id} is not a feature")),
     }
+}
+
+/// `kontext feature drop <U> --why`: takes a feature out of the current scope
+/// with no replacement (the pm or an owner). It is a `supersede` with only
+/// the feature in `refs`, which binaries from before scopes already read as
+/// superseded. With a signed plan it is a scope change until the owner signs it.
+pub fn drop(store: &mut Store, actor: &Actor, feature: &str, why: &str) -> Result<Vec<Entry>> {
+    if why.trim().is_empty() {
+        bail!("dropping a feature needs --why");
+    }
+    let ((), written) = store.transact(|b| {
+        let st = b.state()?;
+        if let Err(why) = may_write(st, actor) {
+            return refused(format!(
+                "{}. A coordinator who thinks a feature should go asks the pm: `kontext ask --to pm`",
+                why.replace("add or supersede", "drop")
+            ));
+        }
+        let id = in_force(st, feature)?;
+        let mut r = RawEntry::new("supersede", &format!("Drops {id}"));
+        r.actor = Some(actor.clone());
+        r.why = why.trim().to_string();
+        r.refs = vec![id];
+        r.fields.insert("drop".into(), json!(true));
+        b.push(r)?;
+        Ok(())
+    })?;
+    Ok(written)
 }

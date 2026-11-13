@@ -198,6 +198,12 @@ pub enum Alert {
     /// An open task of a superseded feature: it no longer keeps its epic open,
     /// so the work would be lost unless it is closed or moved.
     SupersededFeatureTask { task: String, feature: String },
+    /// An open task of a dropped feature (`kontext feature drop`): like a
+    /// superseded feature's, its work is lost unless it is closed or moved.
+    DroppedFeatureTask { task: String, feature: String },
+    /// A `scope` entry whose content does not hold (its summary was changed
+    /// after the hash was computed): it does not count.
+    ScopeInvalid { id: String, reason: String },
     /// Phase 4: a fact whose fingerprint no longer matches `HEAD` (it is not
     /// written; [`crate::facts::annotate`] adds it when reading).
     FactStale {
@@ -235,6 +241,8 @@ impl Alert {
             Alert::ClaimLost { task, record, .. } => vec![task, record],
             Alert::ProposalSupersedes { proposal, decision } => vec![proposal, decision],
             Alert::SupersededFeatureTask { task, feature } => vec![task, feature],
+            Alert::DroppedFeatureTask { task, feature } => vec![task, feature],
+            Alert::ScopeInvalid { id, .. } => vec![id],
         }
     }
 
@@ -255,6 +263,7 @@ impl Alert {
                     | Alert::ClaimLost { .. }
                     | Alert::ProposalSupersedes { .. }
                     | Alert::SupersededFeatureTask { .. }
+                    | Alert::DroppedFeatureTask { .. }
             )
     }
 
@@ -345,6 +354,13 @@ impl fmt::Display for Alert {
                 f,
                 "open task {task} of superseded feature {feature}: close it with evidence or move the work to a feature in force"
             ),
+            Alert::DroppedFeatureTask { task, feature } => write!(
+                f,
+                "open task {task} of dropped feature {feature}: close it with evidence, move the work to a feature in force, or put {feature} back with `kontext reopen {feature} --why …`"
+            ),
+            Alert::ScopeInvalid { id, reason } => {
+                write!(f, "{id} (scope signature) does not count: {reason}")
+            }
             Alert::FactStale {
                 id,
                 path,
@@ -540,6 +556,14 @@ pub struct State {
     /// The old id of each entry imported from v0 (`fields.v0_id`, `D-0030`) →
     /// its id here. [`State::resolve`] looks them up.
     pub v0_ids: BTreeMap<String, String>,
+    /// The `scope` entries that count, in `hlc` order (the last one is the
+    /// signed scope). Empty: no signed plan, and nothing about scopes applies.
+    pub scopes: Vec<String>,
+    /// Feature → the `supersede` without a replacement that dropped it (while
+    /// it stays dropped).
+    pub dropped: BTreeMap<String, String>,
+    /// Dropped feature → the `scope` entry whose signature covered its removal.
+    pub drop_signed: BTreeMap<String, String>,
     /// Charters in the order they were signed.
     sign_order: Vec<String>,
 }
@@ -966,6 +990,9 @@ impl State {
             if e.kind == "journal" {
                 self.touch_task(e);
             }
+            if e.kind == "scope" {
+                self.apply_scope(e);
+            }
             if e.kind == "decision" && self.authorize(e) {
                 for old in string_list(e.fields.get("supersedes")) {
                     self.supersede(&old, &e.id);
@@ -1059,7 +1086,12 @@ impl State {
                 }
                 match e.refs.get(1) {
                     Some(by) => self.supersede(&target, by),
-                    None => self.set(&target, Status::Superseded),
+                    // Without a replacement: the feature is dropped.
+                    None => {
+                        self.set(&target, Status::Superseded);
+                        self.dropped.insert(target.clone(), e.id.clone());
+                        self.drop_signed.remove(&target);
+                    }
                 }
             }
             "supersede" => {
@@ -1357,9 +1389,45 @@ impl State {
         self.feature_event(f, e, true, note);
     }
 
+    /// A `scope` entry: an owner (or the pm with `approved_by`) signed the
+    /// summary it stores. It counts if its hash matches its summary.
+    fn apply_scope(&mut self, e: &Entry) {
+        if !self.authorize(e) {
+            return;
+        }
+        if let Some(reason) = crate::scope::content_problem(e) {
+            self.not_counting.insert(e.id.clone(), reason.clone());
+            self.alerts.push(Alert::ScopeInvalid {
+                id: e.id.clone(),
+                reason,
+            });
+            self.status.insert(e.id.clone(), Status::Ignored);
+            return;
+        }
+        self.scopes.push(e.id.clone());
+        let covers: BTreeSet<String> = string_list(e.fields.get("covers")).into_iter().collect();
+        let dropped: Vec<String> = self.dropped.keys().cloned().collect();
+        for f in dropped {
+            if !covers.contains(&f) {
+                self.drop_signed.entry(f).or_insert_with(|| e.id.clone());
+            }
+        }
+    }
+
     /// `done` (validate) and `reopen` on a feature.
     fn apply_feature(&mut self, e: &Entry, f: &str) {
         let info = self.features.get(f).cloned().unwrap_or_default();
+        // A reopen of a dropped feature puts it back; its validation, if it
+        // had one, is kept.
+        if e.kind == "reopen" && self.dropped.contains_key(f) {
+            if let Err(reason) = crate::features::may_write(self, &e.actor) {
+                return self.feature_ignored(f, e, reason.replace("add or supersede", "put back"));
+            }
+            self.dropped.remove(f);
+            self.drop_signed.remove(f);
+            self.set(f, Status::Active);
+            return self.feature_event(f, e, true, "put back in the scope".into());
+        }
         match e.kind.as_str() {
             "done" => {
                 if info.validated.is_some() {
@@ -1449,9 +1517,11 @@ impl State {
             if self.status_of(f) == Some(Status::Superseded)
                 && self.task_status(&t.id) != Some(TaskStatus::Closed)
             {
-                alerts.push(Alert::SupersededFeatureTask {
-                    task: t.id.clone(),
-                    feature: f.to_string(),
+                let (task, feature) = (t.id.clone(), f.to_string());
+                alerts.push(if self.dropped.contains_key(f) {
+                    Alert::DroppedFeatureTask { task, feature }
+                } else {
+                    Alert::SupersededFeatureTask { task, feature }
                 });
             }
         }

@@ -729,6 +729,7 @@ fn check_home(r: &mut Report, home: &Path, writer: Option<&str>) {
                 .problems
                 .iter()
                 .chain(&rep.media_problems)
+                .chain(&rep.scope_problems)
                 .take(3)
                 .map(ToString::to_string)
                 .collect();

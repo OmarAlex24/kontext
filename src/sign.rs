@@ -32,7 +32,7 @@ use crate::model::{Entry, sha256_hex};
 pub const NAMESPACE: &str = "kontext";
 
 /// The kinds that get signed.
-pub const SIGNED_KINDS: &[&str] = &["sign", "decision", "accept", "reject", "supersede"];
+pub const SIGNED_KINDS: &[&str] = &["sign", "decision", "accept", "reject", "supersede", "scope"];
 
 /// Does this kind get signed?
 pub fn is_signed_kind(kind: &str) -> bool {

@@ -41,6 +41,8 @@ pub const ENTITY_KINDS: &[(&str, &str)] = &[
     ("journal", "J"),
     // `F` is taken by fact: a feature is `U` (what the user sees).
     ("feature", "U"),
+    // What the owner signed: the plan, then each scope change.
+    ("scope", "S"),
 ];
 
 /// Records that act on another entry (`refs[0]`). All of them use the prefix `R`.

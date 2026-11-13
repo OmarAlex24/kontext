@@ -30,6 +30,7 @@ pub mod plan;
 pub mod recall;
 pub mod report;
 pub mod repos;
+pub mod scope;
 pub mod sign;
 pub mod state;
 pub mod store;

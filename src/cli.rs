@@ -174,6 +174,35 @@ pub enum FeatureCmd {
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
     },
+    /// Takes a feature out of the scope with no replacement (the pm or an owner). With a signed
+    /// plan it waits for the owner's signature like any scope change. `kontext reopen <U>` puts
+    /// it back
+    Drop {
+        /// The feature (U-…)
+        feature: String,
+        #[arg(long)]
+        why: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScopeCmd {
+    /// What the owner would sign now: the plan, or the scope change since the last signature,
+    /// ending with its hash. Writes nothing
+    Summary,
+    /// Signs the scope whose summary has this hash (an owner, or the pm with --approved-by).
+    /// Refuses if the scope changed since that summary
+    Sign {
+        /// The hash `kontext scope summary` printed (or its first 8 characters or more)
+        #[arg(long)]
+        hash: String,
+        /// The owner's words, verbatim, when the pm signs for them
+        #[arg(long)]
+        said: Option<String>,
+        /// Owner who approved it (only for the pm)
+        #[arg(long)]
+        approved_by: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -454,6 +483,11 @@ pub enum Cmd {
     Feature {
         #[command(subcommand)]
         cmd: FeatureCmd,
+    },
+    /// The scope the owner signs: the plan once, then each change (`summary`, `sign`)
+    Scope {
+        #[command(subcommand)]
+        cmd: ScopeCmd,
     },
     /// Tasks
     Task {
@@ -1151,6 +1185,26 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 Ok((w.entries, w.warnings))
             })
         }
+        Cmd::Feature {
+            cmd: FeatureCmd::Drop { feature, why },
+        } => cx.written("the drop", |s, a| {
+            crate::features::drop(s, a, &feature, &why)
+        }),
+        Cmd::Scope {
+            cmd: ScopeCmd::Summary,
+        } => cx.scope_summary(),
+        Cmd::Scope {
+            cmd:
+                ScopeCmd::Sign {
+                    hash,
+                    said,
+                    approved_by,
+                },
+        } => cx.scope_sign(crate::scope::SignArgs {
+            hash,
+            said,
+            approved_by,
+        }),
         Cmd::Task {
             cmd:
                 TaskCmd::Add {
@@ -1508,6 +1562,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                 .problems
                 .iter()
                 .chain(&report.media_problems)
+                .chain(&report.scope_problems)
                 .chain(&report.newer)
             {
                 println!("{pr}");
@@ -2104,6 +2159,51 @@ impl Ctx<'_> {
             print!("{}", crate::ideas::text(&ideas));
         }
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// The `.pm/` folder and its `items.md`, if there is one (what `kontext
+    /// ideas` and `kontext tree` read).
+    fn ideas_source(&self, project: &Project) -> Result<Option<crate::scope::IdeasSource>> {
+        let cwd = std::env::current_dir()?;
+        let repos = Repos::load(project, &cwd)?;
+        let own = crate::capture::Settings::of(project).worktrees;
+        let Some(pm) = crate::ideas::locate(&repos, own) else {
+            return Ok(None);
+        };
+        let Ok(items_md) = fs::read_to_string(pm.join("items.md")) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::scope::IdeasSource {
+            pm,
+            items_md,
+            people: project.people.keys().cloned().collect(),
+        }))
+    }
+
+    /// `kontext scope summary`: read-only.
+    fn scope_summary(&self) -> Result<ExitCode> {
+        let (mut store, project) = self.open()?;
+        let src = self.ideas_source(&project)?;
+        let st = app::state(&mut store, &project)?;
+        let ideas = src.as_ref().map(|i| i.build(&st, &project.name));
+        let s = crate::scope::summary(&st, &project.name, ideas.as_ref());
+        if self.json {
+            print_json(&s.json())?;
+        } else {
+            print!("{}", s.text());
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// `kontext scope sign --hash <h>`.
+    fn scope_sign(&self, args: crate::scope::SignArgs) -> Result<ExitCode> {
+        let (store, project) = self.open()?;
+        let src = self.ideas_source(&project)?;
+        drop(store);
+        let code = self.written("the scope signature", |s, a| {
+            crate::scope::sign(s, a, &project.name, src.as_ref(), &args)
+        })?;
+        Ok(code)
     }
 
     fn tree(&self) -> Result<ExitCode> {

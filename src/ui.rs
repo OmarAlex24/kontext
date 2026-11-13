@@ -100,7 +100,7 @@ pub fn category(st: &State, e: &Entry) -> &'static str {
 
 fn category_of(st: &State, e: &Entry, depth: usize) -> &'static str {
     match e.kind.as_str() {
-        "charter" | "goal" | "sign" => "charter",
+        "charter" | "goal" | "sign" | "scope" => "charter",
         "decision" | "proposal" | "accept" | "reject" => "decision",
         "question" | "answer" => "question",
         "fact" | "confirm" => "fact",
@@ -455,6 +455,8 @@ fn alert_category(a: &Alert) -> (&'static str, &'static str) {
         }
         Alert::ProposalSupersedes { .. } => ("conflict", "Proposal against a decision"),
         Alert::SupersededFeatureTask { .. } => ("drift", "Task of a superseded feature"),
+        Alert::DroppedFeatureTask { .. } => ("drift", "Task of a dropped feature"),
+        Alert::ScopeInvalid { .. } => ("signature", "Invalid scope signature"),
     }
 }
 

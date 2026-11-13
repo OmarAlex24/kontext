@@ -27,6 +27,7 @@ pub fn kind_label(kind: &str) -> &str {
         "task" => "task",
         "journal" => "journal",
         "feature" => "feature",
+        "scope" => "scope signature",
         "sign" => "signature",
         "accept" => "acceptance",
         "reject" => "rejection",
@@ -1271,6 +1272,7 @@ pub fn show(st: &State, id: &str) -> String {
     };
     let status = st.status_of(id);
     let mark = match status {
+        Some(Status::Superseded) if st.dropped.contains_key(id) => "[dropped] ".into(),
         Some(Status::Superseded) => format!(
             "[superseded by {}, no longer applies] ",
             st.superseded_by.get(id).map(String::as_str).unwrap_or("?")
@@ -1387,7 +1389,18 @@ pub fn show(st: &State, id: &str) -> String {
     if let Some(fr) = st.freshness.get(id) {
         l.push(format!("- **Freshness:** {}", crate::facts::describe(fr)));
     }
+    if e.kind == "scope" {
+        l.extend(crate::scope::show_lines(st, e));
+    }
     for (k, v) in &e.fields {
+        if e.kind == "scope"
+            && matches!(
+                k.as_str(),
+                "type" | "covers" | "adds" | "removes" | "summary" | "summary_hash" | "said"
+            )
+        {
+            continue;
+        }
         if SHOWN_FIELDS.contains(&k.as_str()) || v.is_null() || v == &json!("") || v == &json!([]) {
             continue;
         }

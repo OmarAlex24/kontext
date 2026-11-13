@@ -888,8 +888,17 @@ pub fn reopen(store: &mut Store, actor: &Actor, task: &str, why: &str) -> Result
         let st = b.state()?;
         let id = st.resolve(task)?;
         if st.kind_of(&id) == Some("feature") {
-            crate::features::check_reopen(st, &id)?;
-            let mut r = raw("reopen", actor, &format!("Reopens {id}"));
+            crate::features::check_reopen(st, actor, &id)?;
+            let back = st.dropped.contains_key(&id);
+            let title = if back {
+                format!("Puts back {id}")
+            } else {
+                format!("Reopens {id}")
+            };
+            let mut r = raw("reopen", actor, &title);
+            if back {
+                r.fields.insert("restore".into(), json!(true));
+            }
             r.why = why.trim().to_string();
             r.refs = vec![id];
             b.push(r)?;
