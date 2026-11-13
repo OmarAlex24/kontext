@@ -507,6 +507,9 @@ fn the_root_is_the_tree_and_its_api_is_kontext_tree_json() {
     let cli: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v, cli);
     assert!(v["waves"].as_array().is_some_and(|w| !w.is_empty()), "{v}");
+    // The waves are kontext plan's; closed epics are under `done`.
+    assert!(v["done"].is_array(), "{v}");
+    assert!(v.get("current_wave").is_none(), "{v}");
     assert_eq!(
         request(&ui.addr, "GET", "/api/tree", Some("evil.example:80")).0,
         403

@@ -107,22 +107,30 @@
       : [t.epics.done + "/" + t.epics.total, " epics closed"];
     s.appendChild(el("b", "", head[0]));
     s.appendChild(document.createTextNode(head[1]));
+    // The waves are kontext plan's: only open epics have one, wave 1 is now.
+    var rest = [];
     if (t.waves.length) {
-      s.appendChild(document.createTextNode(
-        t.current_wave ? " · wave " + t.current_wave + " of " + t.waves.length
-          : " · every wave closed"));
+      rest.push(t.waves.length + (t.waves.length === 1 ? " wave" : " waves") + " to go");
     }
+    if (t.no_wave.length) rest.push(t.no_wave.length + " with no wave");
+    if (!t.waves.length && !t.no_wave.length && t.done.length) rest.push("all done");
+    if (rest.length) s.appendChild(document.createTextNode(" · " + rest.join(" · ")));
 
     var book = document.getElementById("book");
     book.textContent = "";
-    if (!t.waves.length && !t.no_wave.length) {
+    if (!t.done.length && !t.waves.length && !t.no_wave.length) {
       var g0 = group("No epics", false);
       g0.body.appendChild(el("p", "empty",
         "Nothing planned yet. Add the first epic with kontext epic add \"<title>\" --goal <G>."));
       book.appendChild(g0.sec);
     }
+    if (t.done.length) {
+      var gd = group("Done", false);
+      t.done.forEach(function (e) { gd.body.appendChild(epic(e)); });
+      book.appendChild(gd.sec);
+    }
     t.waves.forEach(function (w) {
-      var g = group("Wave " + w.n, w.n === t.current_wave);
+      var g = group("Wave " + w.n, w.n === 1);
       w.epics.forEach(function (e) { g.body.appendChild(epic(e)); });
       book.appendChild(g.sec);
     });
