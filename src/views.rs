@@ -1435,7 +1435,14 @@ pub fn show(st: &State, id: &str) -> String {
         if e.kind == "scope"
             && matches!(
                 k.as_str(),
-                "type" | "covers" | "adds" | "removes" | "summary" | "summary_hash" | "said"
+                "type"
+                    | "covers"
+                    | "adds"
+                    | "removes"
+                    | "summary"
+                    | "summary_hash"
+                    | "said"
+                    | "after_records"
             )
         {
             continue;

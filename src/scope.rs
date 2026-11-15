@@ -87,6 +87,39 @@ pub fn signed_covers(st: &State) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+/// The `after` records that count now, every epic's, in ledger order.
+pub fn after_records(st: &State) -> Vec<String> {
+    let mut out: Vec<String> = st
+        .epic_records
+        .values()
+        .flatten()
+        .filter(|id| st.kind_of(id) == Some("after"))
+        .cloned()
+        .collect();
+    out.sort_by_key(|id| position(st, id));
+    out.dedup();
+    out
+}
+
+/// The `after` records the last signature saw: its `fields.after_records`
+/// (written since that field exists), or for an older signature without
+/// it, the ones before it in the ledger.
+pub fn signed_after(st: &State) -> BTreeSet<String> {
+    let Some(s) = last(st) else {
+        return BTreeSet::new();
+    };
+    if s.fields.contains_key("after_records") {
+        return string_list(s.fields.get("after_records"))
+            .into_iter()
+            .collect();
+    }
+    let at = position(st, &s.id);
+    after_records(st)
+        .into_iter()
+        .filter(|id| position(st, id) < at)
+        .collect()
+}
+
 /// The ids of the scope kinds in a set of covers.
 fn scope_part(st: &State, covers: &BTreeSet<String>) -> BTreeSet<String> {
     covers
@@ -431,10 +464,24 @@ fn acceptance_line(f: &Entry) -> String {
 /// The epics in dependency order counted as if every one were open, so that
 /// closing work does not move it: what a change compares, before and after.
 /// It is not `kontext plan` (that one moves closed epics out of the waves).
-fn epic_order(st: &State, keep: &dyn Fn(&str) -> bool) -> plan::Plan {
+fn epic_order(st: &State, keep: &dyn Fn(&str) -> bool, after: &dyn Fn(&str) -> bool) -> plan::Plan {
     let nodes: Vec<plan::Node> = plan::nodes(st)
         .into_iter()
         .map(|mut n| {
+            // Its own dependencies, then those of the `after` records kept.
+            if let Some(e) = st.get(&n.id) {
+                n.after = string_list(e.fields.get("depends_on"));
+                for r in crate::epics::records(st, &n.id, "after") {
+                    if !after(&r.id) {
+                        continue;
+                    }
+                    for d in string_list(r.fields.get("depends_on")) {
+                        if !n.after.contains(&d) {
+                            n.after.push(d);
+                        }
+                    }
+                }
+            }
             n.active = keep(&n.id);
             n.tasks = 1;
             n.closed_tasks = 0;
@@ -859,10 +906,15 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
     l.push(String::new());
     // Not `kontext plan`'s waves (those move as work closes): the order the
     // epics' dependencies give, counting every one as open.
-    l.push("## Epic order (by their dependencies, every epic counted as open)".into());
     let covers = signed_covers(st);
-    let before = epic_order(st, &|id| covers.contains(id));
-    let now = epic_order(st, &|id| st.status_of(id) == Some(Status::Active));
+    let seen = signed_after(st);
+    added_after_lines(st, &covers, &seen, &adds, &mut l);
+    l.push("## Epic order (by their dependencies, every epic counted as open)".into());
+    // Before: the epics and the `after` records the signature saw.
+    let before = epic_order(st, &|id| covers.contains(id), &|r| seen.contains(r));
+    let now = epic_order(st, &|id| st.status_of(id) == Some(Status::Active), &|_| {
+        true
+    });
     let (b, n) = (order_line(&before), order_line(&now));
     if b == n {
         l.push(format!("Unchanged: {n}."));
@@ -874,6 +926,63 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
     l.push("## Your ideas".into());
     ideas_lines(ideas, false, &mut l);
     l.join("\n")
+}
+
+/// The `after` records added since the signature (it did not see them), each
+/// whole. One that makes a signed epic wait on scope that enters with this
+/// change says so: that epic now waits on work not signed yet.
+fn added_after_lines(
+    st: &State,
+    covers: &BTreeSet<String>,
+    seen: &BTreeSet<String>,
+    adds: &BTreeSet<&String>,
+    l: &mut Vec<String>,
+) {
+    let new: Vec<String> = after_records(st)
+        .into_iter()
+        .filter(|id| !seen.contains(id))
+        .collect();
+    if new.is_empty() {
+        return;
+    }
+    let name = |id: &str| {
+        st.get(id)
+            .map(|x| whole(&x.title))
+            .unwrap_or_else(|| id.to_string())
+    };
+    l.push(format!(
+        "## Dependencies added since the signature ({})",
+        new.len()
+    ));
+    for id in &new {
+        let Some(r) = st.get(id) else { continue };
+        let epic = r.refs.first().cloned().unwrap_or_default();
+        let deps = string_list(r.fields.get("depends_on"));
+        let names: Vec<String> = deps.iter().map(|d| name(d)).collect();
+        l.push(format!(
+            "- {} comes after {} ({}): {}",
+            name(&epic),
+            names.join(", "),
+            r.id,
+            whole(&r.why)
+        ));
+        if covers.contains(&epic) {
+            let entering: Vec<String> = deps
+                .iter()
+                .filter(|d| adds.contains(d))
+                .map(|d| name(d))
+                .collect();
+            if !entering.is_empty() {
+                l.push(format!(
+                    "  ⚠ {} is signed and now waits on {}, which enters with this change and is \
+                     not signed yet",
+                    name(&epic),
+                    entering.join(", ")
+                ));
+            }
+        }
+    }
+    l.push(String::new());
 }
 
 /// What would be signed now. `ideas`: what `kontext ideas` reads from
@@ -1037,6 +1146,10 @@ pub fn sign(
         r.fields.insert("removes".into(), json!(s.removes));
         r.fields.insert("summary".into(), json!(s.summary));
         r.fields.insert("summary_hash".into(), json!(s.hash));
+        // The `after` records it saw: a later change summary compares the
+        // epic order against these, not against the ones added since.
+        r.fields
+            .insert("after_records".into(), json!(after_records(st)));
         if let Some(said) = a.said.as_deref().filter(|x| !x.trim().is_empty()) {
             r.fields.insert("said".into(), json!(said));
         }

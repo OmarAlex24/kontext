@@ -57,6 +57,7 @@ fn waves(p: &Project) -> Vec<Vec<String>> {
 
 struct Planned {
     p: Project,
+    goal: String,
     found: String,
     pay: String,
     cat: String,
@@ -95,6 +96,7 @@ fn planned() -> Planned {
     );
     Planned {
         p,
+        goal,
         found,
         pay,
         cat,
@@ -643,4 +645,118 @@ fn next_points_at_the_feature_for_the_other_quotes() {
     assert!(!next.contains("fourth quote"), "{next}");
     let show = p.kontext_in_ok(&repo, PM, &["show", &t.refunds]);
     assert!(show.contains("\"fourth quote\" (P4, Nov 12)"), "{show}");
+}
+
+fn sign(p: &Project) -> String {
+    let h = json(p, &["scope", "summary"])["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = pm_ok(
+        p,
+        &[
+            "--json",
+            "scope",
+            "sign",
+            "--hash",
+            &h,
+            "--approved-by",
+            "omar",
+            "--said",
+            "sí",
+        ],
+    );
+    let v: Value = serde_json::from_str(&out).unwrap();
+    v["id"].as_str().unwrap_or_default().to_string()
+}
+
+/// A change summary's "Before" is the order the signature saw: an `after`
+/// added since does not rewrite it. Each one added since is listed, and one
+/// that makes a signed epic wait on scope that enters says so.
+#[test]
+fn a_change_summary_compares_against_the_dependencies_the_signature_saw() {
+    // A: an `after` between two signed epics, then a feature (a change).
+    let t = planned();
+    let p = &t.p;
+    sign(p);
+    let r = pm_id(
+        p,
+        &[
+            "epic",
+            "after",
+            "cat",
+            "pay",
+            "--why",
+            "prices feed invoices",
+        ],
+    );
+    pm_ok(
+        p,
+        &[
+            "feature",
+            "add",
+            "Exports",
+            "--epic",
+            "cat",
+            "--acceptance",
+            "csv",
+        ],
+    );
+    let s = pm_ok(p, &["scope", "summary"]);
+    assert!(
+        s.contains("Now: 1. Foundations; 2. Payments; 3. Catalog."),
+        "{s}"
+    );
+    assert!(
+        s.contains("Before: 1. Foundations; 2. Payments, Catalog."),
+        "{s}"
+    );
+    assert!(!s.contains("Unchanged"), "{s}");
+    assert!(
+        s.contains(&format!(
+            "## Dependencies added since the signature (1)\n- Catalog comes after Payments ({r}): prices feed invoices\n"
+        )),
+        "{s}"
+    );
+    assert!(!s.contains("⚠"), "Payments is signed: {s}");
+
+    // B: a signed epic made to wait on an epic that is not signed yet.
+    let t = planned();
+    let p = &t.p;
+    sign(p);
+    pm_ok(
+        p,
+        &[
+            "epic", "add", "Shipping", "--goal", &t.goal, "--name", "ship", "--after", "found",
+        ],
+    );
+    pm_ok(p, &["epic", "after", "cat", "ship", "--why", "rates first"]);
+    let s = pm_ok(p, &["scope", "summary"]);
+    assert!(
+        s.contains("Before: 1. Foundations; 2. Payments, Catalog."),
+        "{s}"
+    );
+    assert!(
+        s.contains(
+            "  ⚠ Catalog is signed and now waits on Shipping, which enters with this change and is not signed yet"
+        ),
+        "{s}"
+    );
+    // Once signed, the next signature saw it: nothing is "added since".
+    sign(p);
+    pm_ok(
+        p,
+        &[
+            "feature",
+            "add",
+            "Exports",
+            "--epic",
+            "cat",
+            "--acceptance",
+            "csv",
+        ],
+    );
+    let s = pm_ok(p, &["scope", "summary"]);
+    assert!(!s.contains("Dependencies added since"), "{s}");
+    assert!(s.contains("Unchanged: "), "{s}");
 }
