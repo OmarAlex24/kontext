@@ -77,6 +77,11 @@ pub struct Outcome {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub offline: bool,
     pub needs_human: Option<NeedsHuman>,
+    /// Does the server take invitations (`kontext invite`)? `false` for a
+    /// server deployed before them, which needs `kontext server deploy`
+    /// first; absent when the server was not asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invites: Option<bool>,
     /// Notes (files kept because they were changed by hand, warnings).
     pub notes: Vec<String>,
     /// What to do next.
@@ -214,6 +219,7 @@ pub fn run(a: &Args) -> Result<Outcome> {
         ok: false,
         offline: false,
         needs_human: None,
+        invites: None,
         notes: Vec::new(),
         next: String::new(),
     };
@@ -442,7 +448,24 @@ pub fn run(a: &Args) -> Result<Outcome> {
     );
     out.notes.extend(report.warnings.iter().cloned());
     out.ok = complete;
-    out.next = if out.ok {
+    // A server deployed before invitations syncs, but another machine cannot
+    // join it until it is updated.
+    out.invites = crate::invite::server_has_invites(&url, Duration::from_secs(3));
+    let old_server = out.invites == Some(false);
+    if old_server {
+        out.notes.push(format!(
+            "the kontext server at {url} was deployed before invitations: `kontext invite` (how another \
+             machine joins) works once it is updated with `kontext server deploy`, run in a terminal on the \
+             machine that deployed it (it keeps the projects and the admin secret)"
+        ));
+    }
+    out.next = if out.ok && old_server {
+        format!(
+            "Done: project {name} is installed in this repo and syncs with {url}. Before another machine \
+             can join, update the server: `kontext server deploy` in a terminal on the machine that \
+             deployed it; then `kontext invite` here prints the line to run there."
+        )
+    } else if out.ok {
         format!(
             "Done: project {name} is installed in this repo and syncs with {url}. Another machine joins \
              with `kontext invite` here (it prints the line to run there)."
@@ -462,7 +485,7 @@ fn server_steps(
     own_server: Option<&str>,
     resolved: &config::Resolved,
 ) -> Result<remote::Report> {
-    let token = config::token_for(name)?.filter(|t| t.project == name);
+    let token = config::token_for_server(name, url, own_server)?.filter(|t| t.project == name);
     Ok(if own_server == Some(url) && token.is_some() {
         let remote = Link::of(name)?
             .remote()
@@ -516,7 +539,7 @@ fn server_steps(
                     }
                 },
             };
-            t.save(name)?;
+            t.save(name, url)?;
             crate::cli::kill_point("setup:token");
         }
         let r = remote::connect(name, &resolved.home, &resolved.writer, url)?;

@@ -9,7 +9,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use common::BIN;
 use common::server::{ADMIN, LocalServer};
@@ -306,10 +308,14 @@ fn an_older_server_is_said_to_need_an_update() {
     // A join string for the old server: nothing but /v1/info is asked.
     let claims = json!({ "s": url, "p": "billing", "c": "kxi1.abc" }).to_string();
     let b64 = b64url(&claims);
-    let (code, _, text) = b.json(&rb, &["join", &format!("kxj1.{b64}")]);
-    assert_eq!(code, Some(2), "{text}");
-    assert!(text.contains("needs an update"), "{text}");
-    assert!(text.contains("kontext server deploy"), "{text}");
+    let (code, v, text) = b.json(&rb, &["join", &format!("kxj1.{b64}")]);
+    assert_eq!(code, Some(4), "{text}");
+    assert_eq!(v["needs_human"]["reason"], "server_update", "{text}");
+    assert_eq!(v["needs_human"]["run"], "kontext server deploy", "{text}");
+    assert!(
+        v["needs_human"]["then"].as_str().unwrap().contains("join"),
+        "{text}"
+    );
     assert_eq!(*log.lock().unwrap(), ["GET /v1/info HTTP/1.1"]);
     assert!(!b.config.join("tokens/billing.token").exists());
 
@@ -335,9 +341,16 @@ fn an_older_server_is_said_to_need_an_update() {
     )
     .unwrap();
     log.lock().unwrap().clear();
-    let (code, _, text) = a.json(&a.base, &["--project", "billing", "invite"]);
-    assert_eq!(code, Some(2), "{text}");
-    assert!(text.contains("needs an update"), "{text}");
+    let (code, v, text) = a.json(&a.base, &["--project", "billing", "invite"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert_eq!(v["needs_human"]["reason"], "server_update", "{text}");
+    assert!(
+        v["needs_human"]["then"]
+            .as_str()
+            .unwrap()
+            .ends_with("invite"),
+        "{text}"
+    );
     assert!(
         !log.lock().unwrap().iter().any(|l| l.contains("invites")),
         "{:?}",
@@ -364,4 +377,302 @@ fn an_older_server_is_said_to_need_an_update() {
     assert!(text.contains("did not answer"), "{text}");
     assert!(text.contains("run `kontext invite` again"), "{text}");
     assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+}
+
+/// A proxy in front of the local server that logs every request (with the
+/// token it carries) and, while `hold` is set, answers nothing but
+/// `/v1/info` and `POST …/join`: a server that takes the code and then stops
+/// answering.
+fn proxy(upstream: &str) -> (String, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let up = upstream.trim_start_matches("http://").to_string();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hold = Arc::new(AtomicBool::new(false));
+    let (lg, hd) = (log.clone(), hold.clone());
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let (lg, hd, up) = (lg.clone(), hd.clone(), up.clone());
+            std::thread::spawn(move || {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                let mut head = Vec::new();
+                let (mut len, mut auth) = (0usize, String::new());
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    let low = h.to_ascii_lowercase();
+                    if let Some(v) = low.strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                    if low.starts_with("authorization:") {
+                        auth = h.trim()["authorization:".len()..].trim().to_string();
+                    }
+                    if !low.starts_with("connection:") {
+                        head.push(h);
+                    }
+                }
+                let mut body = vec![0u8; len];
+                r.read_exact(&mut body).unwrap();
+                let line = line.trim().to_string();
+                lg.lock().unwrap().push(format!("{line} {auth}"));
+                let open = line.starts_with("GET /v1/info ") || line.contains("/join ");
+                if hd.load(Ordering::SeqCst) && !open {
+                    std::thread::sleep(Duration::from_secs(30));
+                    return;
+                }
+                let mut u = std::net::TcpStream::connect(&up).unwrap();
+                let mut req = format!("{line}\r\n").into_bytes();
+                for h in head {
+                    req.extend_from_slice(h.as_bytes());
+                }
+                req.extend_from_slice(b"Connection: close\r\n\r\n");
+                req.extend_from_slice(&body);
+                u.write_all(&req).unwrap();
+                let answer = read_answer(&mut BufReader::new(u));
+                let mut s = s;
+                let _ = s.write_all(&answer);
+            });
+        }
+    });
+    (url, log, hold)
+}
+
+/// One HTTP answer, as its bytes: the head, then a body of Content-Length
+/// bytes or chunks.
+fn read_answer(r: &mut impl BufRead) -> Vec<u8> {
+    let mut out = Vec::new();
+    let (mut len, mut chunked) = (0usize, false);
+    loop {
+        let mut h = String::new();
+        if r.read_line(&mut h).unwrap_or(0) == 0 {
+            return out;
+        }
+        out.extend_from_slice(h.as_bytes());
+        let low = h.to_ascii_lowercase();
+        if let Some(v) = low.strip_prefix("content-length:") {
+            len = v.trim().parse().unwrap_or(0);
+        }
+        if low.starts_with("transfer-encoding:") && low.contains("chunked") {
+            chunked = true;
+        }
+        if h.trim().is_empty() {
+            break;
+        }
+    }
+    if !chunked {
+        let mut body = vec![0u8; len];
+        r.read_exact(&mut body).unwrap();
+        out.extend_from_slice(&body);
+        return out;
+    }
+    loop {
+        let mut size = String::new();
+        r.read_line(&mut size).unwrap();
+        out.extend_from_slice(size.as_bytes());
+        let n = usize::from_str_radix(size.trim().split(';').next().unwrap(), 16).unwrap();
+        let mut chunk = vec![0u8; n + 2];
+        r.read_exact(&mut chunk).unwrap();
+        out.extend_from_slice(&chunk);
+        if n == 0 {
+            return out;
+        }
+    }
+}
+
+/// A owns `billing`, set up through `url` (a proxy, so A's join lines name it).
+fn owner_via(dir: &Path, url: &str) -> (Machine, PathBuf) {
+    let a = Machine::new(dir, "a", "omar@a");
+    fs::write(
+        a.config.join("servers.json"),
+        json!({ "servers": [{ "url": url, "admin_secret": ADMIN }] }).to_string(),
+    )
+    .unwrap();
+    let repo = a.repo("billing");
+    let (code, v, text) = a.json(&repo, &["setup"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(v["ok"], true, "{text}");
+    (a, repo)
+}
+
+#[test]
+fn a_join_cut_off_after_the_code_resumes_and_its_token_goes_nowhere_else() {
+    let Some(server) = LocalServer::start() else {
+        return;
+    };
+    let (url, log, hold) = proxy(&server.url);
+    let dir = tempfile::tempdir().unwrap();
+    let (a, ra) = owner_via(dir.path(), &url);
+    let (code, inv, text) = a.json(&ra, &["invite"]);
+    assert_eq!(code, Some(0), "{text}");
+    let join = inv["join"].as_str().unwrap().to_string();
+
+    // The server takes the code and then stops answering: within the limit,
+    // join says what happened and to run the same line again.
+    hold.store(true, Ordering::SeqCst);
+    log.lock().unwrap().clear();
+    let b = Machine::new(dir.path(), "b", "omar@b");
+    let rb = b.repo("billing");
+    let started = Instant::now();
+    let (code, _, text) = b.json(&rb, &["join", &join]);
+    assert!(
+        started.elapsed() < Duration::from_secs(13),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(code, Some(1), "{text}");
+    // Where it was about to join, before anything was sent.
+    assert!(
+        text.contains("kontext join: project billing on 127.0.0.1"),
+        "{text}"
+    );
+    assert!(text.contains("took the code"), "{text}");
+    assert!(text.contains("Run the same `kontext join"), "{text}");
+    assert!(text.contains("does not need the code again"), "{text}");
+    assert!(!text.contains("timeout: global"), "{text}");
+    let token = b.config.join("tokens/billing.token");
+    assert!(token.exists());
+    let issuer = fs::read_to_string(b.config.join("tokens/billing.server")).unwrap();
+    assert_eq!(issuer.lines().next(), Some(url.as_str()));
+
+    // A line for the same project that names another server: the saved
+    // token is not sent there; nothing is sent at all, and it says what to do.
+    let (evil, evil_log) = old_server();
+    let claims = json!({ "s": evil, "p": "billing", "c": "kxi1.other" }).to_string();
+    let (code, _, text) = b.json(&rb, &["join", &format!("kxj1.{}", b64url(&claims))]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("only ever sent to"), "{text}");
+    assert!(text.contains(&token.display().to_string()), "{text}");
+    assert!(
+        evil_log.lock().unwrap().is_empty(),
+        "{:?}",
+        evil_log.lock().unwrap()
+    );
+
+    // A plain-http line to a host that is not this machine: refused before
+    // anything is sent.
+    let claims =
+        json!({ "s": "http://kontext.example.com", "p": "other", "c": "kxi1.x" }).to_string();
+    let (code, _, text) = b.json(&rb, &["join", &format!("kxj1.{}", b64url(&claims))]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("not https://"), "{text}");
+
+    // The server answers again: the same line finishes, with the saved token
+    // and without spending the code again.
+    hold.store(false, Ordering::SeqCst);
+    let joins_before = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("/join "))
+        .count();
+    assert_eq!(joins_before, 1);
+    let (code, v, text) = b.json(&rb, &["join", &join]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(v["steps"][0]["status"], "done", "{text}");
+    let joins = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("/join "))
+        .count();
+    assert_eq!(joins, 1, "{:?}", log.lock().unwrap());
+    let o = b.run(
+        &rb,
+        &["--actor", "human:omar", "log", "from B after the cut"],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+    // Another project's saved token, written by a version that kept no record
+    // of its server, is not sent to a server other than the one configured.
+    let c = Machine::new(dir.path(), "c", "omar@c");
+    let rc = c.repo("billing");
+    fs::create_dir_all(c.config.join("tokens")).unwrap();
+    fs::copy(&token, c.config.join("tokens/billing.token")).unwrap();
+    let (_, inv, _) = a.json(&ra, &["invite"]);
+    let (code, _, text) = c.json(&rc, &["join", inv["join"].as_str().unwrap()]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(
+        text.contains("no record of the server that issued it"),
+        "{text}"
+    );
+}
+
+#[test]
+fn invitations_are_an_owners_and_die_with_the_token_that_made_them() {
+    let Some(server) = LocalServer::start() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (a, ra) = owner(dir.path(), &server);
+
+    // B joins as an owner, and invites a third machine; then A revokes B's
+    // token: B's unused invitation dies with it.
+    let (_, inv, _) = a.json(&ra, &["invite"]);
+    let b = Machine::new(dir.path(), "b", "omar@b");
+    let rb = b.repo("billing");
+    let (code, _, text) = b.json(&rb, &["join", inv["join"].as_str().unwrap()]);
+    assert_eq!(code, Some(0), "{text}");
+    let (code, by_b, text) = b.json(&rb, &["invite", "--role", "implementer", "--person", "ana"]);
+    assert_eq!(code, Some(0), "{text}");
+    // The note says when, not a placeholder.
+    let note = by_b["note"].as_str().unwrap_or_else(|| panic!("{text}"));
+    assert!(!note.contains("{when}"), "{note}");
+    assert!(note.contains(&jiff_year()), "{note}");
+    let (_, list, ltext) = a.json(&ra, &["token", "list"]);
+    let writer_b = fs::read_to_string(b.config.join("tokens/billing.token")).unwrap();
+    let id = list
+        .as_array()
+        .unwrap_or_else(|| panic!("{ltext}"))
+        .iter()
+        .find(|t| {
+            t["created_by"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("invite:")
+                && t["revoked"].is_null()
+        })
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .unwrap_or_else(|| panic!("{ltext} {writer_b}"));
+    let o = a.run(&ra, &["token", "revoke", &id]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let c = Machine::new(dir.path(), "c", "ana@c");
+    let rc = c.repo("billing");
+    let (code, _, text) = c.json(&rc, &["join", by_b["join"].as_str().unwrap()]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("kontext invite"), "{text}");
+    assert!(!c.config.join("tokens/billing.token").exists());
+
+    // An implementer cannot invite: exit 2, and it says who can.
+    let (_, inv, _) = a.json(&ra, &["invite", "--role", "implementer", "--person", "ana"]);
+    let (code, _, text) = c.json(&rc, &["join", inv["join"].as_str().unwrap()]);
+    assert_eq!(code, Some(0), "{text}");
+    let (code, _, text) = c.json(&rc, &["invite"]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("only an owner"), "{text}");
+    assert!(text.contains("an implementer token"), "{text}");
+
+    // An invitation is a day at most.
+    let (code, _, text) = a.json(&ra, &["invite", "--valid-for", "25h"]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("a day at most"), "{text}");
+    let (code, _, text) = a.json(&ra, &["invite", "--valid-for", "24h"]);
+    assert_eq!(code, Some(0), "{text}");
+}
+
+/// This year, as the note's timestamp writes it.
+fn jiff_year() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // Good enough for a check: the year the note's date starts with.
+    let year = 1970 + secs / 31_556_952;
+    format!("{year}-")
 }

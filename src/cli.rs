@@ -1997,6 +1997,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 name,
                 quick: false,
                 token: None,
+                deadline: None,
             })?;
             if cx.json {
                 print_json(&json!({ "clone": c, "sync": r }))?;
@@ -3535,7 +3536,7 @@ fn init(
     println!("Project {name} created in {}", home.display());
     println!("Writer of this machine: {writer}");
     if let (Some(url), Some(token)) = (server, token) {
-        let saved = token.save(name)?;
+        let saved = token.save(name, &url)?;
         Machine::set_server(name, Some(&url))?;
         let remote = crate::remote::Remote {
             url: url.clone(),

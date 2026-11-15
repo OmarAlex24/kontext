@@ -891,12 +891,62 @@ impl Token {
             .join(format!("{project}.token")))
     }
 
-    /// Saves it for a project (0600).
-    pub fn save(&self, project: &str) -> Result<PathBuf> {
+    /// `<config dir>/tokens/<project>.server`: the server that issued the
+    /// saved token, and that token's sha256 (so a token another binary saved
+    /// later over it is not taken for the one recorded here). A separate file:
+    /// the token file stays as older binaries read it.
+    pub fn issuer_path(project: &str) -> Result<PathBuf> {
+        Ok(config_dir()?
+            .join("tokens")
+            .join(format!("{project}.server")))
+    }
+
+    /// Saves it for a project (0600), with the server that issued it: a
+    /// saved token is only ever sent to that server.
+    pub fn save(&self, project: &str, server: &str) -> Result<PathBuf> {
         let p = Token::path(project)?;
         write_private(&p, format!("{}\n", self.raw).as_bytes())?;
+        write_private(
+            &Token::issuer_path(project)?,
+            format!(
+                "{}\n{}\n",
+                crate::server::normalize_url(server),
+                crate::model::sha256_hex(self.raw.as_bytes())
+            )
+            .as_bytes(),
+        )?;
         Ok(p)
     }
+}
+
+/// The server that issued the token saved for `project`, as recorded when it
+/// was saved; `None` if nothing is recorded for this very token (an older
+/// binary saved it, or saved another one over it).
+pub fn token_issuer(project: &str, token: &Token) -> Option<String> {
+    let text = fs::read_to_string(Token::issuer_path(project).ok()?).ok()?;
+    let mut lines = text.lines();
+    let url = lines.next()?.trim();
+    let hash = lines.next()?.trim();
+    (hash == crate::model::sha256_hex(token.raw.as_bytes()) && !url.is_empty())
+        .then(|| crate::server::normalize_url(url))
+}
+
+/// The token saved for `project`, only if it may be sent to `url`: the server
+/// recorded as its issuer, or, for a token with no record (saved by an older
+/// binary), the server the project is registered with (`configured`).
+/// A token is never sent anywhere else.
+pub fn token_for_server(
+    project: &str,
+    url: &str,
+    configured: Option<&str>,
+) -> Result<Option<Token>> {
+    let url = crate::server::normalize_url(url);
+    Ok(
+        token_for(project)?.filter(|t| match token_issuer(project, t) {
+            Some(issuer) => issuer == url,
+            None => configured.map(crate::server::normalize_url).as_deref() == Some(url.as_str()),
+        }),
+    )
 }
 
 pub(crate) fn base64url_decode(s: &str) -> Result<Vec<u8>> {

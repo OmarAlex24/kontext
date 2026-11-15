@@ -71,7 +71,8 @@ impl Link {
         let Some(url) = machine.server_for(project) else {
             return Ok(Link::None);
         };
-        Ok(match config::token_for(project)? {
+        // Only a token that may go to this server (issued by it).
+        Ok(match config::token_for_server(project, &url, Some(&url))? {
             Some(token) => Link::Ready(Remote { url, token }),
             None => Link::NoToken(url),
         })
@@ -2142,7 +2143,7 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
     let token = match created {
         // Made once by the server: saved before anything else can fail.
         Some(t) => {
-            t.save(name)?;
+            t.save(name, &url)?;
             t
         }
         None => {
@@ -2158,7 +2159,8 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
                 );
             }
             let given = env_token(name)?;
-            let saved = config::token_for(name)?.filter(|t| t.project == name);
+            let saved = config::token_for_server(name, &url, configured.as_deref())?
+                .filter(|t| t.project == name);
             let Some(t) = given.clone().or(saved) else {
                 bail!(
                     "{}this machine has no token for {name} on {url}. Ask the project's owner for one \
@@ -2191,7 +2193,7 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
                 };
                 let who = Conn::of(&remote, Duration::from_secs(30)).get("whoami")?;
                 Conn::ok(who, "check the token")?;
-                t.save(name)?;
+                t.save(name, &url)?;
             }
             t
         }
@@ -2228,6 +2230,10 @@ pub struct CloneArgs {
     /// The token to use instead of `$KONTEXT_TOKEN` (`kontext join`, which
     /// got it from the server and keeps it in this process).
     pub token: Option<Token>,
+    /// When to be done talking to the server, in all (`kontext join`'s
+    /// limit): every request ends by then; what does not fit comes with the
+    /// next commands.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// `kontext clone --server <url> <project>`: brings a project down from its
@@ -2284,11 +2290,20 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
         url: url.clone(),
         token,
     };
-    let opts = if a.quick {
+    let mut opts = if a.quick {
         Options::auto()
     } else {
         Options::full(false)
     };
+    let left = || {
+        a.deadline.map(|d| {
+            d.saturating_duration_since(std::time::Instant::now())
+                .max(Duration::from_millis(200))
+        })
+    };
+    if let Some(left) = left() {
+        opts.timeout = opts.timeout.min(left);
+    }
     let conn = Conn::of(&remote, opts.timeout);
     // The claims are read without the secret: the server confirms them
     // before anything is written.
@@ -2338,7 +2353,12 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
     setup().map_err(undo)?;
     Machine::register(&name, &home).map_err(undo)?;
     Machine::set_server(&name, Some(&url))?;
-    remote.token.save(&name)?;
+    remote.token.save(&name, &url)?;
+    if let Some(left) = left() {
+        // The last request starts in time to end by the deadline.
+        opts.timeout = opts.timeout.min(left);
+        opts.budget = left.saturating_sub(opts.timeout);
+    }
     let report = sync(&home, &remote, &opts)?;
     let writer = remote.token.writer.clone();
     let mut warnings = Vec::new();
@@ -2821,6 +2841,7 @@ fn bootstrap_project(url: &str, token: &Token) -> Result<String> {
         name: None,
         quick: true,
         token: None,
+        deadline: None,
     });
     // Done, or nothing was made: the marker goes. A home left half made
     // keeps it, so the next attempt may remove that home.

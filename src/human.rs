@@ -183,6 +183,39 @@ impl NeedsHuman {
         }
     }
 
+    /// The kontext server at `url` was deployed before invitations: the
+    /// human updates it from the machine that deployed it (that machine has
+    /// the Cloudflare account), then runs `then` again.
+    pub fn server_update(url: &str, then: &str) -> NeedsHuman {
+        let run = "kontext server deploy".to_string();
+        let steps = vec![
+            format!(
+                "On the machine that deployed the kontext server at {url}, in a terminal, run `{run}`. It \
+                 updates the server in place: it keeps the projects, their history and the admin secret, \
+                 and asks for a Cloudflare token only if that machine has none."
+            ),
+            format!("Then, here, run `{then}`."),
+        ];
+        let say = format!(
+            "The kontext server at {url} is older than invitations. On the machine that deployed it, run \
+             `{run}` in a terminal (it keeps every project and the admin secret). Tell me when it is done \
+             and I will run `{then}` again."
+        );
+        NeedsHuman {
+            reason: "server_update".into(),
+            why: format!(
+                "the kontext server at {url} was deployed before invitations and needs an update, which \
+                 only the human runs (it uses the Cloudflare account)"
+            ),
+            open: None,
+            steps,
+            run,
+            then: Some(then.to_string()),
+            say,
+            exit_code: EXIT_CODE,
+        }
+    }
+
     pub fn text(&self) -> String {
         let mut l = vec![format!("Needs you: {}.", self.why)];
         for (i, s) in self.steps.iter().enumerate() {

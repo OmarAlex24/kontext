@@ -17,7 +17,7 @@
 //! not sent the code: both commands say it needs `kontext server deploy`.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 
 use crate::config::{self, Machine, Token};
 use crate::http::Http;
+use crate::human::NeedsHuman;
 use crate::remote::{self, CloneArgs, Conn, TokenArgs};
 use crate::setup::Outcome;
 use crate::store::Refused;
@@ -33,6 +34,18 @@ use crate::store::Refused;
 pub const JOIN_PREFIX: &str = "kxj1.";
 /// How long an invitation is good for, unless `--valid-for` says otherwise.
 pub const DEFAULT_VALID: &str = "10m";
+/// How long `invite` and `join` wait on the server, in all: past it, they
+/// say the server did not answer and what to run again.
+pub const NETWORK_LIMIT: Duration = Duration::from_secs(10);
+
+/// What is left of a limit that started at `start`, at least a moment (a
+/// request with no time left fails at once, as one that timed out).
+fn left(start: Instant, limit: Duration) -> Duration {
+    limit
+        .saturating_sub(start.elapsed())
+        .max(Duration::from_millis(200))
+}
+
 /// The installer, which takes a join string as its argument.
 pub const INSTALL_URL: &str =
     "https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh";
@@ -81,6 +94,16 @@ impl JoinString {
         {
             return Err(bad());
         }
+        // The token this machine gets travels to that server: only over TLS,
+        // but to this machine itself (a local server).
+        if server.starts_with("http://") && !is_local(&host_of(&server)) {
+            return Err(Refused(format!(
+                "this join line names the server {server}, which is not https:// and not this machine: \
+                 a join over plain http to another host is refused (the token would travel in clear). \
+                 Ask for a line from a server on https://"
+            ))
+            .into());
+        }
         if !crate::cli::valid_name(&project) {
             return Err(bad());
         }
@@ -92,11 +115,49 @@ impl JoinString {
     }
 }
 
-/// Does the server at `url` take invitations? A server deployed before them
-/// answers `/v1/info` without `features`.
-pub fn require_invites(url: &str) -> Result<()> {
-    let http = Http::new(Duration::from_secs(10));
-    let r = http.request("GET", &format!("{url}/v1/info"), &[], None)?;
+/// The host of a server URL (`kontext.omar.workers.dev`, `127.0.0.1`,
+/// `[::1]`), lowercased, without the port.
+pub fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let auth = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+    let host = if auth.starts_with('[') {
+        auth.split_once(']')
+            .map_or(auth.to_string(), |(h, _)| format!("{h}]"))
+    } else {
+        auth.split(':').next().unwrap_or("").to_string()
+    };
+    host.to_ascii_lowercase()
+}
+
+fn is_local(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// Does the server at `url` take invitations? `Some(false)` for a server
+/// deployed before them (its `/v1/info` has no `features`); `None` if it does
+/// not answer as a kontext server within `timeout`.
+pub fn server_has_invites(url: &str, timeout: Duration) -> Option<bool> {
+    let r = Http::new(timeout)
+        .request("GET", &format!("{url}/v1/info"), &[], None)
+        .ok()?;
+    let v = r.json().ok().filter(|_| r.ok())?;
+    v.get("kontext_server")?;
+    Some(
+        v.get("features")
+            .and_then(Value::as_array)
+            .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("invites"))),
+    )
+}
+
+/// The server at `url` takes invitations. One deployed before them needs the
+/// human to update it: [`NeedsHuman`] (exit 4) with the command, and `then`,
+/// what to run again afterwards.
+pub fn require_invites(url: &str, timeout: Duration, then: &str) -> Result<()> {
+    let r = Http::new(timeout).request("GET", &format!("{url}/v1/info"), &[], None)?;
+    if r.status >= 500 {
+        return Err(remote::ServerAnswered::of(&r, &format!("GET {url}/v1/info")).into());
+    }
     let v = r.json().ok().filter(|_| r.ok());
     let Some(v) = v.filter(|v| v.get("kontext_server").is_some()) else {
         bail!(
@@ -109,12 +170,7 @@ pub fn require_invites(url: &str) -> Result<()> {
         .and_then(Value::as_array)
         .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("invites")));
     if !has {
-        return Err(Refused(format!(
-            "the kontext server at {url} was deployed before invitations and needs an update: on the \
-             machine that deployed it, run `kontext server deploy` (it keeps the projects and the admin \
-             secret), then try again"
-        ))
-        .into());
+        return Err(NeedsHuman::server_update(url, then).into());
     }
     Ok(())
 }
@@ -151,9 +207,6 @@ pub struct Invited {
 
 impl Invited {
     pub fn text(&self) -> String {
-        let when = jiff::Timestamp::from_millisecond(self.expires)
-            .map(|t| t.to_string())
-            .unwrap_or_default();
         let mut what = format!("{} as {}", self.person, self.role);
         if let Some(e) = &self.epic {
             what.push_str(&format!(" of epic {e}"));
@@ -172,7 +225,7 @@ impl Invited {
             format!("  {}", self.command),
             "If kontext is not installed there, this installs it and joins in one line:".into(),
             format!("  {}", self.install_command),
-            self.note.replace("{when}", &when),
+            self.note.clone(),
         ];
         l.retain(|x| !x.is_empty());
         l.join("\n") + "\n"
@@ -181,23 +234,51 @@ impl Invited {
 
 /// `kontext invite`.
 pub fn invite(project: &str, home: &std::path::Path, a: &InviteArgs) -> Result<Invited> {
-    let (remote, conn, mut body) = remote::token_body(project, home, &a.token)?;
     let valid = a.valid_for.as_deref().unwrap_or(DEFAULT_VALID);
     let valid_ms = crate::tasks::parse_duration_ms(valid).context("--valid-for")?;
     if valid_ms > 24 * 3600 * 1000 {
-        bail!("--valid-for is a day at most (an invitation is for now, not for later)");
+        return Err(Refused(format!(
+            "--valid-for {valid} is more than a day: an invitation is a day at most (it is for now, not \
+             for later; `kontext invite` makes another when it is needed)"
+        ))
+        .into());
     }
+    let (remote, _, mut body) = remote::token_body(project, home, &a.token)?;
     body["valid_ms"] = json!(valid_ms);
-    let v = require_invites(&remote.url)
-        .and_then(|()| conn.json("POST", "invites", &body))
-        .map_err(|e| {
-            offline(
-                e,
-                &remote.url,
-                "no invitation was made; run `kontext invite` again when it answers",
-            )
-        })?;
-    let v = Conn::ok(v, "invite")?;
+    let start = Instant::now();
+    let again = format!("{} invite", crate::human::self_command());
+    let v = require_invites(
+        &remote.url,
+        left(start, NETWORK_LIMIT).min(Duration::from_secs(5)),
+        &again,
+    )
+    .and_then(|()| Conn::of(&remote, left(start, NETWORK_LIMIT)).json("POST", "invites", &body))
+    .and_then(|r| Conn::ok(r, "invite"))
+    .map_err(|e| {
+        offline(
+            e,
+            &remote.url,
+            "no invitation was made; run `kontext invite` again when it answers",
+        )
+    });
+    let v = match v {
+        Err(e)
+            if e.downcast_ref::<remote::ServerAnswered>()
+                .is_some_and(|s| s.status == 403) =>
+        {
+            return Err(Refused(format!(
+                "only an owner of project {project} (or the admin secret) makes invitations, and this \
+                 machine's token for it is {} token: ask an owner to run `kontext invite`",
+                match remote.token.role.as_deref() {
+                    Some(r) if r.starts_with(['a', 'e', 'i', 'o', 'u']) => format!("an {r}"),
+                    Some(r) => format!("a {r}"),
+                    None => "not an owner".into(),
+                }
+            ))
+            .into());
+        }
+        v => v?,
+    };
     let code = v
         .get("code")
         .and_then(Value::as_str)
@@ -210,6 +291,10 @@ pub fn invite(project: &str, home: &std::path::Path, a: &InviteArgs) -> Result<I
     }
     .encode();
     let s = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string);
+    let expires = v.get("expires").and_then(Value::as_i64).unwrap_or(0);
+    let when = jiff::Timestamp::from_millisecond(expires)
+        .map(|t| t.to_string())
+        .unwrap_or_default();
     Ok(Invited {
         command: format!("kontext join {join}"),
         install_command: format!("curl -fsSL {INSTALL_URL} | sh -s -- {join}"),
@@ -220,10 +305,10 @@ pub fn invite(project: &str, home: &std::path::Path, a: &InviteArgs) -> Result<I
         role: s("role").unwrap_or_default(),
         epic: s("epic"),
         writer: s("writer").unwrap_or_default(),
-        expires: v.get("expires").and_then(Value::as_i64).unwrap_or(0),
+        expires,
         token_ttl: a.token.ttl.clone(),
         note: format!(
-            "The line works once and until {{when}} ({valid}); it carries a one-time code, not a token: \
+            "The line works once and until {when} ({valid}); it carries a one-time code, not a token: \
              the token is made for that machine when it joins and never leaves it. Use it right away; \
              a new `kontext invite` makes another."
         ),
@@ -264,14 +349,23 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
         ok: false,
         offline: false,
         needs_human: None,
+        invites: None,
         notes: Vec::new(),
         next: String::new(),
     };
+    // Where this machine is about to join, before anything is sent.
+    eprintln!(
+        "kontext join: project {} on {} ({})",
+        j.project,
+        host_of(&j.server),
+        j.server
+    );
+    let start = Instant::now();
     let machine = Machine::load()?;
     if machine.projects.contains_key(&name) {
         // Already joined: the code is not spent again.
         let own = machine.server_for(&name);
-        let token = config::token_for(&name)?;
+        let token = config::token_for_server(&name, &j.server, own.as_deref())?;
         if own.as_deref() != Some(j.server.as_str()) || token.is_none() {
             return Err(Refused(format!(
                 "project {name} is already registered on this machine{}: join under another name with \
@@ -291,26 +385,57 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
         );
     } else {
         // A token got by an earlier run that stopped before the project was
-        // set up; otherwise the code is traded for one now.
-        let saved = config::token_for(&name)
-            .ok()
-            .flatten()
-            .filter(|t| t.project == j.project);
+        // set up, from this same server; otherwise the code is traded for one
+        // now. A saved token never goes to any other server.
+        let saved = config::token_for(&name)?;
         let (token, how) = match saved {
-            Some(t) => (t, "with the token an earlier `kontext join` got"),
+            Some(t) => {
+                let path = config::Token::path(&name)?;
+                match config::token_issuer(&name, &t) {
+                    Some(issuer) if issuer == j.server && t.project == j.project => {
+                        (t, "with the token an earlier `kontext join` got")
+                    }
+                    issuer => {
+                        return Err(Refused(format!(
+                            "this machine has a token for project {} saved in {}{}, by a `kontext join` \
+                             that stopped before it finished, and this machine has no project {name}: that \
+                             token is only ever sent to {}, not to {}. To finish that join, run the line \
+                             from that server again; to join from {} instead, remove {} and {} first (or \
+                             join under another name with `--name <other>`)",
+                            t.project,
+                            path.display(),
+                            match &issuer {
+                                Some(i) => format!(", issued by {i}"),
+                                None => ", with no record of the server that issued it".into(),
+                            },
+                            issuer.as_deref().unwrap_or("the server that issued it"),
+                            j.server,
+                            j.server,
+                            path.display(),
+                            config::Token::issuer_path(&name)?.display()
+                        ))
+                        .into());
+                    }
+                }
+            }
             None => {
-                let t = require_invites(&j.server)
-                    .and_then(|()| trade(&j))
-                    .map_err(|e| {
-                        offline(
-                            e,
-                            &j.server,
-                            "the line was not used; run the same `kontext join …` again when it \
-                             answers, while the line is still valid",
-                        )
-                    })?;
+                let me = crate::human::self_command();
+                let t = require_invites(
+                    &j.server,
+                    left(start, NETWORK_LIMIT).min(Duration::from_secs(5)),
+                    &format!("{me} join <the same line, while it is valid>"),
+                )
+                .and_then(|()| trade(&j, left(start, NETWORK_LIMIT)))
+                .map_err(|e| {
+                    offline(
+                        e,
+                        &j.server,
+                        "the line was not used; run the same `kontext join …` again when it \
+                         answers, while the line is still valid",
+                    )
+                })?;
                 // Saved before anything else can fail: the code is spent.
-                t.save(&name)?;
+                t.save(&name, &j.server)?;
                 (t, "with a token made for this machine")
             }
         };
@@ -319,8 +444,25 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
             project: j.project.clone(),
             home: a.home.clone(),
             name: Some(name.clone()),
-            quick: false,
+            quick: true,
             token: Some(token),
+            deadline: Some(start + NETWORK_LIMIT),
+        })
+        .map_err(|e| {
+            if remote::offline(&e) {
+                anyhow::anyhow!(
+                    "{} took the code and this machine has its own token for project {} now, but then the \
+                     server stopped answering (within the {} s that join waits). Run the same `kontext join \
+                     …` again when it answers: it uses that token, from {} only, and does not need the code \
+                     again",
+                    j.server,
+                    j.project,
+                    NETWORK_LIMIT.as_secs(),
+                    j.server
+                )
+            } else {
+                e
+            }
         })?;
         out.step(
             "project",
@@ -391,8 +533,9 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
     }
     out.ok = true;
     out.next = format!(
-        "Done: project {name} is on this machine and syncs with {}. Agents read and write it with `kontext …`.",
-        j.server
+        "Done: project {name} is on this machine and syncs with {}. Agents read and write it with `{} …`.",
+        j.server,
+        crate::human::self_command()
     );
     Ok(out)
 }
@@ -401,15 +544,15 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
 /// unknown code is refused, and says what to do.
 /// A server that did not answer: say so and what to do, keep anything else.
 fn offline(e: anyhow::Error, url: &str, next: &str) -> anyhow::Error {
-    if remote::unreachable(&e) {
+    if remote::offline(&e) {
         anyhow::anyhow!("{url} did not answer ({e:#}): {next}")
     } else {
         e
     }
 }
 
-fn trade(j: &JoinString) -> Result<Token> {
-    let conn = Conn::new(&j.server, &j.project, &j.code, Duration::from_secs(30));
+fn trade(j: &JoinString, timeout: Duration) -> Result<Token> {
+    let conn = Conn::new(&j.server, &j.project, &j.code, timeout);
     let r = conn.json("POST", "join", &json!({}))?;
     let v = r.json().unwrap_or(Value::Null);
     if r.status == 201 {
@@ -429,11 +572,13 @@ fn trade(j: &JoinString) -> Result<Token> {
     }
     let msg = v.get("message").and_then(Value::as_str).unwrap_or("");
     match v.get("error").and_then(Value::as_str) {
-        Some("invite_used" | "invite_expired" | "invite_unknown") => Err(Refused(format!(
-            "{msg}. On a machine that has project {}, `kontext invite` makes a new one",
-            j.project
-        ))
-        .into()),
+        Some("invite_used" | "invite_expired" | "invite_unknown" | "invite_revoked") => {
+            Err(Refused(format!(
+                "{msg}. On a machine that has project {}, `kontext invite` makes a new one",
+                j.project
+            ))
+            .into())
+        }
         Some("no_project") => Err(Refused(format!(
             "project {} is not on {} (was it removed?)",
             j.project, j.server
@@ -443,6 +588,9 @@ fn trade(j: &JoinString) -> Result<Token> {
             "{msg}. Ask for a new invitation (`kontext invite --writer <another>`)"
         ))
         .into()),
+        _ if r.status >= 500 => {
+            Err(remote::ServerAnswered::of(&r, &format!("POST {}/join", j.server)).into())
+        }
         _ => bail!("{}: the server answered {}: {msg}", j.server, r.status),
     }
 }
@@ -450,6 +598,41 @@ fn trade(j: &JoinString) -> Result<Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line(server: &str) -> String {
+        JoinString {
+            server: server.into(),
+            project: "billing".into(),
+            code: "kxi1.abc".into(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn a_join_line_names_an_https_server_or_this_machine() {
+        for ok in [
+            "https://kontext.example.com",
+            "http://localhost:8787",
+            "http://127.0.0.1:8787",
+            "http://[::1]:8787",
+        ] {
+            assert!(JoinString::parse(&line(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://kontext.example.com",
+            "http://127.0.0.1.example.com",
+            "http://localhost.example.com:80",
+            "http://evil@kontext.example.com",
+        ] {
+            let e = JoinString::parse(&line(bad)).unwrap_err().to_string();
+            assert!(e.contains("not https://"), "{bad}: {e}");
+        }
+        assert_eq!(
+            host_of("https://User@Kontext.Example.com:443/x"),
+            "kontext.example.com"
+        );
+        assert_eq!(host_of("http://[::1]:8787"), "[::1]");
+    }
 
     #[test]
     fn a_join_string_round_trips_and_bad_ones_are_refused() {
