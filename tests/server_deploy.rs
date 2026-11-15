@@ -463,3 +463,97 @@ fn deploy_refuses_an_unrelated_worker_with_the_same_name() {
     let o = deploy(&config, &api, TOKEN, &[]);
     assert!(o.status.success(), "{}", text(&o));
 }
+
+/// `server deploy` with no token, as an agent runs it.
+fn deploy_no_token(config: &Path, api: &str, args: &[&str]) -> Command {
+    let mut c = Command::new(BIN);
+    c.args(["server", "deploy", "--no-check"])
+        .args(args)
+        .env("KONTEXT_CONFIG_DIR", config)
+        .env("KONTEXT_CF_API", api)
+        .env_remove("CLOUDFLARE_API_TOKEN")
+        .env_remove("CLOUDFLARE_ACCOUNT_ID")
+        .env_remove("KONTEXT_ADMIN_SECRET");
+    c
+}
+
+/// Without a terminal and without a token, deploy never waits on a prompt: it
+/// exits with 4 and gives the pre-filled token link and the command the human
+/// runs; nothing is sent to Cloudflare.
+#[test]
+fn deploy_without_a_token_says_what_the_human_does() {
+    use std::process::Stdio;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let (api, cf) = fake_cf();
+
+    // stdin is /dev/null.
+    let o = deploy_no_token(&config, &api, &[])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let t = text(&o);
+    assert!(t.contains("Needs you:"), "{t}");
+    assert!(
+        t.contains(
+            "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=%2A&zoneId=all&name=kontext"
+        ),
+        "{t}"
+    );
+    assert!(t.contains("server deploy`"), "{t}");
+
+    // --json: the same as data, on stdout.
+    let o = deploy_no_token(&config, &api, &["--json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let n = &v["needs_human"];
+    assert_eq!(n["reason"], "cloudflare_token");
+    assert_eq!(n["exit_code"], 4);
+    assert!(n["open"].as_str().unwrap().contains("workers_scripts"));
+    assert!(n["run"].as_str().unwrap().ends_with(" server deploy"));
+    assert!(n["say"].as_str().unwrap().contains("not here"));
+
+    // An open pipe that never writes: it gives up after a few seconds.
+    let started = std::time::Instant::now();
+    let mut child = deploy_no_token(&config, &api, &["--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _keep_open = child.stdin.take();
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    assert!(
+        cf.lock().unwrap().log.is_empty(),
+        "{:?}",
+        cf.lock().unwrap().log
+    );
+    assert!(!config.join("servers.json").exists());
+
+    // A token piped on stdin still works, also when it comes a moment later.
+    cf.lock().unwrap().subdomain = Some("omar-kx".into());
+    let mut child = deploy_no_token(&config, &api, &[])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    writeln!(stdin, "{TOKEN}").unwrap();
+    let o = child.wait_with_output().unwrap();
+    drop(stdin);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("https://kontext.omar-kx.workers.dev"));
+    assert!(
+        !fs::read_to_string(config.join("servers.json"))
+            .unwrap()
+            .contains(TOKEN)
+    );
+}

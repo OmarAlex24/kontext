@@ -6,7 +6,8 @@
 //! never open the project (see their modules).
 //!
 //! Exit codes: 0 ok, 1 error, 2 refused (nothing was written because a rule
-//! isn't met), 3 stale context in `done`.
+//! isn't met), 3 stale context in `done`, 4 needs the human (a step only the
+//! human can do, such as a Cloudflare API token: [`crate::human`]).
 
 use std::fs;
 use std::io::{BufRead, Write};
@@ -851,9 +852,13 @@ pub enum TokenCmd {
 #[derive(Subcommand, Debug)]
 pub enum ServerCmd {
     /// Uploads the kontext server (a Worker with one SQLite Durable Object per project) to your
-    /// Cloudflare account and prints its URL. Needs CLOUDFLARE_API_TOKEN (or the token on stdin)
-    /// with the account permission "Workers Scripts: Edit". Running it again updates the Worker
-    /// and keeps its admin secret (saved in servers.json in the kontext config folder, mode 0600)
+    /// Cloudflare account and prints its URL. Needs a Cloudflare API token with the permission
+    /// "Workers Scripts: Edit": CLOUDFLARE_API_TOKEN, typed when it asks on a terminal (it prints
+    /// a link that creates one with that permission filled in), or piped on stdin. Without a
+    /// terminal and with no token it does not wait: it exits with 4 and says what the human does
+    /// (with --json, {"needs_human": …}). The token is used once and not stored. Running it again
+    /// updates the Worker and keeps its admin secret (saved in servers.json in the kontext config
+    /// folder, mode 0600)
     Deploy {
         /// The Worker's name: https://<name>.<subdomain>.workers.dev
         #[arg(long, default_value = "kontext")]
@@ -903,9 +908,18 @@ pub enum DebugCmd {
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
+    let json_out = cli.json;
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
+            if let Some(n) = e.downcast_ref::<crate::human::NeedsHuman>() {
+                if json_out {
+                    let _ = print_json(&n.json());
+                } else {
+                    eprint!("kontext: {}", n.text());
+                }
+                return ExitCode::from(crate::human::EXIT_CODE);
+            }
             if let Some(r) = e.downcast_ref::<Refused>() {
                 eprintln!("kontext: refused: {r}");
                 return ExitCode::from(2);

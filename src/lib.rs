@@ -21,6 +21,7 @@ pub mod handoff;
 pub mod hlc;
 pub mod hook;
 pub mod http;
+pub mod human;
 pub mod ideas;
 pub mod import_v0;
 pub mod inbox;
