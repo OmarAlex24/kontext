@@ -909,8 +909,11 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
             f.id,
             f.title.trim()
         ));
+        // Cut as `brief` cuts it, and shorter at the tight levels (the plan's
+        // summary prints it whole: the signature binds it).
         if let Some(w) = features::why(f) {
-            l.push(format!("- Why the feature exists: {}", w));
+            let cap = if lv.detail { 400 } else { 160 };
+            l.push(format!("- Why the feature exists: {}", one_line(w, cap)));
         }
     }
     let theirs = crate::ideas::said_for(st, &o.said, task);

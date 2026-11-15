@@ -543,3 +543,56 @@ fn the_quotes_follow_a_superseded_feature_to_its_replacement() {
     let next = p.kontext_in_ok(&repo, IMPL, &["next", "--epic", "pay"]);
     assert!(next.contains(quote), "{next}");
 }
+
+/// `next` cuts a feature's why as `brief` does (400 characters), and less at
+/// its tightest level, so a long why does not blow `--max-chars`. The plan's
+/// summary still prints it whole.
+#[test]
+fn next_cuts_a_long_why() {
+    let p = Project::new();
+    pm_ok(&p, &["charter", "--objective", "Sell online"]);
+    let goal = pm_id(&p, &["goal", "add", "Take payments"]);
+    let long = "refunds by hand take a day. ".repeat(300);
+    let short = "refunds by hand take a day.";
+    let mut sizes = Vec::new();
+    for (name, why) in [("long", long.as_str()), ("short", short)] {
+        pm_ok(&p, &["epic", "add", name, "--goal", &goal, "--name", name]);
+        let f = pm_id(
+            &p,
+            &[
+                "feature",
+                "add",
+                name,
+                "--epic",
+                name,
+                "--acceptance",
+                "x",
+                "--why",
+                why,
+            ],
+        );
+        pm_ok(
+            &p,
+            &["task", "add", name, "--feature", &f, "--acceptance", "y"],
+        );
+        let next =
+            |max: &str| p.kontext_env_ok(IMPL, &["next", "--epic", name, "--max-chars", max]);
+        sizes.push((next("1200").chars().count(), next("4000")));
+    }
+    let (long_tight, long_roomy) = sizes[0].clone();
+    let short_tight = sizes[1].0;
+    // Under a budget nothing fits in, the why adds little over a short one.
+    assert!(
+        long_tight <= short_tight + 200,
+        "{long_tight} vs {short_tight}"
+    );
+    // With room, it is cut at 400 characters and the whole fits the budget.
+    assert!(long_roomy.chars().count() <= 4000, "{long_roomy}");
+    let line = long_roomy
+        .lines()
+        .find(|l| l.starts_with("- Why the feature exists:"))
+        .unwrap();
+    assert!(line.chars().count() < 460, "{line}");
+    let summary = pm_ok(&p, &["scope", "summary"]);
+    assert!(summary.contains(long.trim()), "the summary prints it whole");
+}
