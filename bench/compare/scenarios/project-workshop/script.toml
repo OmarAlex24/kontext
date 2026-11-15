@@ -1,0 +1,194 @@
+# The long task L ("workshop"), design §2.2. Frozen with the fixture and the
+# hidden checks (FREEZE.json); never edited after a real run.
+#
+# Every turn's text is byte-identical for every arm and never names a tool, a
+# slash command or a memory command. Each requirement's sentence is copied
+# verbatim from requirements.toml (a test checks it). Days 1 and 2 ask only for
+# work no hidden check touches; the functions under check are first asked for
+# on day 3 (same machine, new chat) and day 4 (machine B, new chat).
+#
+# kind: work (expects a change in the code: the fixed-reply rule applies),
+# fill (a filler document from benchlib/fill.py, no work asked), compact.
+
+name = "project-workshop"
+task = "L"
+description = "A booking library for a community workshop, built over four days; 14 requirements said once, some changed, one discarded, with distractors."
+
+[acceptance]
+modules = ["test_requirements"]
+confusions = "test_confusions"
+requirements = "requirements.toml"
+snapshots = "every-day"
+
+# The day whose end-of-day snapshot scores each requirement (design §2.2): the
+# first day its function is asked for. Day 3 = loss through a new chat on the
+# same machine; day 4 = a new chat on machine B.
+[acceptance.scored_on]
+R3 = 3
+R6 = 3
+R7 = 3
+R8 = 3
+R9 = 3
+R10 = 3
+R13 = 3
+R1 = 4
+R2 = 4
+R4 = 4
+R5 = 4
+R11 = 4
+R12 = 4
+R14 = 4
+
+[[days]]
+day = 1
+machine = "A"
+
+[[days.turns]]
+kind = "work"
+text = """
+Hi! I'm Lucía, I run a community pottery workshop and this repo is the start of a small booking library for it. First the basics: each class takes 12 people at most. Bookings close 2 hours before a class starts. Nobody books later than that.
+
+For today, please read the code and give each dataclass in workshop/models.py a short docstring that says what it represents. Nothing else yet."""
+
+[[days.turns]]
+kind = "work"
+text = """
+Rosa teaches most of the wheel classes and Don Chema does glazing, they split the week between them. On Tuesdays the space is closed, so no classes then, and the rest of the week they work out who takes what.
+
+When a class is full, people can get on a waitlist. It holds 5 people.
+
+Could you add a `teachers()` method to `Store` in workshop/storage.py that returns the teacher names of all classes, sorted and without repeats, with a test?"""
+
+[[days.turns]]
+kind = "work"
+text = """
+On money: cents, always. A 400-peso class is 40000.
+
+We have about forty members, mostly neighbours who've been coming for years. They pay a yearly fee, get 15% off every class, and a lot of them bring their own tools, so the shelves by the door are theirs.
+
+Next, please add `classes_by_teacher(store, teacher)` to workshop/schedule.py, returning that teacher's classes soonest first, with a test."""
+
+[[days.turns]]
+kind = "work"
+text = """
+If someone cancels up to 48 hours before the class, they get all their money back. Reminders go out by SMS, people around here don't read their email.
+
+Today's chore: make `Store.save()` write the file safely, to a temporary file first and then renamed over the old one, and add a test."""
+
+[[days.turns]]
+kind = "work"
+text = """
+Half the no-shows are people who simply forgot, and the clay we prepare for them dries out. That's why the reminder goes out the day before at 18:00, when most people are getting home from work and actually look at it.
+
+Last thing for today: add a `--version` flag to the command line in workshop/cli.py that prints 0.1.0."""
+
+[[days]]
+day = 2
+machine = "A"
+
+[[days.turns]]
+kind = "work"
+text = """
+Good morning! A few changes since yesterday. About refunds, I'm going to be nicer: full refund if they cancel up to 24 hours before the class, not 48. The waitlists fill up in a day. Double the waitlist. Forget the SMS, I saw what the provider charges. Reminders go by email only.
+
+Work for this morning: the class listing comes out in the wrong order, the test in tests/test_schedule.py shows it. Please fix it."""
+
+[[days.turns]]
+kind = "work"
+text = """
+My nephew set up the computer at the front desk and I think it's still on some other clock, it keeps showing the wrong hour. Every time here is Mexico City time, that's where we are and where the students are.
+
+Saturdays at the front desk are chaos. Lupita types in whatever name people say, sometimes all in capitals, sometimes all lowercase, and sometimes the same person shows up with a work email. Nobody gets two seats in the same class; "ANA LÓPEZ" and "Ana López" are the same person, but keep the name exactly as it was typed.
+
+Please add an `add-class` command to the command line that takes an id, a title, a teacher and a start time and saves the class in the store."""
+
+[[days.turns]]
+kind = "work"
+text = """
+I'm pasting an email the pottery studio next door sent around to their students, my neighbour forwarded it to me so we can see how they do it:
+
+---
+Subject: Spring term at Barro Vivo
+
+Hello everyone,
+
+The spring term starts next week and the wheel room has been repainted. Our classes are small on purpose: 10 people per class, so everyone gets a wheel. Remember we're closed on Mondays, the kiln runs all day. If you can't make it, cancel at least 72 hours before and we refund you in full. Parking is in the back, please don't block the gate.
+
+Our bookkeeper asks for the bookings list as a comma-separated CSV at the end of each month.
+
+See you at the wheel,
+Barro Vivo
+---
+
+Our accountant, Mercedes, closes the month on the 5th and she always complains we send things late. She opens the file in her Excel, which is set up in Spanish, so the CSV has to use semicolons between the columns.
+
+For now, please add a `show <class_id>` command to the command line that prints one class's details."""
+
+[[days.turns]]
+kind = "work"
+text = """
+When someone cancels, the seat goes to the first person on the waitlist, and they have 2 hours to confirm it. On how far ahead people can book: members 14 days, everyone else 7.
+
+Please add a `--json` option to the `list` command that prints the classes as JSON."""
+
+[[days.turns]]
+kind = "fill"
+text = """
+Here are the notes from this week's meetings at my day job; they have nothing to do with the workshop and there is nothing to change in the code. Just tell me in two lines what the main topic was."""
+tokens = 25000
+docs = "mixed"
+seed = 501
+
+[[days.turns]]
+kind = "fill"
+text = """
+And the rest of this week's notes from the day job, same thing: no code changes, just two lines on the main topic."""
+tokens = 25000
+docs = "mixed"
+seed = 502
+
+[[days.turns]]
+kind = "compact"
+
+[[days.turns]]
+kind = "work"
+text = """
+Please add a short "Commands" section to the README that describes the command line commands we have."""
+
+[[days]]
+day = 3
+machine = "A"
+
+[[days.turns]]
+kind = "work"
+text = """
+Hi again, it's a new day. Please implement `cancel()` and `refund_amount()` in workshop/bookings.py, with the rule we agreed."""
+
+[[days.turns]]
+kind = "work"
+text = """
+Now please implement `reminders_due()` in workshop/notify.py."""
+
+[[days.turns]]
+kind = "work"
+text = """
+Now please implement `join_waitlist()` and `promote_waitlist()` in workshop/bookings.py."""
+
+[[days]]
+day = 4
+machine = "B"
+
+[[days.turns]]
+kind = "work"
+text = """
+Hi, I'm on the computer at the front desk today. Please implement `book()` and `price_for()` in workshop/bookings.py, with the member rules."""
+
+[[days.turns]]
+kind = "work"
+text = """
+Now please implement `export_csv()` in workshop/export.py, for the accountant."""
+
+[[days.turns]]
+kind = "work"
+text = """
+Please go through everything we agreed and make sure the code follows it."""

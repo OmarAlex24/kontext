@@ -1,0 +1,145 @@
+# The 14 requirements of the workshop task, as the scripted user says them.
+# `said` is exactly what the user types in that turn. For the B "in passing"
+# ones, `said` is the whole paragraph and `clause` the part that carries the
+# requirement. `changed` / `discarded` are the day-2 sentences that replace or
+# drop the day-1 rule; the check tests the value in force after them.
+
+[[requirement]]
+id = "R1"
+class = "A, plain"
+test = "test_r01_twelve_per_class"
+day = 1
+said = "First the basics: each class takes 12 people at most."
+distractor_values = ["10 people per class"]
+
+[[requirement]]
+id = "R2"
+class = "B, in passing"
+test = "test_r02_closed_on_tuesdays"
+day = 1
+said = "Rosa teaches most of the wheel classes and Don Chema does glazing, they split the week between them. On Tuesdays the space is closed, so no classes then, and the rest of the week they work out who takes what."
+clause = "On Tuesdays the space is closed, so no classes then"
+distractor_values = ["closed on Mondays"]
+
+[[requirement]]
+id = "R3"
+class = "B, answer"
+test = "test_r03_money_in_cents"
+day = 1
+said = "On money: cents, always. A 400-peso class is 40000."
+
+[[requirement]]
+id = "R4"
+class = "B"
+test = "test_r04_member_discount"
+day = 1
+said = "We have about forty members, mostly neighbours who've been coming for years. They pay a yearly fee, get 15% off every class, and a lot of them bring their own tools, so the shelves by the door are theirs."
+clause = "get 15% off every class"
+
+[[requirement]]
+id = "R5"
+class = "A"
+test = "test_r05_two_hours_before"
+day = 1
+said = "Bookings close 2 hours before a class starts. Nobody books later than that."
+
+[[requirement]]
+id = "R6"
+class = "C, changed"
+test = "test_r06_full_refund_24h"
+day = 1
+said = "If someone cancels up to 48 hours before the class, they get all their money back."
+changed = "About refunds, I'm going to be nicer: full refund if they cancel up to 24 hours before the class, not 48."
+changed_day = 2
+old_values = ["48 h"]
+distractor_values = ["72 h"]
+
+[[requirement]]
+id = "R7"
+class = "C, relative change"
+test = "test_r07_waitlist_of_ten"
+day = 1
+said = "When a class is full, people can get on a waitlist. It holds 5 people."
+changed = "The waitlists fill up in a day. Double the waitlist."
+changed_day = 2
+old_values = ["5 people"]
+
+[[requirement]]
+id = "R8"
+class = "discarded"
+test = "test_r08_email_only_reminders"
+day = 1
+said = "Reminders go out by SMS, people around here don't read their email."
+discarded = "Forget the SMS, I saw what the provider charges. Reminders go by email only."
+discarded_day = 2
+old_values = ["SMS reminders", "any SMS sent with the reminders"]
+
+[[requirement]]
+id = "R9"
+class = "B"
+test = "test_r09_reminder_day_before_at_six_pm"
+day = 1
+said = "Half the no-shows are people who simply forgot, and the clay we prepare for them dries out. That's why the reminder goes out the day before at 18:00, when most people are getting home from work and actually look at it."
+clause = "the reminder goes out the day before at 18:00"
+
+[[requirement]]
+id = "R10"
+class = "B"
+test = "test_r10_mexico_city_time"
+day = 2
+said = "My nephew set up the computer at the front desk and I think it's still on some other clock, it keeps showing the wrong hour. Every time here is Mexico City time, that's where we are and where the students are."
+clause = "Every time here is Mexico City time"
+
+[[requirement]]
+id = "R11"
+class = "B"
+test = "test_r11_names_case_insensitive"
+day = 2
+said = "Saturdays at the front desk are chaos. Lupita types in whatever name people say, sometimes all in capitals, sometimes all lowercase, and sometimes the same person shows up with a work email. Nobody gets two seats in the same class; \"ANA LÓPEZ\" and \"Ana López\" are the same person, but keep the name exactly as it was typed."
+clause = "\"ANA LÓPEZ\" and \"Ana López\" are the same person, but keep the name exactly as it was typed"
+
+[[requirement]]
+id = "R12"
+class = "B"
+test = "test_r12_csv_semicolons"
+day = 2
+said = "Our accountant, Mercedes, closes the month on the 5th and she always complains we send things late. She opens the file in her Excel, which is set up in Spanish, so the CSV has to use semicolons between the columns."
+clause = "the CSV has to use semicolons between the columns"
+distractor_values = ["comma-separated CSV"]
+
+[[requirement]]
+id = "R13"
+class = "A"
+test = "test_r13_freed_seat_offered_for_two_hours"
+day = 2
+said = "When someone cancels, the seat goes to the first person on the waitlist, and they have 2 hours to confirm it."
+
+[[requirement]]
+id = "R14"
+class = "B, answer"
+test = "test_r14_booking_window"
+day = 2
+said = "On how far ahead people can book: members 14 days, everyone else 7."
+
+# The email the user pastes on day 2 ("the pottery studio next door"). These
+# sentences carry the four distractor values; none of them is the workshop's.
+
+[[distractor]]
+requirement = "R1"
+value = "10 people per class"
+said = "Our classes are small on purpose: 10 people per class, so everyone gets a wheel."
+
+[[distractor]]
+requirement = "R2"
+value = "closed on Mondays"
+said = "Remember we're closed on Mondays, the kiln runs all day."
+
+[[distractor]]
+requirement = "R6"
+value = "72 h"
+said = "If you can't make it, cancel at least 72 hours before and we refund you in full."
+
+[[distractor]]
+requirement = "R12"
+value = "comma-separated CSV"
+said = "Our bookkeeper asks for the bookings list as a comma-separated CSV at the end of each month."

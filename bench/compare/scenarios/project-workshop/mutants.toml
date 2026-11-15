@@ -1,0 +1,87 @@
+# Each mutant puts an old or distractor value back into the reference package.
+# Applying one (replace `old` with `new`, exactly once) must make exactly the
+# named requirement's check fail and leave the other 13 passing, and must make
+# its `confusion` probe in test_confusions.py pass. The UTC mutant of R2 is not
+# an old or distractor value, so it has no probe.
+
+[[mutant]]
+requirement = "R1"
+file = "workshop/bookings.py"
+old = "CAPACITY = 12"
+new = "CAPACITY = 10"
+confusion = "test_c01_r01_ten_per_class"
+why = "Distractor: the pottery studio's 10 people per class."
+
+[[mutant]]
+requirement = "R2"
+file = "workshop/bookings.py"
+old = "CLOSED_WEEKDAY = 1  # Monday is 0: the space is closed on Tuesdays"
+new = "CLOSED_WEEKDAY = 0  # Monday is 0: the space is closed on Mondays"
+confusion = "test_c02_r02_closed_on_mondays"
+why = "Distractor: the pottery studio is closed on Mondays."
+
+[[mutant]]
+requirement = "R2"
+file = "workshop/bookings.py"
+old = "if cls.start.astimezone(TZ).weekday() == CLOSED_WEEKDAY:"
+new = "if cls.start.astimezone(ZoneInfo(\"UTC\")).weekday() == CLOSED_WEEKDAY:"
+why = "Tuesday judged in UTC instead of Mexico City: a Tuesday 19:30 class (already Wednesday in UTC) gets through."
+
+[[mutant]]
+requirement = "R6"
+file = "workshop/bookings.py"
+old = "FULL_REFUND_HOURS = 24"
+new = "FULL_REFUND_HOURS = 48"
+confusion = "test_c03_r06_refund_48h"
+why = "Old value: the day-1 rule, full refund up to 48 h before, replaced by 24 h on day 2."
+
+[[mutant]]
+requirement = "R6"
+file = "workshop/bookings.py"
+old = "FULL_REFUND_HOURS = 24"
+new = "FULL_REFUND_HOURS = 72"
+confusion = "test_c04_r06_refund_72h"
+why = "Distractor: the pottery studio's 72 h refunds."
+
+[[mutant]]
+requirement = "R7"
+file = "workshop/bookings.py"
+old = "WAITLIST_SIZE = 10"
+new = "WAITLIST_SIZE = 5"
+confusion = "test_c05_r07_waitlist_of_five"
+why = "Old value: the day-1 waitlist of 5, doubled on day 2."
+
+[[mutant]]
+requirement = "R8"
+file = "workshop/notify.py"
+old = 'due.append(Reminder(b.id, b.class_id, b.email, "email", send_at))'
+new = 'due.append(Reminder(b.id, b.class_id, b.phone or b.email, "sms", send_at))'
+confusion = "test_c06_r08_sms_reminders"
+why = "Discarded: reminders by SMS instead of email."
+
+[[mutant]]
+requirement = "R8"
+file = "workshop/notify.py"
+old = 'due.append(Reminder(b.id, b.class_id, b.email, "email", send_at))'
+new = '''due.append(Reminder(b.id, b.class_id, b.email, "email", send_at))
+            if b.phone:
+                due.append(Reminder(b.id, b.class_id, b.phone, "sms", send_at))'''
+confusion = "test_c06_r08_sms_reminders"
+why = "Discarded: an SMS reminder alongside the email one for people who left a phone."
+
+[[mutant]]
+requirement = "R8"
+file = "workshop/notify.py"
+old = '            send_email(r.to, f"Reminder: {cls.title}", text)'
+new = '''            send_email(r.to, f"Reminder: {cls.title}", text)
+            send_sms(r.to, text)'''
+confusion = "test_c07_r08_sms_sent"
+why = "Discarded: send_due still calls send_sms for every reminder, even though every reminder is an email."
+
+[[mutant]]
+requirement = "R12"
+file = "workshop/export.py"
+old = 'DELIMITER = ";"'
+new = 'DELIMITER = ","'
+confusion = "test_c08_r12_comma_csv"
+why = "Distractor: the pottery studio's comma-separated CSV."

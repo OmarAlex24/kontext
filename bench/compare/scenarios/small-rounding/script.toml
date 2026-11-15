@@ -1,0 +1,17 @@
+# S2, a bug in shared logic (design §2.1). One session, one scripted turn that
+# names only the refunds symptom. Frozen.
+name = "small-rounding"
+task = "S2"
+description = "money.round_half() rounds half-down and is used by invoices, refunds and reports; the visible failing test is in refunds."
+
+[acceptance]
+modules = ["test_hidden"]
+snapshots = "final"
+
+[[days]]
+day = 1
+machine = "A"
+
+[[days.turns]]
+kind = "work"
+text = "Customers get one cent less than they should on some partial refunds, the test in tests/test_refunds.py shows it. Please fix it."

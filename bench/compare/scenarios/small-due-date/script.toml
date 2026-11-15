@@ -1,0 +1,16 @@
+# S1, a 3-line bug (design §2.1). One session, one scripted turn. Frozen.
+name = "small-due-date"
+task = "S1"
+description = "invoices.due_date() adds days - 1 instead of days; one visible test fails."
+
+[acceptance]
+modules = ["test_hidden"]
+snapshots = "final"
+
+[[days]]
+day = 1
+machine = "A"
+
+[[days.turns]]
+kind = "work"
+text = "The due date on invoices is one day early, the test in tests/test_dates.py shows it. Please fix it."
