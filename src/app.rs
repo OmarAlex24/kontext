@@ -46,7 +46,7 @@ pub fn said_about(st: &State, project: &Project) -> crate::ideas::SaidAbout {
         let pm = crate::ideas::locate(&repos, own)?;
         let people: Vec<String> = project.people.keys().cloned().collect();
         let ideas = crate::ideas::load(st, &project.name, &people, &pm).ok()?;
-        Some(crate::ideas::said_about(&ideas))
+        Some(crate::ideas::said_about(st, &ideas))
     };
     load().unwrap_or_default()
 }

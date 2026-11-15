@@ -463,3 +463,83 @@ fn nothing_new_without_a_why_or_quotes() {
     let s = pm_ok(&p, &["scope", "summary"]);
     assert!(!s.contains("Why:") && !s.contains("Touches"), "{s}");
 }
+
+const IMPL: &[(&str, &str)] = &[
+    ("KONTEXT_ACTOR", "agent:i1"),
+    ("KONTEXT_ROLE", "implementer"),
+];
+
+/// A repo with `.pm/`: one user message per quote, each a row citing `cites`.
+fn pm_with_quotes(p: &Project, quotes: &[&str], cites: &str) -> std::path::PathBuf {
+    let repo = p.dir.path().join("repo");
+    fs::create_dir_all(repo.join(".pm/dumps")).unwrap();
+    git(&repo, &["init", "-q"]);
+    let mut dump = String::from("## 2026-11-12 10:00\n\n**User:**\n");
+    let mut items = String::from(
+        "| id | idea | source | state | where | evidence |\n|---|---|---|---|---|---|\n",
+    );
+    for (i, q) in quotes.iter().enumerate() {
+        dump.push_str(&format!("\n{q}\n"));
+        let line = 5 + 2 * i;
+        items.push_str(&format!(
+            "| P{} | idea {} | dumps/2026-11-12.md:{line} | pending | {cites} | |\n",
+            i + 1,
+            i + 1
+        ));
+    }
+    fs::write(repo.join(".pm/dumps/2026-11-12.md"), dump).unwrap();
+    fs::write(repo.join(".pm/items.md"), items).unwrap();
+    repo
+}
+
+/// Superseding a feature to give it its why keeps what the user said about
+/// it: `show` and `next` follow the replacement, as `kontext ideas` does.
+#[test]
+fn the_quotes_follow_a_superseded_feature_to_its_replacement() {
+    let p = Project::new();
+    pm_ok(&p, &["charter", "--objective", "Sell online"]);
+    let goal = pm_id(&p, &["goal", "add", "Take payments"]);
+    pm_ok(
+        &p,
+        &["epic", "add", "Payments", "--goal", &goal, "--name", "pay"],
+    );
+    let feature = |why: Option<&str>| {
+        let mut a = vec![
+            "feature",
+            "add",
+            "Refunds",
+            "--epic",
+            "pay",
+            "--acceptance",
+            "the owner refunds",
+        ];
+        if let Some(w) = why {
+            a.extend(["--why", w]);
+        }
+        pm_id(&p, &a)
+    };
+    let old = feature(None);
+    let repo = pm_with_quotes(&p, &["refunds without email"], &old);
+    let new = feature(Some("refunds by hand take a day"));
+    pm_ok(&p, &["supersede", &old, &new, "--why", "give it its why"]);
+    // Twice: a chain is followed to its end.
+    let newer = feature(Some("refunds by hand take a whole day"));
+    pm_ok(&p, &["supersede", &new, &newer, "--why", "a better why"]);
+    pm_ok(
+        &p,
+        &[
+            "task",
+            "add",
+            "Refund endpoint",
+            "--feature",
+            &newer,
+            "--acceptance",
+            "POST /refunds",
+        ],
+    );
+    let quote = "\"refunds without email\" (P1, Nov 12)";
+    let show = p.kontext_in_ok(&repo, PM, &["show", &newer]);
+    assert!(show.contains(quote), "{show}");
+    let next = p.kontext_in_ok(&repo, IMPL, &["next", "--epic", "pay"]);
+    assert!(next.contains(quote), "{next}");
+}

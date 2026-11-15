@@ -768,10 +768,12 @@ pub struct Said {
 
 /// Entry id → the user's sentences of the ideas that cite it (in `where` or
 /// `evidence`). Only ideas with a quote of the user's own words (never a line
-/// under `**Coordinator asked:**`), and not discarded.
+/// under `**Coordinator asked:**`), and not discarded. A citation of a
+/// superseded entry counts for its last replacement, as `kontext ideas`
+/// follows it: superseding a feature (to give it its why) keeps the quotes.
 pub type SaidAbout = BTreeMap<String, Vec<Said>>;
 
-pub fn said_about(ideas: &Ideas) -> SaidAbout {
+pub fn said_about(st: &State, ideas: &Ideas) -> SaidAbout {
     let mut out: SaidAbout = BTreeMap::new();
     for i in &ideas.ideas {
         if i.state == IdeaState::Discarded {
@@ -780,12 +782,13 @@ pub fn said_about(ideas: &Ideas) -> SaidAbout {
         let Some(q) = i.quote.as_deref().filter(|q| !q.trim().is_empty()) else {
             continue;
         };
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for r in &i.refs {
-            if !seen.insert(r.id.as_str()) {
+            let id = replacement(st, &r.id);
+            if !seen.insert(id.clone()) {
                 continue;
             }
-            out.entry(r.id.clone()).or_default().push(Said {
+            out.entry(id).or_default().push(Said {
                 idea: i.id.clone(),
                 quote: q.to_string(),
                 said: i.said.clone(),
