@@ -151,6 +151,29 @@ pub enum EpicCmd {
         #[arg(long = "after", value_name = "EPIC")]
         after: Vec<String>,
     },
+    /// Makes an epic that already exists wait for other epics (the pm or an owner). `kontext plan`
+    /// moves it to a later wave. Not a scope change: after the signature it holds no task
+    After {
+        /// The epic that waits: E-…, epic:<name> or <name>
+        epic: String,
+        /// The epics it comes after (they must exist)
+        #[arg(required = true, value_name = "EPIC")]
+        deps: Vec<String>,
+        /// Why it has to wait (shown in the plan the owner signs)
+        #[arg(long)]
+        why: String,
+    },
+    /// Records the paths an epic is expected to touch (files or folders; a folder covers what is
+    /// under it). `kontext plan` warns when two epics of one wave share one. The pm or an owner
+    Touches {
+        /// The epic: E-…, epic:<name> or <name>
+        epic: String,
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<String>,
+        /// Why (optional)
+        #[arg(long, default_value = "")]
+        why: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -165,6 +188,9 @@ pub enum FeatureCmd {
         /// What the human would see when it works
         #[arg(long)]
         acceptance: Option<String>,
+        /// Why it exists: what the user needs it for (shown to the workers and in the plan)
+        #[arg(long, default_value = "")]
+        why: String,
         /// Goal it serves (can be repeated)
         #[arg(long = "goal", value_name = "G")]
         goals: Vec<String>,
@@ -1309,12 +1335,25 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             )?;
             Ok((w.entries, w.warnings))
         }),
+        Cmd::Epic {
+            cmd: EpicCmd::After { epic, deps, why },
+        } => cx.written_warn("the dependency", |s, a| {
+            let w = crate::epics::add_after(s, a, &epic, &deps, &why)?;
+            Ok((w.entries, w.warnings))
+        }),
+        Cmd::Epic {
+            cmd: EpicCmd::Touches { epic, paths, why },
+        } => cx.written_warn("the paths", |s, a| {
+            let w = crate::epics::add_touches(s, a, &epic, &paths, &why)?;
+            Ok((w.entries, w.warnings))
+        }),
         Cmd::Feature {
             cmd:
                 FeatureCmd::Add {
                     title,
                     epic,
                     acceptance,
+                    why,
                     goals,
                     body,
                     tags,
@@ -1324,6 +1363,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 title,
                 epic,
                 acceptance,
+                why,
                 goals,
                 body,
                 tags: clean_list(&tags),
@@ -2856,10 +2896,27 @@ impl Ctx<'_> {
         let (mut store, project) = self.open()?;
         let st = app::state(&mut store, &project)?;
         let id = st.resolve(id)?;
+        // What the user said about a feature (from `.pm/`, if found here).
+        let said = if st.kind_of(&id) == Some("feature") {
+            app::said_about(&st, &project)
+        } else {
+            Default::default()
+        };
+        let theirs = crate::ideas::said_for(&st, &said, &id);
         if self.json {
-            print_json(&views::show_json(&st, &id))?;
+            let mut v = views::show_json(&st, &id);
+            if !theirs.is_empty() {
+                v["user_said"] = json!(theirs);
+            }
+            print_json(&v)?;
         } else {
             print!("{}", views::show(&st, &id));
+            if !theirs.is_empty() {
+                println!("\n**What the user said about it** (verbatim, from .pm/)\n");
+                for line in crate::ideas::said_lines(&theirs) {
+                    println!("{line}");
+                }
+            }
         }
         Ok(ExitCode::SUCCESS)
     }

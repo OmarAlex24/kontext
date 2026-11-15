@@ -756,6 +756,74 @@ pub fn build(st: &State, project: &str, people: &[String], pm: &Path, items_md: 
 }
 
 /// Reads `<pm>/items.md` and builds the ideas.
+/// One of the user's sentences that points to an entry: the idea's id, its
+/// quote (the dump line, verbatim) and the date it was said.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Said {
+    pub idea: String,
+    pub quote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
+}
+
+/// Entry id → the user's sentences of the ideas that cite it (in `where` or
+/// `evidence`). Only ideas with a quote of the user's own words (never a line
+/// under `**Coordinator asked:**`), and not discarded.
+pub type SaidAbout = BTreeMap<String, Vec<Said>>;
+
+pub fn said_about(ideas: &Ideas) -> SaidAbout {
+    let mut out: SaidAbout = BTreeMap::new();
+    for i in &ideas.ideas {
+        if i.state == IdeaState::Discarded {
+            continue;
+        }
+        let Some(q) = i.quote.as_deref().filter(|q| !q.trim().is_empty()) else {
+            continue;
+        };
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for r in &i.refs {
+            if !seen.insert(r.id.as_str()) {
+                continue;
+            }
+            out.entry(r.id.clone()).or_default().push(Said {
+                idea: i.id.clone(),
+                quote: q.to_string(),
+                said: i.said.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// The lines that show them: `- "<quote>" (P3, Nov 12)`.
+pub fn said_lines(said: &[&Said]) -> Vec<String> {
+    said.iter()
+        .map(|s| {
+            let when = s
+                .said
+                .as_deref()
+                .map(|d| format!(", {}", month_day(d)))
+                .unwrap_or_default();
+            format!("- \"{}\" ({}{when})", s.quote, s.idea)
+        })
+        .collect()
+}
+
+/// What the user said about a feature: the sentences of the ideas that cite
+/// it. For a task, its feature's (a task's own citations are not shown: the
+/// views show what the user said about the visible work).
+pub fn said_for<'a>(st: &State, said: &'a SaidAbout, id: &str) -> Vec<&'a Said> {
+    let feature = match st.get(id) {
+        Some(e) if e.kind == "feature" => Some(e.id.as_str()),
+        Some(e) if e.kind == "task" => crate::features::counted_feature(st, e),
+        _ => None,
+    };
+    feature
+        .and_then(|f| said.get(f))
+        .map(|v| v.iter().collect())
+        .unwrap_or_default()
+}
+
 pub fn load(st: &State, project: &str, people: &[String], pm: &Path) -> Result<Ideas> {
     let path = pm.join("items.md");
     let text =

@@ -122,11 +122,18 @@ pub fn nodes(st: &State) -> Vec<Node> {
 pub fn node(st: &State, e: &Entry) -> Node {
     let tasks = st.tasks_of(&e.id);
     let (done_features, features, _) = crate::features::counts(st, &e.id);
+    // Its own `depends_on`, then what `after` records added (§4.3).
+    let mut after = string_list(e.fields.get("depends_on"));
+    for d in crate::epics::added_after(st, &e.id) {
+        if !after.contains(&d) {
+            after.push(d);
+        }
+    }
     Node {
         id: e.id.clone(),
         name: epic_name(e),
         title: e.title.trim().to_string(),
-        after: string_list(e.fields.get("depends_on")),
+        after,
         active: st.status_of(&e.id) == Some(Status::Active),
         tasks: tasks.len(),
         closed_tasks: tasks

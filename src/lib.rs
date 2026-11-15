@@ -12,6 +12,7 @@ pub mod config;
 pub mod cursor;
 pub mod distill;
 pub mod doctor;
+pub mod epics;
 pub mod facts;
 pub mod features;
 pub mod find;

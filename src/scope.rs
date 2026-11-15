@@ -483,7 +483,42 @@ fn feature_lines(st: &State, epic: &str, indent: &str, l: &mut Vec<String>) {
             whole(&f.title),
             acceptance_line(f)
         ));
+        if let Some(w) = crate::features::why(f) {
+            l.push(format!("{indent}  Why: {}", whole(w)));
+        }
     }
+}
+
+/// What `after` and `touches` records added to an epic, whole (only an
+/// epic that has them gets these lines).
+fn epic_record_lines(st: &State, e: &Entry, indent: &str, l: &mut Vec<String>) {
+    for r in crate::epics::records(st, &e.id, "after") {
+        let deps: Vec<String> = string_list(r.fields.get("depends_on"))
+            .iter()
+            .map(|d| {
+                st.get(d)
+                    .map(|x| whole(&x.title))
+                    .unwrap_or_else(|| d.clone())
+            })
+            .collect();
+        l.push(format!(
+            "{indent}Comes after {} ({}): {}",
+            deps.join(", "),
+            r.id,
+            whole(&r.why)
+        ));
+    }
+    let paths = crate::epics::touches(st, &e.id);
+    if !paths.is_empty() {
+        l.push(format!("{indent}Touches: {}", paths.join(", ")));
+    }
+}
+
+/// An epic of the plan: its line, what records added to it, its features.
+fn epic_block(st: &State, e: &Entry, head: String, l: &mut Vec<String>) {
+    l.push(head);
+    epic_record_lines(st, e, "  ", l);
+    feature_lines(st, &e.id, "  ", l);
 }
 
 fn epic_line(e: &Entry) -> String {
@@ -610,8 +645,7 @@ fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
         l.push(format!("## Done ({})", plan.closed.len()));
         for pe in &plan.closed {
             if let Some(e) = st.get(&pe.id) {
-                l.push(epic_line(e));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block(st, e, epic_line(e), &mut l);
             }
         }
     }
@@ -628,8 +662,7 @@ fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
         }
         for pe in &w.epics {
             if let Some(e) = st.get(&pe.id) {
-                l.push(epic_line(e));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block(st, e, epic_line(e), &mut l);
             }
         }
     }
@@ -638,8 +671,7 @@ fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
         l.push(format!("## No wave ({})", plan.blocked.len()));
         for b in &plan.blocked {
             if let Some(e) = st.get(&b.epic.id) {
-                l.push(format!("{}: {}", epic_line(e), b.reason));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block(st, e, format!("{}: {}", epic_line(e), b.reason), &mut l);
             }
         }
     }
@@ -723,8 +755,7 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
                 l.extend(g);
             }
             "epic" => {
-                l.push(format!("- Epic {}", &epic_line(e)[2..]));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block(st, e, format!("- Epic {}", &epic_line(e)[2..]), &mut l);
             }
             "feature" => {
                 // A feature of an epic that enters is listed under it.
@@ -741,6 +772,9 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
                     whole(&e.title),
                     acceptance_line(e)
                 ));
+                if let Some(w) = crate::features::why(e) {
+                    l.push(format!("  Why: {}", whole(w)));
+                }
             }
             _ => {}
         }

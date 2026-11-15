@@ -707,6 +707,9 @@ pub struct State {
     /// Dropped feature → the `scope` entry whose signature covered its removal
     /// (it was in that entry's `removes`).
     pub drop_signed: BTreeMap<String, String>,
+    /// Epic → the `after` and `touches` records that count, in `hlc` order
+    /// ([`crate::epics`]). Empty in a project that never wrote one.
+    pub epic_records: BTreeMap<String, Vec<String>>,
     /// Charters in the order they were signed.
     sign_order: Vec<String>,
 }
@@ -1304,6 +1307,23 @@ impl State {
             }
             "confirm" if target_kind.as_deref() == Some("question") => {
                 self.joined.entry(target).or_default().push(e.id.clone());
+            }
+            "after" | "touches" if target_kind.as_deref() == Some("epic") => {
+                // The pm or an owner, as for a feature.
+                if let Err(reason) = crate::features::may_write_line(self, e) {
+                    self.not_counting.insert(e.id.clone(), reason.clone());
+                    self.alerts.push(Alert::NotCounting {
+                        id: e.id.clone(),
+                        kind: e.kind.clone(),
+                        actor: e.actor.short(),
+                        reason,
+                    });
+                    return;
+                }
+                self.epic_records
+                    .entry(target)
+                    .or_default()
+                    .push(e.id.clone());
             }
             _ => {}
         }

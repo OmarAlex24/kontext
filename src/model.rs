@@ -59,6 +59,9 @@ pub const RECORD_KINDS: &[&str] = &[
     "reopen",
     "confirm",
     "dismiss",
+    // An epic's dependency or paths, added after it was written (§4.3).
+    "after",
+    "touches",
 ];
 
 pub const RECORD_PREFIX: &str = "R";
