@@ -152,6 +152,28 @@ fn epic_in_force<'a>(st: &'a State, s: &str) -> Result<&'a Entry> {
     Ok(e)
 }
 
+/// What a record of this kind adds to an epic, in words.
+fn added(kind: &str) -> &'static str {
+    match kind {
+        "after" => "a dependency",
+        "touches" => "paths",
+        _ => "this record",
+    }
+}
+
+/// Whether a line of these kinds counts: the pm or an owner, as for a
+/// feature, under the token it was written with. The reason names what the
+/// line adds (a feature's reason would say "features").
+pub fn may_write_line(st: &State, e: &Entry) -> std::result::Result<(), String> {
+    crate::features::may_write_line(st, e).map_err(|_| {
+        format!(
+            "only the pm or an owner adds {} to an epic ({} is neither)",
+            added(&e.kind),
+            e.actor.short()
+        )
+    })
+}
+
 fn may_write(st: &State, actor: &Actor, what: &str) -> Result<()> {
     if crate::features::may_write(st, actor).is_err() {
         return refused(format!(

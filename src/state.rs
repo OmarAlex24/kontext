@@ -1310,7 +1310,7 @@ impl State {
             }
             "after" | "touches" if target_kind.as_deref() == Some("epic") => {
                 // The pm or an owner, as for a feature.
-                if let Err(reason) = crate::features::may_write_line(self, e) {
+                if let Err(reason) = crate::epics::may_write_line(self, e) {
                     self.not_counting.insert(e.id.clone(), reason.clone());
                     self.alerts.push(Alert::NotCounting {
                         id: e.id.clone(),

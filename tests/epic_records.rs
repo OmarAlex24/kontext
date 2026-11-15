@@ -276,6 +276,23 @@ fn an_after_record_from_a_coordinator_does_not_count() {
     assert_eq!(waves(p), vec![vec!["found"], vec!["pay", "cat"]]);
     let st = pm_ok(p, &["standup", "--peek"]);
     assert!(st.contains("only the pm or an owner"), "{st}");
+    // Its reason names what it adds, not features.
+    let touches = format!(
+        "{{\"kind\":\"touches\",\"title\":\"pay touches src\",\"why\":\"x\",\
+         \"actor\":{{\"type\":\"agent\",\"name\":\"epic:pay\",\"role\":\"coordinator\"}},\
+         \"refs\":[\"{}\"],\"fields\":{{\"paths\":[\"src\"]}}}}\n",
+        t.pay
+    );
+    let ids = p.append(&touches);
+    let show = pm_ok(p, &["show", &ids[0]]);
+    assert!(
+        show.contains("only the pm or an owner adds paths to an epic"),
+        "{show}"
+    );
+    assert!(!show.contains("features"), "{show}");
+    let st = pm_ok(p, &["standup", "--peek"]);
+    assert!(st.contains("adds a dependency to an epic"), "{st}");
+    assert!(!st.contains("add or supersede features"), "{st}");
 }
 
 /// After the signature, a dependency or paths are not a scope change: no
