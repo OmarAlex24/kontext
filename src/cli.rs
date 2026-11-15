@@ -2820,17 +2820,15 @@ impl Ctx<'_> {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let n =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
         println!(
-            "Audit marked at {}: {} newly audited ({}); {total} messages audited in {} dumps, {} \
-             not yet ({}).",
+            "Audit marked at {}: {} newly audited ({}); {} audited in {}, {} not yet ({}).",
             m.audited.at,
-            if m.marked.len() == 1 {
-                "1 message".to_string()
-            } else {
-                format!("{} messages", m.marked.len())
-            },
+            n(m.marked.len(), "message", "messages"),
             list(&m.marked),
-            m.audited.files.len(),
+            n(total, "message", "messages"),
+            n(m.audited.files.len(), "dump", "dumps"),
             m.unaudited,
             path.display()
         );
