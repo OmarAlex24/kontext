@@ -37,6 +37,7 @@ pub mod report;
 pub mod repos;
 pub mod scope;
 pub mod server;
+pub mod setup;
 pub mod sign;
 pub mod state;
 pub mod store;
