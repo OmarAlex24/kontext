@@ -25,8 +25,11 @@
 //!   human how things are going, `.claude/skills/kontext-show/SKILL.md`, the
 //!   skill that installs kontext and migrates the project's memory into it,
 //!   `.claude/skills/kontext-migrate/SKILL.md`, and the PM's memory of the
-//!   user's ideas, `.claude/skills/kontext-pm/SKILL.md`. All five are always
-//!   replaced. With `--skills-only [--global]`, only those, in the repo or in
+//!   user's ideas, `.claude/skills/kontext-pm/SKILL.md`. One that matches,
+//!   byte for byte, a released version of its template ([`SKILL_VERSIONS`])
+//!   is replaced; one with any other content was changed by hand: it is kept
+//!   and a warning is shown; `--force` replaces it (as the agent files). With
+//!   `--skills-only [--global]`, only those, in the repo or in
 //!   `~/.claude/skills/` ([`plan_skills`]).
 //! - The agent files `.claude/agents/kontext-*.md` (from `templates/agents/`),
 //!   among them `kontext-pm-reader.md`, the reader the `kontext-pm` skill
@@ -135,6 +138,50 @@ pub fn agent_versions() -> impl Iterator<Item = (&'static str, &'static str)> {
 pub fn is_released_agent(name: &str, content: &str) -> bool {
     let hash = crate::model::sha256_hex(content.as_bytes());
     agent_versions().any(|(f, h)| f == name && h == hash)
+}
+
+/// The sha256 of every released version of each skill, the current one
+/// included: `<sha256>  <folder>` per line, `#` for comments. Append-only.
+pub const SKILL_VERSIONS: &str = include_str!("../templates/skill-versions.txt");
+
+/// The `(folder, sha256)` pairs of [`SKILL_VERSIONS`].
+pub fn skill_versions() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SKILL_VERSIONS
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let (hash, dir) = l.split_once(char::is_whitespace)?;
+            Some((dir.trim(), hash))
+        })
+}
+
+/// Whether `content` is, byte for byte, a version of the skill in folder
+/// `dir` that some kontext release installed. Anything else was changed by
+/// hand.
+pub fn is_released_skill(dir: &str, content: &str) -> bool {
+    let hash = crate::model::sha256_hex(content.as_bytes());
+    skill_versions().any(|(d, h)| d == dir && h == hash)
+}
+
+/// The skills in `skills` (a `.claude/skills/` folder): each one's change,
+/// and those kept because they were changed by hand (unless `force`).
+fn skill_changes(skills: &Path, force: bool) -> Result<(Vec<Change>, Vec<PathBuf>)> {
+    let mut changes = Vec::new();
+    let mut kept = Vec::new();
+    for (dir, text) in SKILLS {
+        let path = skills.join(dir).join("SKILL.md");
+        let before = read_opt(&path)?;
+        match &before {
+            Some(b) if b != text && !force && !is_released_skill(dir, b) => kept.push(path),
+            _ => changes.push(Change {
+                path,
+                before,
+                after: text.to_string(),
+            }),
+        }
+    }
+    Ok((changes, kept))
 }
 
 /// JSON that preserves key order.
@@ -456,7 +503,8 @@ impl Change {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub changes: Vec<Change>,
-    /// Agent files that already exist with other content and are kept.
+    /// Skills and agent files that were changed by hand (they match no
+    /// released version) and are kept.
     pub kept: Vec<PathBuf>,
     /// What to tell the user besides the diffs (where the hooks stay).
     pub notes: Vec<String>,
@@ -667,21 +715,13 @@ impl SettingsFile {
     }
 }
 
-/// Only the skills, in `dir` (a Claude Code `skills/` folder). They are always
-/// replaced, as in [`plan`].
-pub fn plan_skills(dir: &Path) -> Result<Plan> {
-    let mut changes = Vec::new();
-    for (name, text) in SKILLS {
-        let path = dir.join(name).join("SKILL.md");
-        changes.push(Change {
-            before: read_opt(&path)?,
-            path,
-            after: text.to_string(),
-        });
-    }
+/// Only the skills, in `dir` (a Claude Code `skills/` folder), as in [`plan`]:
+/// one changed by hand is kept unless `force`.
+pub fn plan_skills(dir: &Path, force: bool) -> Result<Plan> {
+    let (changes, kept) = skill_changes(dir, force)?;
     Ok(Plan {
         changes,
-        kept: Vec::new(),
+        kept,
         notes: Vec::new(),
     })
 }
@@ -774,21 +814,9 @@ pub fn plan(o: &Options) -> Result<Plan> {
     }
     changes.push(change);
 
-    for (dir, text) in SKILLS {
-        let skill = o
-            .repo
-            .join(".claude")
-            .join("skills")
-            .join(dir)
-            .join("SKILL.md");
-        changes.push(Change {
-            before: read_opt(&skill)?,
-            path: skill,
-            after: text.to_string(),
-        });
-    }
+    let (skills, mut kept) = skill_changes(&o.repo.join(".claude").join("skills"), o.force)?;
+    changes.extend(skills);
 
-    let mut kept = Vec::new();
     let agents = o.repo.join(".claude").join("agents");
     for (name, text) in AGENTS {
         let path = agents.join(name);

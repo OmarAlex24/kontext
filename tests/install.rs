@@ -565,7 +565,7 @@ fn doctor(p: &Project, dir: &Path) -> Vec<String> {
 
 /// An agent file equal to an earlier released version is replaced without
 /// `--force`; one changed by hand is kept until `--force`. `doctor` says
-/// which is which. The skills are replaced either way.
+/// which is which. The skills the same (below).
 #[test]
 fn replaces_agent_files_from_older_versions_and_keeps_hand_edits() {
     let p = Project::new();
@@ -610,9 +610,15 @@ fn replaces_agent_files_from_older_versions_and_keeps_hand_edits() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
     let kept: Vec<&str> = stdout.lines().filter(|l| l.starts_with("Kept ")).collect();
-    assert_eq!(kept.len(), 1, "{stdout}");
+    assert_eq!(kept.len(), 2, "{stdout}");
     assert!(
-        kept[0].contains("kontext-implementer.md: it was changed by hand"),
+        kept.iter()
+            .any(|k| k.contains("kontext-implementer.md: it was changed by hand")),
+        "{stdout}"
+    );
+    assert!(
+        kept.iter()
+            .any(|k| k.contains("skills/kontext/SKILL.md: it was changed by hand")),
         "{stdout}"
     );
     assert!(stdout.contains("kontext-coordinator.md"), "{stdout}");
@@ -628,8 +634,8 @@ fn replaces_agent_files_from_older_versions_and_keeps_hand_edits() {
     assert_eq!(fs::read_to_string(&implementer).unwrap(), "my version\n");
     assert_eq!(
         fs::read_to_string(&skill).unwrap(),
-        kontext::install::SKILL,
-        "the skills are always replaced"
+        "my skill\n",
+        "a skill changed by hand is kept"
     );
 
     let found = doctor(&p, &r);
@@ -647,6 +653,90 @@ fn replaces_agent_files_from_older_versions_and_keeps_hand_edits() {
         found.iter().any(|f| f.contains("agent files current")),
         "{found:#?}"
     );
+}
+
+const OLD_SKILL: &str = include_str!("fixtures/skills/kontext-53cb2c1.md");
+
+/// A skill equal to an earlier released version is replaced without
+/// `--force`; one changed by hand is kept (with a note in `install`, `setup`
+/// and `doctor`) until `--force`, also with `--skills-only`.
+#[test]
+fn replaces_skills_from_older_versions_and_keeps_hand_edits() {
+    let p = Project::new();
+    let r = repo(&p);
+    assert!(install(&p, &r, &[]).status.success());
+    let main = r.join(".claude/skills/kontext/SKILL.md");
+    let pm = r.join(".claude/skills/kontext-pm/SKILL.md");
+    assert_ne!(OLD_SKILL, kontext::install::SKILL);
+    fs::write(&main, OLD_SKILL).unwrap();
+    let edited = format!("{}\nMy own rule.\n", fs::read_to_string(&pm).unwrap());
+    fs::write(&pm, &edited).unwrap();
+
+    let out = install(&p, &r, &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Kept ")
+            && stdout.contains("kontext-pm/SKILL.md: it was changed by hand")
+            && stdout.contains("`kontext install --force` replaces it"),
+        "{stdout}"
+    );
+    assert_eq!(fs::read_to_string(&main).unwrap(), kontext::install::SKILL);
+    assert_eq!(fs::read_to_string(&pm).unwrap(), edited);
+    let found = doctor(&p, &r);
+    assert!(
+        found.iter().any(|f| f
+            .contains("skills changed by hand, kept: .claude/skills/kontext-pm/SKILL.md")
+            && f.contains("--force")),
+        "{found:#?}"
+    );
+
+    // --skills-only keeps it too, and --force replaces it.
+    let out = install(&p, &r, &["--skills-only"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--skills-only --force` replaces it"),
+        "{stdout}"
+    );
+    assert_eq!(fs::read_to_string(&pm).unwrap(), edited);
+    assert!(
+        install(&p, &r, &["--skills-only", "--force"])
+            .status
+            .success()
+    );
+    assert_ne!(fs::read_to_string(&pm).unwrap(), edited);
+    assert!(
+        !doctor(&p, &r).iter().any(|f| f.contains("changed by hand")),
+        "{:#?}",
+        doctor(&p, &r)
+    );
+}
+
+/// The same for the skills: every current skill is in
+/// templates/skill-versions.txt, every line names a skill folder, and the
+/// first released kontext skill is one of the older versions.
+#[test]
+fn skill_versions_list_has_every_template() {
+    use kontext::install::{SKILLS, is_released_skill, skill_versions};
+    for (dir, text) in SKILLS {
+        assert!(
+            is_released_skill(dir, text),
+            "templates/skill-{dir}.md changed: append its sha256 to templates/skill-versions.txt \
+             (`shasum -a 256 templates/skill-{dir}.md`, then the folder name {dir}); never remove a line"
+        );
+    }
+    let mut lines = 0;
+    for (dir, hash) in skill_versions() {
+        lines += 1;
+        assert!(SKILLS.iter().any(|(d, _)| *d == dir), "{dir}");
+        assert!(
+            hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{hash}"
+        );
+    }
+    assert!(lines >= 50, "{lines}");
+    assert!(is_released_skill("kontext", OLD_SKILL));
+    assert!(!is_released_skill("kontext-pm", OLD_SKILL));
 }
 
 /// The list of released agent versions cannot go stale: every current

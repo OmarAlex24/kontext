@@ -1143,7 +1143,7 @@ fn check_skills(
             local: false,
             worktree_role: None,
         }),
-        None => install::plan_skills(&skills_dir),
+        None => install::plan_skills(&skills_dir, false),
     };
     // The user's own folders (`$CLAUDE_CONFIG_DIR` or `~/.claude`): every
     // checkout sees them.
@@ -1175,6 +1175,7 @@ fn check_skills(
         }
         (missing, old)
     };
+    note_kept_skills(r, &plan, &skills_dir, repo);
     let (missing, old) = stale(&skills_dir);
     if missing.is_empty() && old.is_empty() {
         r.ok(
@@ -1188,12 +1189,12 @@ fn check_skills(
         let main_skills = main
             .filter(|_| !skills_dir.exists())
             .map(|m| m.join(".claude").join("skills"))
-            .filter(|d| install::plan_skills(d).is_ok_and(|p| p.is_noop()));
+            .filter(|d| install::plan_skills(d, false).is_ok_and(|p| p.is_noop()));
         let user = user("skills");
         let global_ok = old.is_empty()
             && user
                 .as_ref()
-                .and_then(|u| install::plan_skills(u).ok())
+                .and_then(|u| install::plan_skills(u, false).ok())
                 .is_some_and(|p| p.is_noop());
         if let Some(d) = main_skills {
             r.ok("skills", format!("skills current in {}", d.display()));
@@ -1243,13 +1244,14 @@ fn check_skills(
         .map(|m| m.join(".claude").join("agents"))
         .filter(current);
     let user_agents = main_agents.or_else(|| user("agents").filter(current));
-    if missing.is_empty() && old.is_empty() && plan.kept.is_empty() {
+    let agents_kept = plan.kept.iter().any(|p| p.starts_with(&agents_dir));
+    if missing.is_empty() && old.is_empty() && !agents_kept {
         r.ok(
             "skills",
             format!("agent files current in {}", agents_dir.display()),
         );
     } else if old.is_empty()
-        && plan.kept.is_empty()
+        && !agents_kept
         && let Some(u) = user_agents
     {
         r.ok("skills", format!("agent files current in {}", u.display()));
@@ -1279,12 +1281,34 @@ fn check_skills(
         );
     }
     // Content that matches no released version (`install::is_released_agent`).
-    if !plan.kept.is_empty() {
-        let kept: Vec<String> = plan.kept.iter().map(|p| rel(p)).collect();
+    let kept_agents: Vec<String> = plan
+        .kept
+        .iter()
+        .filter(|p| p.starts_with(&agents_dir))
+        .map(|p| rel(p))
+        .collect();
+    if !kept_agents.is_empty() {
         r.note(
             "skills",
-            format!("agent files changed by hand: {}", kept.join(", ")),
+            format!("agent files changed by hand: {}", kept_agents.join(", ")),
             Some("`kontext install --force` replaces them".into()),
+        );
+    }
+}
+
+/// Skills kept because they were changed by hand (`install::is_released_skill`).
+fn note_kept_skills(r: &mut Report, plan: &install::Plan, skills_dir: &Path, repo: &Path) {
+    let kept: Vec<String> = plan
+        .kept
+        .iter()
+        .filter(|p| p.starts_with(skills_dir))
+        .map(|p| p.strip_prefix(repo).unwrap_or(p).display().to_string())
+        .collect();
+    if !kept.is_empty() {
+        r.note(
+            "skills",
+            format!("skills changed by hand, kept: {}", kept.join(", ")),
+            Some("`kontext install --force` replaces them with this version".into()),
         );
     }
 }

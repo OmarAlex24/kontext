@@ -767,7 +767,7 @@ pub enum Cmd {
         /// Shows what would change, without writing anything
         #[arg(long)]
         dry_run: bool,
-        /// Also replaces the agent files you changed by hand
+        /// Also replaces the skills and agent files you changed by hand
         #[arg(long)]
         force: bool,
         /// Only the skills (kontext, kontext-orchestrate, kontext-show, kontext-migrate and
@@ -989,7 +989,7 @@ pub fn main() -> ExitCode {
 /// `kontext install --skills-only [--global]`: only the skills, in the current
 /// repo or in your user's. It needs no project: it's how you get the
 /// `kontext-migrate` skill before creating one.
-fn install_skills(dry_run: bool, global: bool) -> Result<ExitCode> {
+fn install_skills(dry_run: bool, global: bool, force: bool) -> Result<ExitCode> {
     let dir = if global {
         match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
             Some(d) => PathBuf::from(d).join("skills"),
@@ -1000,12 +1000,22 @@ fn install_skills(dry_run: bool, global: bool) -> Result<ExitCode> {
             .join(".claude")
             .join("skills")
     };
-    let plan = install::plan_skills(&dir)?;
-    if plan.is_noop() {
+    let plan = install::plan_skills(&dir, force)?;
+    for k in &plan.kept {
         println!(
-            "The skills are already up to date in {}; nothing to change.",
-            dir.display()
+            "Kept {}: it was changed by hand (it matches no kontext version). `kontext install --skills-only --force` replaces it.",
+            k.display()
         );
+    }
+    if plan.is_noop() {
+        if plan.kept.is_empty() {
+            println!(
+                "The skills are already up to date in {}; nothing to change.",
+                dir.display()
+            );
+        } else {
+            println!("Nothing else to change in {}.", dir.display());
+        }
         return Ok(ExitCode::SUCCESS);
     }
     for c in plan.changes.iter().filter(|c| c.changed()) {
@@ -1784,8 +1794,9 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             skills_only: true,
             dry_run,
             global,
+            force,
             ..
-        } => install_skills(dry_run, global),
+        } => install_skills(dry_run, global, force),
         Cmd::Install {
             dry_run,
             force,
