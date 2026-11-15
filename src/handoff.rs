@@ -47,16 +47,46 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// What `kontext scope sign` needs where `require_signatures` is on: the
+/// owner's SSH key on the machine that signs. `signing`: this machine's
+/// `[signing] key` from projects.toml, if any.
+fn sign_with_key(st: &State, signing: Option<&str>) -> String {
+    let owners = if st.policy.owners.is_empty() {
+        "<owner>".to_string()
+    } else {
+        st.policy.owners.join(", ")
+    };
+    let here = match signing {
+        Some(k) => format!(
+            "This machine signs with {k} (`[signing] key` in projects.toml): it must be the \
+             owner's"
+        ),
+        None => "This machine has no `[signing] key` in projects.toml, so `--sign` signs with \
+                 ~/.ssh/id_ed25519.pub: it must be the owner's"
+            .to_string(),
+    };
+    format!(
+        "This project requires signatures (`require_signatures = true` in project.toml): the \
+         signature is made with the SSH key of the owner it is for ({owners}), whose public key \
+         is in [people] of project.toml, and refused without it. Show the owner `kontext scope \
+         summary` verbatim and, on their yes, sign it where their key is: `kontext --sign scope \
+         sign --hash <hash> --approved-by <owner> --said \"<their words>\"` (the owner \
+         themselves leaves out --approved-by). {here}."
+    )
+}
+
 /// The three conditions, each with what to do about it.
-fn missing(st: &State, ideas: &IdeasCheck) -> Vec<String> {
+fn missing(st: &State, ideas: &IdeasCheck, signing: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
     if !scope::plan_signed(st) {
-        out.push(
+        out.push(if st.policy.require_signatures {
+            format!("The plan is not signed. {}", sign_with_key(st, signing))
+        } else {
             "The plan is not signed. Show the owner `kontext scope summary` verbatim and, on their \
              yes, sign it with `kontext scope sign --hash <hash> --approved-by <owner> --said \
              \"<their words>\"`."
-                .into(),
-        );
+                .into()
+        });
     }
     match ideas {
         IdeasCheck::NotFound(dir) => out.push(format!(
@@ -147,8 +177,9 @@ pub fn check(
     ideas: &IdeasCheck,
     capture_enabled: bool,
     named: Vec<Named>,
+    signing: Option<&str>,
 ) -> Handoff {
-    let missing = missing(st, ideas);
+    let missing = missing(st, ideas, signing);
     let ready = missing.is_empty();
     let last = scope::last(st);
     let mut notes = Vec::new();

@@ -2696,7 +2696,17 @@ impl Ctx<'_> {
         let settings = crate::capture::Settings::of(&project);
         let home = config::resolve_project(self.project)?.home;
         let named = crate::capture::named(&home).unwrap_or_default();
-        let h = crate::handoff::check(&st, &project.name, &ideas, settings.enabled, named);
+        let signing = Machine::load()?
+            .signing_key()?
+            .map(|k| k.display().to_string());
+        let h = crate::handoff::check(
+            &st,
+            &project.name,
+            &ideas,
+            settings.enabled,
+            named,
+            signing.as_deref(),
+        );
         if self.json {
             print_json(&h)?;
             return Ok(if h.ready {

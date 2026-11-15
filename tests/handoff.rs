@@ -358,3 +358,26 @@ fn capture_here_replace_leaves_only_the_new_chat() {
     .unwrap();
     assert!(v.get("forgotten").is_none());
 }
+
+/// Under `require_signatures`, the reason names the key and a command that
+/// signs there; the plain `scope sign` it printed before was refused.
+#[test]
+fn under_require_signatures_the_reason_names_the_key_and_a_command_that_works() {
+    let s = setup();
+    let toml = s.p.home.join("project.toml");
+    let text = fs::read_to_string(&toml)
+        .unwrap()
+        .replace("require_signatures = false", "require_signatures = true");
+    fs::write(&toml, text).unwrap();
+    let (code, _, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("This project requires signatures"), "{err}");
+    assert!(
+        err.contains(
+            "`kontext --sign scope sign --hash <hash> --approved-by <owner> --said \"<their words>\"`"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("~/.ssh/id_ed25519.pub"), "{err}");
+    assert!(err.contains("(omar)"), "{err}");
+}
