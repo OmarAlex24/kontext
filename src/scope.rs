@@ -1133,6 +1133,14 @@ pub enum IdeasSource {
     },
     /// The folder it ran from.
     NotFound(String),
+    /// A `.pm/items.md` found from here ([`crate::ideas::locate`]) in a repo
+    /// that is not one of the project's: it does not count, and `scope sign`
+    /// refuses rather than sign "Ideas not checked" past ideas it can see.
+    Foreign {
+        pm: std::path::PathBuf,
+        /// The folder it ran from.
+        dir: String,
+    },
 }
 
 impl IdeasSource {
@@ -1144,7 +1152,22 @@ impl IdeasSource {
                 people,
             } => IdeasCheck::Read(crate::ideas::build(st, project, people, pm, items_md)),
             IdeasSource::NotFound(dir) => IdeasCheck::NotFound(dir.clone()),
+            IdeasSource::Foreign { dir, .. } => IdeasCheck::NotFound(dir.clone()),
         }
+    }
+
+    /// Why this `.pm/` does not count, for `scope summary` (on stderr, out of
+    /// the signed text) and `scope sign` (which refuses).
+    pub fn foreign(&self, project: &str) -> Option<String> {
+        let IdeasSource::Foreign { pm, .. } = self else {
+            return None;
+        };
+        Some(format!(
+            "{}/items.md is in a repo that is not {project}'s, so it does not count and the \
+             ideas in it are not checked. {}",
+            pm.display(),
+            crate::ideas::where_it_counts(project)
+        ))
     }
 }
 

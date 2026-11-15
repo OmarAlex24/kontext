@@ -399,6 +399,37 @@ fn a_pm_folder_counts_only_in_a_repo_of_the_project() {
         );
         assert!(!sum.contains("Not placed: 0"), "{sum}");
         assert!(!sum.contains(&other.display().to_string()), "{sum}");
+        // Its .pm/ is seen but does not count: the summary warns out of the
+        // signed text, and the signature is refused.
+        let (_, out, err) = s.run(&other, &["--json", "scope", "summary"]);
+        assert!(
+            err.contains("is in a repo that is not demo's, so it does not count"),
+            "{err}"
+        );
+        let h = serde_json::from_str::<Value>(&out).unwrap()["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let before = s.ledger_len();
+        let (code, _, err) = s.run(
+            &other,
+            &[
+                "scope",
+                "sign",
+                "--hash",
+                &h,
+                "--approved-by",
+                "omar",
+                "--said",
+                "sí",
+            ],
+        );
+        assert_ne!(code, 0, "{err}");
+        assert!(
+            err.contains("items.md is in a repo that is not demo's"),
+            "{err}"
+        );
+        assert_eq!(s.ledger_len(), before);
     }
     // From the repo itself, the unplaced idea is seen.
     let (_, sum, _) = s.run(&s.repo, &["scope", "summary"]);
@@ -410,6 +441,44 @@ fn a_pm_folder_counts_only_in_a_repo_of_the_project() {
     let (code, _, err) = s.run(&wt, &["handoff"]);
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("P2 \"and a dark mode\""), "{err}");
+    // A folder with no .pm/ at all still signs "Ideas not checked".
+    s.p.kontext_env_ok(
+        PM,
+        &[
+            "feature",
+            "add",
+            "Invoices",
+            "--epic",
+            "pay",
+            "--acceptance",
+            "a PDF",
+            "--why",
+            "accounting asks",
+        ],
+    );
+    let bare = s.p.dir.path().join("bare");
+    fs::create_dir_all(&bare).unwrap();
+    git(&bare, &["init", "-q"]);
+    let (_, out, err) = s.run(&bare, &["--json", "scope", "summary"]);
+    assert!(err.is_empty(), "{err}");
+    let h = serde_json::from_str::<Value>(&out).unwrap()["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, _, err) = s.run(
+        &bare,
+        &[
+            "scope",
+            "sign",
+            "--hash",
+            &h,
+            "--approved-by",
+            "omar",
+            "--said",
+            "sí",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
 }
 
 /// Under `require_signatures`, the reason names the key and a command that

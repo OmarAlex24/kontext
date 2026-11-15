@@ -2651,7 +2651,15 @@ impl Ctx<'_> {
         // Only a `.pm/` of this project's repos: one in any other folder
         // (another repo, an empty table) would vouch for ideas it never saw.
         let Some(pm) = crate::ideas::locate_for(&repos, &project.name, own) else {
-            return Ok(not_found());
+            // One that is here but not the project's must not turn into a
+            // signed "Ideas not checked" over ideas left unplaced in it.
+            return Ok(match crate::ideas::locate(&repos, own) {
+                Some(pm) => crate::scope::IdeasSource::Foreign {
+                    pm,
+                    dir: cwd.display().to_string(),
+                },
+                None => not_found(),
+            });
         };
         let Ok(items_md) = fs::read_to_string(pm.join("items.md")) else {
             return Ok(not_found());
@@ -2667,6 +2675,9 @@ impl Ctx<'_> {
     fn scope_summary(&self) -> Result<ExitCode> {
         let (mut store, project) = self.open()?;
         let src = self.ideas_source(&project)?;
+        if let Some(why) = src.foreign(&project.name) {
+            eprintln!("⚠ {why} `kontext scope sign` refuses from here.");
+        }
         let st = app::state(&mut store, &project)?;
         let ideas = src.check(&st, &project.name);
         let s = crate::scope::summary(&st, &project.name, &ideas);
@@ -2682,6 +2693,9 @@ impl Ctx<'_> {
     fn scope_sign(&self, args: crate::scope::SignArgs) -> Result<ExitCode> {
         let (store, project) = self.open()?;
         let src = self.ideas_source(&project)?;
+        if let Some(why) = src.foreign(&project.name) {
+            bail!("{why}");
+        }
         drop(store);
         let code = self.written("the scope signature", |s, a| {
             crate::scope::sign(s, a, &project.name, &src, &args)

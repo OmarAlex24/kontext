@@ -320,11 +320,18 @@ pub fn locate_for(repos: &Repos, project: &str, own_in_worktrees: bool) -> Optio
 /// finds nothing: where a `.pm/` counts, and how to make a repo the project's.
 pub fn not_found_text(project: &str) -> String {
     format!(
-        "No .pm/items.md found in a repo of {project} from here. A repo counts when its \
-         .kontext.toml names {project} (`kontext install` writes it; `kontext install \
-         --link-only` writes only that file), when projects.toml maps it for {project}, or when \
-         its remote is in [[repos]] of project.toml. Run it from that repo (where the planning \
-         chat runs)."
+        "No .pm/items.md found in a repo of {project} from here. {}",
+        where_it_counts(project)
+    )
+}
+
+/// Which repos' `.pm/` count for `project`, and how to make one count.
+pub fn where_it_counts(project: &str) -> String {
+    format!(
+        "A repo counts when its .kontext.toml names {project} (`kontext install` writes it; \
+         `kontext install --link-only` writes only that file), when projects.toml maps it for \
+         {project}, or when its remote is in [[repos]] of project.toml. Run it from that repo \
+         (where the planning chat runs)."
     )
 }
 
