@@ -412,7 +412,7 @@ In the code repo:
 - `.kontext.toml` with `project = "<name>"` and `default_role`.
 - Hooks in `.claude/settings.json`: `SessionStart` → `kontext hook session-start`; `PreCompact` and `SessionEnd` → `kontext hook distill`. They are merged without touching what is already there, and the diff is shown before writing (as `install-hooks` does today).
 - The skill `kontext` (`.claude/skills/kontext/SKILL.md`): when to read, when to write, how to escalate and how to close with evidence.
-- The agent files: `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md` (section 12).
+- The agent files: `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md` (section 12), plus `kontext-pm-reader.md` (§12.3) and `kontext-plan-checker.md` (§12.4).
 
 A hook never blocks the session: on any error it exits with 0 and logs it in `.kontext/hooks.log`.
 
@@ -639,6 +639,7 @@ A project spans the repos in `[[repos]]`. Fact fingerprints store the repo name,
 | Coordinator | Subagent or delegated thread | `brief epic:x` | Tasks, assignments, journal, questions to the PM |
 | Implementer or tester | Subagent | `next epic:x` in its assignment | Journal of its task, questions to the coordinator, `done` with evidence |
 | Scout | Subagent with a small model, read-only | Only the question | Facts with a fingerprint, and a short report for whoever launched it |
+| Plan checker | Subagent with its own model (`opus`), once per plan, before the signature | `scope summary`, `plan`, `tree`, the code's layout | An epic's paths, dependencies and parallel records (each with its why), and a short report for the PM (§12.4) |
 
 The agent files that `kontext install` writes carry these rules, briefly:
 - Before starting, read your view. Don't read the full history.
@@ -646,7 +647,7 @@ The agent files that `kontext install` writes carry these rules, briefly:
 - Don't close without evidence. If `done` rejects it for stale context, read what's new before retrying.
 - Don't decide: propose.
 
-The model for each role is not fixed in kontext. The agent file or whoever launches it chooses it. The one exception is the reader of the PM's memory, which a benchmark chose (§12.3).
+The model for each role is not fixed in kontext. The agent file or whoever launches it chooses it. The two exceptions are the reader of the PM's memory, which a benchmark chose (§12.3), and the plan checker (§12.4).
 
 > **Implemented in phase 3:** the agent files don't carry a `model` (a comment in the body says so). The scout has `tools: Read, Grep, Glob, Bash`; the implementer and the tester also have `Edit` and `Write`; the coordinator has no `tools` so it inherits all of them, because it needs to launch subagents. If it can't launch them from where it runs, it returns the assignments to whoever launched it. The coordinator claims each task on behalf of its implementer (`kontext --actor agent:impl-1 --role implementer next --epic x --claim`) and pastes the output into its assignment.
 
@@ -721,6 +722,10 @@ The ledger keeps the work once it is a charter, a decision or a task. Before tha
 ### 12.4 From the planning chat to the PM chat: `kontext handoff`
 
 The plan is made in one conversation (a strong model, with the user, for hours) and run by another (a cheaper model). A summary of the first chat loses what it does not think to say: a feature's why, a dependency nobody wrote, a remark the user made once. So the new PM starts from the ledger, and the hand-off waits until nothing that counts is only in the planning chat.
+
+> **Implemented: the plan checker (`templates/agents/kontext-plan-checker.md`).** The planning chat launches it right before the signature (`kontext-orchestrate`, phase 0). It writes as `--actor agent:plan-checker --role pm`, and only the records a plan is checked with (§4.3, "Planning checks"): each epic's paths (`epic touches`), the dependencies nobody wrote (`epic after`) and, for each pair of same-wave epics on the same paths, either a dependency or a `parallel` record with why the work does not collide; it leaves no ⚠ in `kontext plan`. All of them carry a why and show in the summary the owner signs, so what the checker added is signed with the rest. A feature's why and the user's ideas are the user's: it reports features without a why and ideas not placed to the PM and invents neither. It never reads `.pm/dumps/`, never adds features, epics, goals, tasks or decisions, and never signs. `model: opus`: it runs once per plan and what it misses (two epics on the same files in parallel sandboxes) costs a wave; the PM chat that runs the plan takes whatever model the user picks. `kontext install` writes it with the other agent files and `templates/agent-versions.txt` lists its hash.
+>
+> **The PM's side.** `kontext-orchestrate` phase 0 now reads: map, mockup, check (the checker, then the features' whys and the coverage audit), sign, hand off. `kontext-pm` section 11, "Starting after a handoff", is what the new chat follows: take over the capture, read `resume --as pm` and `tree`, run the waves from wave 1 under section 10, and settle a later ⚠ itself.
 
 > **Implemented: `kontext handoff` (`src/handoff.rs`).** Read-only.
 > - **It refuses** (exit 2, `kontext: refused:` and one line per reason, all at once) until three things hold: the plan is signed (a `scope` entry counts, §4.3); "Not placed" is 0 (`kontext ideas`); no message of the user's is unaudited (`kontext ideas --mark-audited`, then the reader, §12.3). Each line names the command that fixes it: the not-placed reason names `feature add`, `task add` and `decide` and the row's `where` cell; under `require_signatures` the unsigned reason says the signature needs the owner's SSH key, names this machine's `[signing] key` (or `~/.ssh/id_ed25519.pub` with `--sign`) and prints `kontext --sign scope sign --hash <hash> --approved-by <owner> --said …`, since a plain `scope sign` is refused there without a key. Not finding `.pm/items.md` in a repo of the project from where it runs is a reason too. **A `.pm/` counts only in a repo of the project** (`ideas::locate_for`, also for `scope summary` and `scope sign`): the repo it runs in, when its own `.kontext.toml` names the project (a linked worktree without one, the main checkout's), `projects.toml` maps it, or its remote is in `[[repos]]`; then the project's repos tied the same way. Never one matched by folder name alone, and never one whose `.kontext.toml` names another project. From another git folder (one with an empty `items.md`, say) the reason says where a `.pm/` counts and how to link the repo (`kontext install --link-only`). When the folder it runs in has a `.pm/items.md` that does not count, `scope sign` refuses with the same text and `scope summary` says so on stderr (out of the signed text): signing "Ideas not checked" there would pass over ideas it can see. A folder with no `.pm/` at all still signs "Ideas not checked". Nothing about it is stored: the ledger syncs to machines where no such path exists. A scope change waiting for the owner does not hold it; it is a note, and the new PM shows it to the owner. `--json` prints `{ready, missing, signed, notes, prompt, capture_enabled, named}` and exits 2 when not ready.

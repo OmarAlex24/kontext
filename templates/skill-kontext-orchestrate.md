@@ -72,7 +72,11 @@ kontext decide "The screens follow the approved mockup" --epic <epic> \
 
 The coordinators build against that reference (it appears in "How it looks" in the report), and each worker closes with a screenshot of the same screen (`--evidence screenshot.png --screen <screen>`), so the human sees the before and after.
 
+**Check the plan before the signature.** Once the map is complete, launch the `kontext-plan-checker` agent (installed by `kontext install`; it runs on its own model) in the repo that has `.pm/`, with a one-line brief: "Check the plan of <project> before the signature." It records in kontext each epic's paths, the dependencies nobody wrote and how each pair of same-wave epics on the same paths is settled, each with its why (the summary shows them), and hands back the features without a why and the ideas not placed. Give each feature its why (`kontext feature add` again with `--why`, then `kontext supersede <old> <new> --why "adds the why"`), place the ideas or ask the user about them, then run the coverage audit (`kontext-pm` skill, section 5) and place what it finds. `kontext plan` shows no ⚠ before you go on.
+
 **Sign the plan: phase 0 ends here.** Show the user `kontext scope summary` verbatim, run from the repo that has `.pm/` (elsewhere it says "Ideas not checked", and a signature run from another folder than the summary is refused): the charter, the goals, each wave with its epics, features and acceptance, and the ideas not placed (a plan with any is refused: place or discard them first). On their yes ("sí" is enough), sign it with the hash it ends with: `kontext scope sign --hash <hash> --approved-by <owner> --said "<their words>"`. From then on you decide alone inside it (section 10 of the `kontext-pm` skill), and a change of features, epics, goals or the charter is a scope change they sign the same way; its new work is not handed out until they do. Launch no wave before the plan is signed.
+
+**Hand off, if another chat runs the plan.** Run `kontext handoff` from the same repo. It refuses, saying what is missing, until the plan is signed, nothing is "Not placed" and every message of the user's is audited; then it prints the first message for the new PM chat. Give it to the user as printed: the new chat starts from the ledger (`kontext resume --as pm`, `kontext tree`), never from a summary of this one, and takes over the capture. The model of that chat is the user's choice.
 
 - **Wave 1:** the foundations epic, in series (one coordinator).
 - **Middle waves:** the independent epics in parallel, one coordinator each (what `kontext plan` puts in the same wave).
@@ -82,7 +86,7 @@ The coordinators build against that reference (it appears in "How it looks" in t
 
 **At every wave boundary:** `kontext plan` (what closed and what comes next) and `kontext tree`, the report with the `kontext-show` skill (status paragraph, what is waiting for them, problems, and screenshots), their answers to what you bundled (`kontext inbox`, `kontext answer`, signed decisions), and their go-ahead for the next wave.
 
-In XL there is no phase 0 if the charter is already signed: start from the epic map.
+In XL there is no phase 0 if the charter is already signed: start from the epic map (the check, the signature and the hand-off still apply).
 
 ## 4. Translation by harness
 

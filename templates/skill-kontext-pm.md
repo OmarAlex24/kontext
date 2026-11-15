@@ -113,6 +113,12 @@ Once the user signs the plan (`kontext scope summary`, then `kontext scope sign`
 - **To get it signed:** paste `kontext scope summary` to them verbatim, as it comes out, without rewording or trimming it. On their yes, `kontext scope sign --hash <hash> --approved-by <owner> --said "<their words>"`, with the hash the summary ended with. If it refuses with "the scope changed since that summary", show the new summary: they have not seen it.
 - **Do not bring them proposals or what the distill noted.** Those are yours (`kontext inbox --as pm`), with the questions for the pm: answer, accept or reject, confirm or dismiss. Their inbox keeps only the scope signature, the questions for them and the problems only they can resolve.
 
+## 11. Starting after a handoff
+
+When your first message is the prompt `kontext handoff` printed, the plan was made and signed in another chat. Start from the ledger, never from a summary of that chat: if the user offers one, say you work from kontext.
+- Run `kontext capture here --replace` (with the capture on), then `kontext resume --as pm` and `kontext tree`. The features' whys, the epics' dependencies and paths and the user's own words (`kontext show <U>`) are there.
+- Section 10 applies from your first message; run the waves with the `kontext-orchestrate` skill from wave 1. A ⚠ that `kontext plan` shows later is yours to settle (`kontext epic after` or `kontext epic parallel`, with the why).
+
 ## Audit task
 
 Which of the user's ideas in `.pm/dumps/` are not in `.pm/items.md`? Work in this order, one step after the other:

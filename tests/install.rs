@@ -161,6 +161,11 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "Do not do bulk reading or long shell work there",
         "ask for a short hand-back",
         "about five lines at most",
+        "**Check the plan before the signature.**",
+        "`kontext-plan-checker`",
+        "**Hand off, if another chat runs the plan.**",
+        "`kontext handoff`",
+        "never from a summary of this one",
     ] {
         assert!(orq.contains(needed), "missing {needed:?}");
     }
@@ -203,6 +208,9 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "Bulk reading and long shell work go to a subagent",
         "good moment to compact",
         "Once per closed phase",
+        "## 11. Starting after a handoff",
+        "kontext capture here --replace",
+        "never from a summary of that chat",
     ] {
         assert!(pm.contains(needed), "missing {needed:?}");
     }
@@ -395,6 +403,33 @@ fn installs_agent_files_and_keeps_edited_ones() {
     assert!(!front.contains("effort"), "{front}");
     assert!(reader.contains("**Coordinator asked:**"), "{reader}");
     assert!(reader.lines().count() <= 60);
+    // The plan's check before the signature (DESIGN §12.4): its own model,
+    // it writes as the pm and only the records a plan can be checked with.
+    let checker = fs::read_to_string(agents.join("kontext-plan-checker.md")).unwrap();
+    assert!(
+        checker.starts_with("---\nname: kontext-plan-checker\ndescription: "),
+        "{checker}"
+    );
+    let front = checker.split("---").nth(1).unwrap();
+    assert!(front.contains("\nmodel: opus\n"), "{front}");
+    assert!(
+        front.contains("\ntools: Read, Grep, Glob, Bash\n"),
+        "{front}"
+    );
+    assert!(!front.contains("effort"), "{front}");
+    for needed in [
+        "kontext --actor agent:plan-checker --role pm",
+        "kontext epic touches",
+        "kontext epic after",
+        "kontext epic parallel",
+        "Leave no ⚠",
+        "do not invent one",
+        "Never read `.pm/dumps/`",
+        "no `scope sign`",
+    ] {
+        assert!(checker.contains(needed), "checker: missing {needed:?}");
+    }
+    assert!(checker.lines().count() <= 60);
     let coord = fs::read_to_string(agents.join("kontext-coordinator.md")).unwrap();
     assert!(coord.contains("next --epic <name> --claim"), "{coord}");
     assert!(

@@ -30,10 +30,11 @@
 //!   `~/.claude/skills/` ([`plan_skills`]).
 //! - The agent files `.claude/agents/kontext-*.md` (from `templates/agents/`),
 //!   among them `kontext-pm-reader.md`, the reader the `kontext-pm` skill
-//!   launches. One that matches, byte for byte, an earlier released version
-//!   of its template ([`AGENT_VERSIONS`]) is replaced. One with any other
-//!   content was changed by hand: it is kept and a warning is shown;
-//!   `--force` replaces it.
+//!   launches, and `kontext-plan-checker.md`, the plan's check before the
+//!   signature (the `kontext-orchestrate` skill). One that matches, byte for
+//!   byte, an earlier released version of its template ([`AGENT_VERSIONS`])
+//!   is replaced. One with any other content was changed by hand: it is kept
+//!   and a warning is shown; `--force` replaces it.
 //! - The `Bash(kontext:*)` permission in `permissions.allow` of the same
 //!   settings file as the hooks, if it is missing.
 //! - The repo in `[[repos]]` of `project.toml`, if it is missing: named after
@@ -105,6 +106,10 @@ pub const AGENTS: &[(&str, &str)] = &[
     (
         "kontext-pm-reader.md",
         include_str!("../templates/agents/kontext-pm-reader.md"),
+    ),
+    (
+        "kontext-plan-checker.md",
+        include_str!("../templates/agents/kontext-plan-checker.md"),
     ),
 ];
 

@@ -260,7 +260,15 @@ An epic can have **features** (`U-…`): what you would see working ("Refunds"),
 
 ### Agent files
 
-`kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. It also writes `kontext-pm-reader.md`, the reader of the PM's memory (below, "The PM's memory of your ideas"), the one that sets its model: `haiku`. One left as an older kontext version wrote it is replaced. If one was changed by hand (its content matches no kontext version), it is kept and you are warned; `kontext install --force` replaces it. `kontext doctor` says which is which.
+`kontext install` also writes `.claude/agents/kontext-coordinator.md`, `kontext-implementer.md`, `kontext-tester.md` and `kontext-scout.md`. They don't set a model: whoever launches them chooses one. It also writes `kontext-pm-reader.md`, the reader of the PM's memory (below, "The PM's memory of your ideas"), the one that sets its model: `haiku`, and `kontext-plan-checker.md`, which checks a plan before you sign it and sets `opus` (below, "Planning in one chat, running in another"). One left as an older kontext version wrote it is replaced. If one was changed by hand (its content matches no kontext version), it is kept and you are warned; `kontext install --force` replaces it. `kontext doctor` says which is which.
+
+### Planning in one chat, running in another
+
+You can make the plan with one conversation (a strong model, with you) and run it with another (often a cheaper one). The new chat starts from kontext, never from a summary of the first, so the first one makes sure nothing that counts lives only in it:
+
+1. When the map of epics and features is complete, the planning chat launches `kontext-plan-checker`. It records in kontext the paths each epic touches, the dependencies nobody wrote and, for epics of one wave that touch the same paths, either a dependency or why they may run at once, each with its why. It tells the PM which features have no why and which of your ideas are not placed; the PM fixes those with you.
+2. The PM runs the coverage audit, shows you `kontext scope summary` (what the checker added is in it, with its why) and signs it on your yes.
+3. `kontext handoff` refuses until the plan is signed, none of your ideas is "Not placed" and every message of yours was audited, and says what is missing. Then it prints the first message for the new chat: paste it there. With the capture on, the new chat's first command, `kontext capture here --replace`, makes it the one whose messages are saved, and the planning chat's stop being saved.
 
 The skills and agent files also keep the conversation you talk to small, since every request re-reads it: bulk reading goes to a subagent, delegated agents hand back about five lines and put the detail in kontext, long output is trimmed, and at the end of a phase the PM tells you it is a good moment to `/compact`. These are instructions, not yet measured ([DESIGN.md §9.6](./DESIGN.md)).
 
