@@ -1,0 +1,14 @@
+# Arm `mem0`: the Claude Code plugin from mem0's marketplace, pinned to a commit.
+# The API key is never given to `plugin install --config` (that would store it
+# in the container's files); the plugin reads MEM0_API_KEY from the environment
+# first (core/memory_core.py api_key(), from source), which the runner passes
+# by name at `docker run`.
+ARG BASE
+FROM ${BASE}
+ARG MEM0_REF
+ENV MEM0_TELEMETRY=false
+RUN claude plugin marketplace add "https://github.com/mem0ai/mem0.git#${MEM0_REF}" \
+      --sparse .claude-plugin integrations \
+ && claude plugin install mem0@mem0-plugins --scope user \
+ && claude plugin list 2>&1 | tee /home/bench/.mem0-plugin
+LABEL org.kontext.bench.arm=mem0 org.kontext.bench.mem0-ref="${MEM0_REF}"

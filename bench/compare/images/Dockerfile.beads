@@ -1,0 +1,20 @@
+# Arm `beads`: bd from npm at a pinned version, and Dolt at the version Beads
+# pins in its docs at that tag (docs/architecture/dolt.md: 2.2.0 for v1.3.4).
+# `bd init` (which writes the Claude Code integration) runs per run.
+ARG BASE
+FROM ${BASE}
+ARG BEADS_VERSION
+ARG DOLT_VERSION
+USER root
+RUN npm install -g "@beads/bd@${BEADS_VERSION}" && npm cache clean --force \
+ && arch=$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/') \
+ && curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-${arch}.tar.gz" | tar -xz -C /tmp \
+ && install -m 0755 "/tmp/dolt-linux-${arch}/bin/dolt" /usr/local/bin/dolt && rm -rf /tmp/dolt-linux-*
+# npm ran as root with HOME=/home/bench: give the folder back to bench.
+RUN chown -R bench:bench /home/bench
+USER bench
+# Beads' anonymous usage metrics off, with its own documented switch (like
+# MEM0_TELEMETRY, OPENSPEC_TELEMETRY and `gentle-ai telemetry disable`).
+RUN bd version && dolt version && bd metrics off \
+ && dolt config --global --add user.name bench && dolt config --global --add user.email bench@example.invalid
+LABEL org.kontext.bench.arm=beads org.kontext.bench.beads="${BEADS_VERSION}" org.kontext.bench.dolt="${DOLT_VERSION}"

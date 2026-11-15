@@ -1,0 +1,4 @@
+Bash(kontext:*)
+Bash(KONTEXT_* kontext *)
+Bash(export KONTEXT_*)
+Bash(timeout * kontext *)

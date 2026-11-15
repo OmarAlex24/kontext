@@ -1,0 +1,10 @@
+# The verification container: Python 3.11 and tzdata, nothing else. It never
+# has network, and gets the final repo and the hidden checks by `docker cp`
+# after the agent's containers are gone.
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends python3 tzdata \
+ && rm -rf /var/lib/apt/lists/* && useradd --create-home --uid 1001 verify
+USER verify
+WORKDIR /home/verify
+LABEL org.kontext.bench.role=verify

@@ -1,0 +1,13 @@
+{
+  "commit": "590302f298679d41835a8914d8818710b441b5d2",
+  "digest": "c5f2090832d5bf74b8644e1995a537906f357074358127b6f4766c74cb1b95c3",
+  "paths": [
+    "compare/scenarios",
+    "compare/ANALYSIS.md",
+    "compare/complib/interventions.py",
+    "compare/complib/analysis.py",
+    "benchlib/fill.py"
+  ],
+  "files": 54,
+  "note": "Fixtures, scripted turns, hidden checks, the fixed-reply rule and the analysis rules, frozen before any model call."
+}

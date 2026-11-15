@@ -1,0 +1,13 @@
+# Arm `openspec`: the npm package at a pinned version. `openspec init --tools
+# claude` runs per run, in the repo.
+ARG BASE
+FROM ${BASE}
+ARG OPENSPEC_VERSION
+USER root
+RUN npm install -g "@fission-ai/openspec@${OPENSPEC_VERSION}" && npm cache clean --force
+# npm ran as root with HOME=/home/bench: give the folder back to bench.
+RUN chown -R bench:bench /home/bench
+USER bench
+ENV OPENSPEC_TELEMETRY=0
+RUN openspec --version
+LABEL org.kontext.bench.arm=openspec org.kontext.bench.openspec="${OPENSPEC_VERSION}"

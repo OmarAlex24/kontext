@@ -1,0 +1,15 @@
+Read
+Edit
+Write
+Glob
+Grep
+Bash(python3:*)
+Bash(git:*)
+Bash(ls:*)
+Bash(cat:*)
+Bash(grep:*)
+Bash(head:*)
+Bash(tail:*)
+Bash(sed -n:*)
+Bash(wc:*)
+Bash(echo:*)
