@@ -585,6 +585,10 @@ The harness in `bench/compare/` follows the text above, except where building it
     - gentle-ai's installer edits the shell rc;
     - on Debian, a new login shell already puts `~/.local/bin` on PATH (`~/.profile`), so the PATH steps for kontext, Beads and gentle-ai were not needed there.
 
+**After the pilot's first paid cells**
+
+17. **`python` exists in every image and is allowed.** The fixtures' READMEs say `python3 -m unittest …`, yet in the smoke and S1 pilot cells (2026-11-15, one run per arm) the model typed `python -m unittest …` in all six S1 cells and in five of the six smoke cells. The base image had no `python` and the allow-list only `Bash(python3:*)`, so those 20 calls were refused and the agents finished without running the tests. The base image now installs `python-is-python3` and `allowed_common.txt` has `Bash(python:*)`, for all arms alike. Neither file is in the frozen paths. The cells run before this change are discarded and S1 was run again.
+
 ## §8, settled now or still open
 
 Settled means it was checked here without a model call. Open means only the pilot can settle it.

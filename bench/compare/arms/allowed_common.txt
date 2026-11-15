@@ -4,6 +4,7 @@ Write
 Glob
 Grep
 Bash(python3:*)
+Bash(python:*)
 Bash(git:*)
 Bash(ls:*)
 Bash(cat:*)
