@@ -963,6 +963,32 @@ pub fn name(home: &Path, id: &str, dir: &Path) -> Result<(bool, Vec<Named>)> {
     })
 }
 
+/// Names a conversation for capture and forgets every other one, under one
+/// lock (`kontext capture here --replace`, the new chat after `kontext
+/// handoff`). Returns whether it was new, the ids forgotten and the list.
+pub fn name_only(home: &Path, id: &str, dir: &Path) -> Result<(bool, Vec<String>, Vec<Named>)> {
+    locked(home, || {
+        // A list that cannot be read is replaced, as `forget --all` clears it.
+        let list = named(home).unwrap_or_default();
+        let gone: Vec<String> = list
+            .iter()
+            .filter(|n| n.id != id)
+            .map(|n| n.id.clone())
+            .collect();
+        let kept = list.into_iter().find(|n| n.id == id);
+        let added = kept.is_none();
+        let me = kept.unwrap_or(Named {
+            id: id.to_string(),
+            at: jiff::Timestamp::from_millisecond(crate::tasks::now_ms())?.to_string(),
+            dir: dir.display().to_string(),
+        });
+        if added || !gone.is_empty() {
+            save_named(home, vec![me.clone()])?;
+        }
+        Ok((added, gone, vec![me]))
+    })
+}
+
 /// Forgets one named conversation (`Some(id)`), or all of them (`None`, which
 /// also clears a list that cannot be read). Returns the ids forgotten and the
 /// list left.

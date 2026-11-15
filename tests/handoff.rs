@@ -1,0 +1,351 @@
+//! `kontext handoff` (from the planning chat to a new PM chat) and
+//! `kontext capture here --replace` (the new chat takes over the capture).
+
+mod common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use common::{Project, git};
+use serde_json::Value;
+
+const PM: &[(&str, &str)] = &[("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")];
+const HEADER: &str =
+    "| id | idea | source | state | where | evidence |\n|---|---|---|---|---|---|\n";
+
+struct Setup {
+    p: Project,
+    repo: PathBuf,
+    feature: String,
+}
+
+/// A plan with one feature, and a repo with `.pm/`: P1 placed in the
+/// feature, P2 not placed, one message never audited.
+fn setup() -> Setup {
+    let p = Project::new();
+    p.kontext_env_ok(PM, &["charter", "--objective", "Sell online"]);
+    let goal = p.id_of(PM, &["goal", "add", "Take payments"]);
+    p.kontext_env_ok(
+        PM,
+        &["epic", "add", "Payments", "--goal", &goal, "--name", "pay"],
+    );
+    let feature = p.id_of(
+        PM,
+        &[
+            "feature",
+            "add",
+            "Refunds",
+            "--epic",
+            "pay",
+            "--acceptance",
+            "a refund shows in the order",
+            "--why",
+            "customers ask by email",
+        ],
+    );
+    p.kontext_env_ok(
+        PM,
+        &[
+            "task",
+            "add",
+            "Refund endpoint",
+            "--feature",
+            &feature,
+            "--acceptance",
+            "POST /refunds",
+        ],
+    );
+    let repo = p.dir.path().join("repo");
+    fs::create_dir_all(repo.join(".pm/dumps")).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(
+        repo.join(".pm/dumps/2026-11-12.md"),
+        "## 2026-11-12 10:00\n\n**User:**\n\nrefunds without email\n\nand a dark mode\n",
+    )
+    .unwrap();
+    let s = Setup { p, repo, feature };
+    s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | | | |\n");
+    s
+}
+
+impl Setup {
+    fn items(&self, extra: &str) {
+        fs::write(
+            self.repo.join(".pm/items.md"),
+            format!(
+                "# Ideas\n\n{HEADER}| P1 | refunds without email | dumps/2026-11-12.md:5 | pending | {} | |\n{extra}",
+                self.feature
+            ),
+        )
+        .unwrap();
+    }
+
+    fn run(&self, dir: &Path, args: &[&str]) -> (i32, String, String) {
+        let out = self.p.kontext_in(dir, PM, args);
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    }
+
+    fn handoff_json(&self) -> (i32, Value) {
+        let (code, out, err) = self.run(&self.repo, &["--json", "handoff"]);
+        let v = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}\n{err}"));
+        (code, v)
+    }
+
+    fn mark_audited(&self, now: &str) {
+        let out = self
+            .p
+            .cmd(&["ideas", "--mark-audited"])
+            .current_dir(&self.repo)
+            .env("KONTEXT_NOW", now)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn sign(&self) {
+        let v: Value = serde_json::from_str(&self.p.kontext_in_ok(
+            &self.repo,
+            PM,
+            &["--json", "scope", "summary"],
+        ))
+        .unwrap();
+        let h = v["hash"].as_str().unwrap().to_string();
+        self.p.kontext_in_ok(
+            &self.repo,
+            PM,
+            &[
+                "scope",
+                "sign",
+                "--hash",
+                &h,
+                "--approved-by",
+                "omar",
+                "--said",
+                "sí, adelante",
+            ],
+        );
+    }
+
+    fn ledger_len(&self) -> usize {
+        self.p.entries("omar@test").len()
+    }
+}
+
+/// Refuses, naming every condition that fails, until the plan is signed,
+/// nothing is "Not placed" and every message was audited; then prints the
+/// opening prompt. It never writes to the ledger.
+#[test]
+fn handoff_refuses_for_each_reason_then_prints_the_prompt() {
+    let s = setup();
+    let before = s.ledger_len();
+
+    // Nothing done: all three, at once.
+    let (code, _, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not ready to hand demo off"), "{err}");
+    assert!(err.contains("The plan is not signed"), "{err}");
+    assert!(
+        err.contains("1 idea of the user's is not placed: P2 \"and a dark mode\""),
+        "{err}"
+    );
+    assert!(
+        err.contains("1 message of the user's was not seen by any audit"),
+        "{err}"
+    );
+    let (code, v) = s.handoff_json();
+    assert_eq!(code, 2);
+    assert_eq!(v["ready"], false);
+    assert_eq!(v["missing"].as_array().unwrap().len(), 3);
+    assert!(v.get("prompt").is_none());
+
+    // From a folder without .pm/: that is a reason too.
+    let (code, _, err) = s.run(s.p.dir.path(), &["handoff"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("No .pm/items.md found from"), "{err}");
+
+    // Placed, audited and signed: ready.
+    s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | discarded | | not now |\n");
+    s.mark_audited("2026-11-12T11:00:00Z");
+    let (code, _, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("The plan is not signed"), "{err}");
+    assert!(!err.contains("not placed"), "{err}");
+    assert!(!err.contains("audit"), "{err}");
+    s.sign();
+    let signed = s.ledger_len();
+    let (code, out, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.starts_with("Ready to hand demo off: the plan is signed (S-"),
+        "{out}"
+    );
+    assert!(out.contains("----- 8< -----"), "{out}");
+    assert!(out.contains("You are the PM of the project demo"), "{out}");
+    assert!(
+        out.contains("Do not ask for a summary of that chat"),
+        "{out}"
+    );
+    assert!(
+        out.contains("`kontext resume --as pm`, then `kontext tree`"),
+        "{out}"
+    );
+    assert!(out.contains("\"Starting after a handoff\""), "{out}");
+    // Capture is off in this project: the prompt says so, no --replace.
+    assert!(out.contains("Capture is off in this project"), "{out}");
+    assert!(!out.contains("--replace"), "{out}");
+    let (code, v) = s.handoff_json();
+    assert_eq!(code, 0);
+    assert_eq!(v["ready"], true);
+    assert!(v["signed"].as_str().unwrap().starts_with("S-"));
+    assert!(v["prompt"].as_str().unwrap().contains("kontext tree"));
+
+    // Each reason alone holds it again: a new idea not placed…
+    s.items(
+        "| P2 | dark mode | dumps/2026-11-12.md:7 | discarded | | not now |\n\
+         | P3 | export | dumps/2026-11-12.md:5 | | | |\n",
+    );
+    let (code, v) = s.handoff_json();
+    assert_eq!(code, 2);
+    let missing: Vec<&str> = v["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert!(missing[0].contains("not placed: P3"), "{missing:?}");
+    s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | discarded | | not now |\n");
+    // …and a message after the last audit.
+    fs::write(
+        s.repo.join(".pm/dumps/2026-11-13.md"),
+        "## 2026-11-13 09:00\n\n**User:**\n\nalso invoices\n",
+    )
+    .unwrap();
+    let (code, _, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("1 message of the user's was not seen since the audit of Nov 12"),
+        "{err}"
+    );
+    assert!(!err.contains("not signed"), "{err}");
+    s.mark_audited("2026-11-13T10:00:00Z");
+    let (code, _, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 0, "{err}");
+
+    // Read-only: only the signature was written.
+    assert_eq!(s.ledger_len(), signed);
+    assert_eq!(signed, before + 1);
+}
+
+/// A scope change waiting for the owner does not hold the hand-off: it is a
+/// note for the new PM.
+#[test]
+fn a_pending_scope_change_is_a_note_not_a_refusal() {
+    let s = setup();
+    s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | discarded | | not now |\n");
+    s.mark_audited("2026-11-12T11:00:00Z");
+    s.sign();
+    s.p.kontext_env_ok(
+        PM,
+        &[
+            "feature",
+            "add",
+            "Invoices",
+            "--epic",
+            "pay",
+            "--acceptance",
+            "a PDF per order",
+        ],
+    );
+    let (code, out, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("Note: Scope change waiting for the owner's signature"),
+        "{out}"
+    );
+}
+
+/// With capture on, the prompt tells the new chat to take it over, and
+/// `capture here --replace` leaves it the only conversation captured.
+#[test]
+fn capture_here_replace_leaves_only_the_new_chat() {
+    let s = setup();
+    s.p.add_repo_toml("[capture]\nenabled = true\n");
+    s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | discarded | | not now |\n");
+    s.mark_audited("2026-11-12T11:00:00Z");
+    s.sign();
+    s.p.kontext_in_ok(&s.repo, PM, &["capture", "here", "--session", "plan-1"]);
+    s.p.kontext_in_ok(&s.repo, PM, &["capture", "here", "--session", "plan-2"]);
+
+    let (code, out, err) = s.run(&s.repo, &["handoff"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("1. Run `kontext capture here --replace`"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Named for capture on this machine now: plan-1, plan-2"),
+        "{out}"
+    );
+    assert!(out.contains("`kontext capture forget --all` here"), "{out}");
+    let (_, v) = s.handoff_json();
+    assert_eq!(v["named"].as_array().unwrap().len(), 2);
+
+    let out = s.p.kontext_in_ok(
+        &s.repo,
+        PM,
+        &["capture", "here", "--session", "pm-new", "--replace"],
+    );
+    assert!(
+        out.contains("Named conversation pm-new (from --session) for the capture."),
+        "{out}"
+    );
+    assert!(
+        out.contains("Forgot 2 other named conversations (plan-1, plan-2)"),
+        "{out}"
+    );
+    let v: Value =
+        serde_json::from_str(&s.p.kontext_in_ok(&s.repo, PM, &["--json", "capture", "list"]))
+            .unwrap();
+    let named: Vec<&str> = v["named"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(named, vec!["pm-new"]);
+
+    // Again: nothing else to forget, it stays named.
+    let v: Value = serde_json::from_str(&s.p.kontext_in_ok(
+        &s.repo,
+        PM,
+        &[
+            "--json",
+            "capture",
+            "here",
+            "--session",
+            "pm-new",
+            "--replace",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(v["added"], false);
+    assert_eq!(v["forgotten"].as_array().unwrap().len(), 0);
+    assert_eq!(v["named"].as_array().unwrap().len(), 1);
+    // Without --replace the output has no "forgotten" key, as before.
+    let v: Value = serde_json::from_str(&s.p.kontext_in_ok(
+        &s.repo,
+        PM,
+        &["--json", "capture", "here", "--session", "pm-2"],
+    ))
+    .unwrap();
+    assert!(v.get("forgotten").is_none());
+}

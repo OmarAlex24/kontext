@@ -17,6 +17,7 @@ pub mod facts;
 pub mod features;
 pub mod find;
 pub mod git;
+pub mod handoff;
 pub mod hlc;
 pub mod hook;
 pub mod http;

@@ -302,6 +302,10 @@ pub enum CaptureCmd {
         /// The conversation's session id, outside Claude Code (default: $CLAUDE_CODE_SESSION_ID)
         #[arg(long, value_name = "ID")]
         session: Option<String>,
+        /// Also forgets every other named conversation: this one becomes the only one captured
+        /// (the new PM chat after `kontext handoff`)
+        #[arg(long)]
+        replace: bool,
     },
     /// The conversations named for capture on this machine
     List,
@@ -590,6 +594,10 @@ pub enum Cmd {
     /// The whole project on one screen: waves, epics, their features and the ideas not placed.
     /// Doesn't write anything
     Tree,
+    /// From the planning chat to a new PM chat: refuses (exit 2) until the plan is signed, no idea
+    /// is "Not placed" and no message of the user's is unaudited; then prints the new chat's
+    /// opening prompt. Doesn't write anything
+    Handoff,
     /// The coordinator's view of an epic, with its assignment mark. Advances the epic:<name> cursor
     Brief {
         /// Epic: E-…, epic:<name> or <name>
@@ -988,7 +996,7 @@ fn capture_cmd(project: Option<&str>, json_out: bool, cmd: CaptureCmd) -> Result
         "current": current,
     });
     let list = match cmd {
-        CaptureCmd::Here { session } => {
+        CaptureCmd::Here { session, replace } => {
             let (id, source) = match session.map(|s| s.trim().to_string()) {
                 Some(s) if !s.is_empty() => (s, "--session"),
                 Some(_) => bail!("--session needs a session id"),
@@ -1003,12 +1011,28 @@ fn capture_cmd(project: Option<&str>, json_out: bool, cmd: CaptureCmd) -> Result
                     ),
                 },
             };
-            let (added, list) = capture::name(&p.home, &id, &cwd)?;
+            let (added, gone, list) = if replace {
+                capture::name_only(&p.home, &id, &cwd)?
+            } else {
+                let (added, list) = capture::name(&p.home, &id, &cwd)?;
+                (added, Vec::new(), list)
+            };
             lines.push(if added {
                 format!("Named conversation {id} (from {source}) for the capture.")
             } else {
                 format!("Conversation {id} (from {source}) was already named.")
             });
+            if replace {
+                lines.push(match gone.len() {
+                    0 => "No other conversation was named.".to_string(),
+                    1 => format!("Forgot {}: it is no longer captured.", gone[0]),
+                    n => format!(
+                        "Forgot {n} other named conversations ({}): they are no longer captured.",
+                        gone.join(", ")
+                    ),
+                });
+                out["forgotten"] = json!(gone);
+            }
             let why = capture_blocked_here(&cwd, &settings);
             for w in &why {
                 lines.push(format!("Nothing is captured from it here yet: {w}."));
@@ -1458,6 +1482,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             peek,
         } => cx.brief(&epic, max_chars, peek),
         Cmd::Tree => cx.tree(),
+        Cmd::Handoff => cx.handoff(),
         Cmd::Plan => {
             let (mut store, _) = cx.open()?;
             let st = store.state()?;
@@ -2660,6 +2685,31 @@ impl Ctx<'_> {
             crate::scope::sign(s, a, &project.name, &src, &args)
         })?;
         Ok(code)
+    }
+
+    /// `kontext handoff`: read-only.
+    fn handoff(&self) -> Result<ExitCode> {
+        let (mut store, project) = self.open()?;
+        let src = self.ideas_source(&project)?;
+        let st = app::state(&mut store, &project)?;
+        let ideas = src.check(&st, &project.name);
+        let settings = crate::capture::Settings::of(&project);
+        let home = config::resolve_project(self.project)?.home;
+        let named = crate::capture::named(&home).unwrap_or_default();
+        let h = crate::handoff::check(&st, &project.name, &ideas, settings.enabled, named);
+        if self.json {
+            print_json(&h)?;
+            return Ok(if h.ready {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            });
+        }
+        if !h.ready {
+            return Err(Refused(h.missing_text()).into());
+        }
+        print!("{}", h.text());
+        Ok(ExitCode::SUCCESS)
     }
 
     fn tree(&self) -> Result<ExitCode> {
