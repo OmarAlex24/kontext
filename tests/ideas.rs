@@ -620,7 +620,7 @@ fn a_second_audit_after_a_new_message_marks_only_the_new_one() {
     let old = reader_result(&repo.join(".pm"));
     let err = mark_refused(&p, &repo, &old);
     assert!(
-        err.contains("covers no message that is not audited yet, so nothing was marked: every message it lists (4) was audited already"),
+        err.contains("covers no message that is not audited yet, so nothing was marked: every message it lists (4) was audited already. Every message in the dumps is audited already: there is nothing to mark."),
         "{err}"
     );
 
@@ -638,10 +638,14 @@ fn a_second_audit_after_a_new_message_marks_only_the_new_one() {
     assert!(
         ideas_in(&p, &repo, &["ideas"]).contains("2 of your messages not audited since Nov 10."),
     );
-    // The stale result still covers nothing new.
+    // The stale result still covers nothing new, and now there is something to audit.
     let err = mark_refused(&p, &repo, &old);
     assert!(
         err.contains("covers no message that is not audited yet"),
+        "{err}"
+    );
+    assert!(
+        err.contains("2 not audited yet: launch kontext-pm-reader again"),
         "{err}"
     );
 

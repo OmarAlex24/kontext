@@ -1422,10 +1422,21 @@ pub fn mark_audited(pm: &Path, text: &str) -> Result<std::result::Result<AuditMa
                 read.len()
             )
         };
+        let pending: usize = headings
+            .iter()
+            .map(|(f, h)| h.len().saturating_sub(last.get(f).copied().unwrap_or(0)))
+            .sum();
+        let next = if pending == 0 {
+            "Every message in the dumps is audited already: there is nothing to mark.".to_string()
+        } else {
+            format!(
+                "{pending} not audited yet: launch kontext-pm-reader again with the Audit task \
+                 over the dumps as they are now."
+            )
+        };
         return Ok(Err(format!(
             "the reader's result covers no message that is not audited yet, so nothing was \
-             marked: {why}. Launch kontext-pm-reader again with the Audit task over the dumps as \
-             they are now."
+             marked: {why}. {next}"
         )));
     }
     let at = jiff::Timestamp::from_millisecond(crate::tasks::now_ms())?
