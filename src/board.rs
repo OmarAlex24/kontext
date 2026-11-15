@@ -928,8 +928,10 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
         );
         if theirs.len() > cap {
             l.push(format!(
-                "  - … {} more: `kontext show {task}`",
-                theirs.len() - cap
+                "  - … {} more: `kontext show {}`",
+                theirs.len() - cap,
+                // `show` lists them on the feature, not on the task.
+                features::counted_feature(st, t).unwrap_or(task)
             ));
         }
     }

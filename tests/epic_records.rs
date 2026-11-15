@@ -596,3 +596,34 @@ fn next_cuts_a_long_why() {
     let summary = pm_ok(&p, &["scope", "summary"]);
     assert!(summary.contains(long.trim()), "the summary prints it whole");
 }
+
+/// Past three quotes, `next` points at the feature, whose `show` lists them all.
+#[test]
+fn next_points_at_the_feature_for_the_other_quotes() {
+    let t = planned();
+    let p = &t.p;
+    pm_ok(
+        p,
+        &[
+            "task",
+            "add",
+            "Refund endpoint",
+            "--feature",
+            &t.refunds,
+            "--acceptance",
+            "POST /refunds",
+        ],
+    );
+    let quotes = ["first quote", "second quote", "third quote", "fourth quote"];
+    let repo = pm_with_quotes(p, &quotes, &t.refunds);
+    let next = p.kontext_in_ok(
+        &repo,
+        IMPL,
+        &["next", "--epic", "pay", "--max-chars", "1200"],
+    );
+    let hint = format!("… 1 more: `kontext show {}`", t.refunds);
+    assert!(next.contains(&hint), "{next}");
+    assert!(!next.contains("fourth quote"), "{next}");
+    let show = p.kontext_in_ok(&repo, PM, &["show", &t.refunds]);
+    assert!(show.contains("\"fourth quote\" (P4, Nov 12)"), "{show}");
+}
