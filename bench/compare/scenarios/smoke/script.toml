@@ -1,0 +1,39 @@
+# Smoke (design §5.3, stage 0): install in its container, hooks fire under
+# `claude -p`, something said in session 1 is recalled in session 2 (same
+# machine, new chat) and in session 3 (machine B). Graded by keywords; no
+# hidden tests. Frozen.
+name = "smoke"
+task = "smoke"
+description = "Write something in session 1, recall it in a new chat and on machine B."
+
+[acceptance]
+modules = []
+snapshots = "final"
+
+[[days]]
+day = 1
+machine = "A"
+
+[[days.turns]]
+kind = "work"
+text = "Please add a function `farewell(name)` to greet.py that returns \"Goodbye, <name>\", with a test. Also, for later: this project's release codename is Blue Heron, and releases always go out on a Thursday."
+
+[[days]]
+day = 2
+machine = "A"
+
+[[days.turns]]
+kind = "probe"
+id = "smoke-same-machine"
+text = "Quick question about this project, no code needed: what is the release codename, and on which weekday do releases go out?"
+expected = ["heron", "thursday|thursdays"]
+
+[[days]]
+day = 3
+machine = "B"
+
+[[days.turns]]
+kind = "probe"
+id = "smoke-other-machine"
+text = "Quick question about this project, no code needed: what is the release codename, and on which weekday do releases go out?"
+expected = ["heron", "thursday|thursdays"]

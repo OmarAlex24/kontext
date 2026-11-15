@@ -1,0 +1,21 @@
+# Arm `gentle-ai`: its install.sh (stable channel), then the non-interactive
+# install for Claude Code with the default preset (full-gentleman: the TUI's
+# preselection and the CLI's default, internal/cli/validate.go). gentle-ai
+# acquires Engram itself. It writes ~/.claude and ~/.claude.json, which is
+# where Claude Code reads them because CLAUDE_CONFIG_DIR stays unset
+# (DESIGN.md, "Changes while building").
+ARG BASE
+FROM ${BASE}
+ARG GENTLE_AI_VERSION
+ENV GENTLE_AI_NO_SELF_UPDATE=1
+RUN curl -fsSL "https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/v${GENTLE_AI_VERSION}/scripts/install.sh" \
+      -o /tmp/gentle-install.sh \
+ && bash /tmp/gentle-install.sh </dev/null \
+ && rm /tmp/gentle-install.sh
+ENV PATH=/home/bench/.local/bin:/home/bench/go/bin:/usr/local/bin:/usr/bin:/bin
+RUN gentle-ai version 2>&1 | tee /home/bench/.gentle-ai-version \
+ && grep -q "${GENTLE_AI_VERSION}" /home/bench/.gentle-ai-version
+RUN gentle-ai install --agent claude-code --preset full-gentleman </dev/null 2>&1 | tail -40 \
+ && (gentle-ai telemetry disable || true) \
+ && (engram version || engram --version) 2>&1 | tee /home/bench/.engram-version
+LABEL org.kontext.bench.arm=gentle-ai org.kontext.bench.gentle-ai="${GENTLE_AI_VERSION}"

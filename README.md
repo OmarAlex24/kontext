@@ -576,6 +576,8 @@ python3 -m unittest discover bench/tests      # the harness tests
 
 **A real run spends tokens** (`run.py` asks for `--yes`). How to run it, what each column measures, and the drift formula, fixed before running: [bench/README.md](./bench/README.md).
 
+`bench/compare/` compares kontext with plain Claude Code, gentle-ai + Engram, the mem0 plugin, Beads and OpenSpec. Each machine runs in its own container, and a second machine joins on day 4. Not run yet: [bench/compare/README.md](./bench/compare/README.md).
+
 ## Working with other people
 
 Two ways to share a project: a **kontext server** (below: every command syncs on its own, sandboxes join with a token, the page updates live), or a **git remote** (`kontext sync` by hand). Either way the `kontext-home` on each machine is the working copy, and it keeps working offline.

@@ -195,6 +195,10 @@ The numbers of a dry run only prove that the harness works end to end (preparing
 - The `resume --as pm` view does not show facts (each coordinator sees them). If the distill saves a B fact as a fact and not as a proposal, the `kontext-inject` variant does not get it in the hook and the agent has to look for it (`kontext recall`). That is part of what is measured.
 - "Outside the charter" is calculated per file. A change outside the scope inside a file that does serve a goal is not noticed; the guards cover what matters of that kind.
 
+## Comparison benchmark
+
+`compare/` puts kontext and five other setups (plain, gentle-ai + Engram, mem0, Beads, OpenSpec) on the same tasks. Each machine is its own container, and the hidden checks run in a container with no network. It reuses `fill.py`, `fake_agent.py`, the `distill_cmd.py` wrapper and the session-delta cost accounting of `runner.py`. See [compare/README.md](./compare/README.md) and [compare/DESIGN.md](./compare/DESIGN.md).
+
 ## Reader benchmark
 
 It measures whether a cheaper model can read a project's memory folder for an Opus coordinator, and at what cost. The folder is `.pm/`: `dumps/*.md` (the user's brain-dumps, verbatim and never edited, with material they pasted from elsewhere), `items.md` (the numbered list of ideas with their state: pending, in progress, done or discarded) and `status.md` (a short "where we are"). Every configuration gets byte-identical `.pm/` folders and the same two reading tasks.

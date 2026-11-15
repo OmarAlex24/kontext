@@ -1,0 +1,10 @@
+# Arm `kontext`: the released v0.2.0 binary from its own install.sh, at the tag.
+# `kontext init --server` and `kontext install` run per run (arms/kontext/setup.sh).
+ARG BASE
+FROM ${BASE}
+ARG KONTEXT_VERSION
+RUN curl -fsSL "https://raw.githubusercontent.com/OmarAlex24/kontext/${KONTEXT_VERSION}/install.sh" \
+      | KONTEXT_VERSION="${KONTEXT_VERSION}" sh \
+ && kontext --version | tee /home/bench/.kontext-version \
+ && grep -q "${KONTEXT_VERSION#v}" /home/bench/.kontext-version
+LABEL org.kontext.bench.arm=kontext org.kontext.bench.kontext="${KONTEXT_VERSION}"

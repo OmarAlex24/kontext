@@ -1,0 +1,5 @@
+Bash(gentle-ai:*)
+Bash(engram:*)
+mcp__engram
+mcp__plugin_engram_engram
+mcp__context7

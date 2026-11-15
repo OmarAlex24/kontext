@@ -1,0 +1,4 @@
+# Arm `plain`: Claude Code with its defaults (automatic memory on). Nothing added.
+ARG BASE
+FROM ${BASE}
+LABEL org.kontext.bench.arm=plain

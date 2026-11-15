@@ -1,0 +1,44 @@
+# The confusion probes in test_confusions.py. A probe passes only when the code
+# behaves with that exact wrong value; a failed requirement whose probe passes
+# is reported as a confusion. `kind` is "old" (a value the user replaced or
+# discarded) or "distractor" (a value from the pottery studio's email).
+
+[test_c01_r01_ten_per_class]
+requirement = "R1"
+value = "10 people per class"
+kind = "distractor"
+
+[test_c02_r02_closed_on_mondays]
+requirement = "R2"
+value = "closed on Mondays"
+kind = "distractor"
+
+[test_c03_r06_refund_48h]
+requirement = "R6"
+value = "48 h"
+kind = "old"
+
+[test_c04_r06_refund_72h]
+requirement = "R6"
+value = "72 h"
+kind = "distractor"
+
+[test_c05_r07_waitlist_of_five]
+requirement = "R7"
+value = "5 people"
+kind = "old"
+
+[test_c06_r08_sms_reminders]
+requirement = "R8"
+value = "SMS reminders"
+kind = "old"
+
+[test_c07_r08_sms_sent]
+requirement = "R8"
+value = "any SMS sent with the reminders"
+kind = "old"
+
+[test_c08_r12_comma_csv]
+requirement = "R12"
+value = "comma-separated CSV"
+kind = "distractor"

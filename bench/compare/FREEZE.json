@@ -1,0 +1,13 @@
+{
+  "commit": "2c30f6fff963628d9fd2a28764e442954b8aa1d3",
+  "digest": "727cb77ed114ad70d142f729fe31932fd9629b3772352cec0029585561e5c295",
+  "paths": [
+    "compare/scenarios",
+    "compare/ANALYSIS.md",
+    "compare/complib/interventions.py",
+    "compare/complib/analysis.py",
+    "benchlib/fill.py"
+  ],
+  "files": 54,
+  "note": "Smoke probe keyword fixed after the smoke stage (it rejected the plural Thursdays); S1, S2 and L untouched, no scored cell had run."
+}

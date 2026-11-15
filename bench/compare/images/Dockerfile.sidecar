@@ -1,0 +1,13 @@
+# The kontext server for the runs: server/ of the pinned tag (git archive, so
+# later changes on main never leak in), server/worker.js in workerd through
+# Miniflare. Never the deployed Worker.
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE}
+WORKDIR /srv/server
+COPY server/ ./
+RUN npm ci --no-audit --no-fund && npm cache clean --force
+COPY sidecar.mjs ./bench-sidecar.mjs
+USER node
+EXPOSE 8787
+# Run from inside server/, as dev.mjs expects.
+CMD ["node", "bench-sidecar.mjs"]
