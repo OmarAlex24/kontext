@@ -200,6 +200,28 @@ fn touches_normalizes_paths_skips_repeats_and_refuses_globs() {
     let (c, _, err) = run(p, PM, &["epic", "touches", "pay", "src/**"]);
     assert_ne!(c, 0);
     assert!(err.contains("is a glob"), "{err}");
+    // The same folder written another way is the same path.
+    for same in [
+        "/src/billing",
+        "src/./billing",
+        "src//billing/",
+        "src/Billing",
+    ] {
+        let (c, _, err) = run(p, PM, &["epic", "touches", "pay", same]);
+        assert_eq!(c, 2, "{same}: {err}");
+        assert!(err.contains("already touches"), "{same}: {err}");
+    }
+    // Refused, each saying what to type instead.
+    for (bad, says) in [
+        ("\"src/billing\"", "without quotes"),
+        ("'src/billing'", "without quotes"),
+        ("src/billing{a,b}", "give each path separately"),
+        ("src/../src/billing", "from the repo's root"),
+    ] {
+        let (c, _, err) = run(p, PM, &["epic", "touches", "pay", bad]);
+        assert_ne!(c, 0, "{bad}");
+        assert!(err.contains(says), "{bad}: {err}");
+    }
     let why = pm_id(
         p,
         &[

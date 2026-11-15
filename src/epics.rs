@@ -52,12 +52,15 @@ pub fn added_after(st: &State, epic: &str) -> Vec<String> {
 }
 
 /// The paths an epic is expected to touch (every `touches` record that
-/// counts, in order, without repeats).
+/// counts, in order, as stored, without repeats by [`path_key`]).
 pub fn touches(st: &State, epic: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     for r in records(st, epic, "touches") {
         for p in string_list(r.fields.get("paths")) {
-            if !out.contains(&p) {
+            let k = path_key(&p);
+            if !keys.contains(&k) {
+                keys.push(k);
                 out.push(p);
             }
         }
@@ -65,21 +68,23 @@ pub fn touches(st: &State, epic: &str) -> Vec<String> {
     out
 }
 
-/// A path as `touches` stores it: relative, `/`-separated, with no `./` in
-/// front and no `/` at the end. A folder covers everything under it.
+/// A path as `touches` stores it: relative to the repo, `/`-separated, with
+/// no `/` in front or at the end, no `.` segments and no repeated `/`. A
+/// folder covers everything under it. Refused: a glob or brace pattern, quote
+/// characters and `..` (each with what to type instead).
 pub fn normalize_path(p: &str) -> Result<String> {
-    let mut s = p.trim().replace('\\', "/");
-    while let Some(rest) = s.strip_prefix("./") {
-        s = rest.to_string();
+    let s = p.trim().replace('\\', "/");
+    if s.contains(['"', '\'', '`']) {
+        bail!(
+            "{p:?} has quote characters: type the path alone, without quotes (src/billing, not \
+             \"src/billing\")"
+        );
     }
-    while s.ends_with('/') {
-        s.pop();
-    }
-    while s.contains("//") {
-        s = s.replace("//", "/");
-    }
-    if s.is_empty() || s == "." {
-        bail!("an empty path: give a file or a folder of the repo (src/billing covers all of it)");
+    if s.contains(['{', '}']) {
+        bail!(
+            "{p:?} is a brace pattern: give each path separately (src/billing/a.rs \
+             src/billing/b.rs), or the folder that holds them (src/billing)"
+        );
     }
     if s.contains(['*', '?', '[']) {
         bail!(
@@ -87,10 +92,51 @@ pub fn normalize_path(p: &str) -> Result<String> {
              under it)"
         );
     }
-    if s.split('/').any(|c| c == "..") {
-        bail!("{p:?} leaves the repo: give a path inside it");
+    let mut parts: Vec<&str> = Vec::new();
+    for c in s.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => bail!(
+                "{p:?} has a `..` segment: give the path from the repo's root (src/billing, not \
+                 src/../src/billing)"
+            ),
+            _ => parts.push(c),
+        }
     }
-    Ok(s)
+    if parts.is_empty() {
+        bail!("an empty path: give a file or a folder of the repo (src/billing covers all of it)");
+    }
+    Ok(parts.join("/"))
+}
+
+/// The form two `touches` paths are compared in, however they were stored
+/// (another writer or an older binary may have stored one raw): no quotes,
+/// no `/` in front, no `.` or empty segments, `..` resolved, a glob or brace
+/// pattern cut to the folder it starts in, and lowercased (a spurious warning
+/// costs little; a missed overlap costs a merge conflict). The empty key is
+/// the whole repo. The views print the paths as stored, never this.
+pub fn path_key(p: &str) -> String {
+    let mut s: String = p
+        .trim()
+        .replace('\\', "/")
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\'' | '`'))
+        .collect();
+    if let Some(i) = s.find(['*', '?', '[', '{', '}']) {
+        s.truncate(i);
+        s.truncate(s.rfind('/').unwrap_or(0));
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for c in s.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(c),
+        }
+    }
+    parts.join("/").to_lowercase()
 }
 
 /// The epic named by `s`, which must be in force.
@@ -218,7 +264,7 @@ pub fn add_touches(
     let mut clean: Vec<String> = Vec::new();
     for p in paths {
         let n = normalize_path(p)?;
-        if !clean.contains(&n) {
+        if !clean.iter().any(|c| path_key(c) == path_key(&n)) {
             clean.push(n);
         }
     }
@@ -229,10 +275,10 @@ pub fn add_touches(
         let st = b.state()?;
         may_write(st, actor, "paths")?;
         let e = epic_in_force(st, epic)?;
-        let have = touches(st, &e.id);
+        let have: Vec<String> = touches(st, &e.id).iter().map(|p| path_key(p)).collect();
         let new: Vec<String> = clean
             .iter()
-            .filter(|p| !have.contains(p))
+            .filter(|p| !have.contains(&path_key(p)))
             .cloned()
             .collect();
         if new.is_empty() {
@@ -267,8 +313,37 @@ mod tests {
     fn paths_are_normalized() {
         assert_eq!(normalize_path("./src/billing/").unwrap(), "src/billing");
         assert_eq!(normalize_path("src//a.rs").unwrap(), "src/a.rs");
+        assert_eq!(normalize_path("/src/billing").unwrap(), "src/billing");
+        assert_eq!(
+            normalize_path("src/./billing/x.rs").unwrap(),
+            "src/billing/x.rs"
+        );
+        assert_eq!(normalize_path("src\\Billing").unwrap(), "src/Billing");
         assert!(normalize_path("src/**").is_err());
         assert!(normalize_path("../x").is_err());
+        assert!(normalize_path("src/../src/billing").is_err());
         assert!(normalize_path(" / ").is_err());
+        assert!(normalize_path("\"src/billing\"").is_err());
+        assert!(normalize_path("'src/billing'").is_err());
+        assert!(normalize_path("src/billing{a,b}").is_err());
+        assert!(normalize_path("src/billing}").is_err());
+    }
+
+    #[test]
+    fn raw_paths_compare_by_their_key() {
+        for raw in [
+            "/src/billing",
+            "src/./billing",
+            "src/Billing",
+            "\"src/billing\"",
+            "src//billing/",
+            "src/x/../billing",
+        ] {
+            assert_eq!(path_key(raw), "src/billing", "{raw}");
+        }
+        // A pattern stored raw is cut to the folder it starts in.
+        assert_eq!(path_key("src/billing{a,b}"), "src");
+        assert_eq!(path_key("src/billing/**"), "src/billing");
+        assert_eq!(path_key("*.rs"), "");
     }
 }
