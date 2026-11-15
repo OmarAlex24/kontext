@@ -76,7 +76,7 @@ fn sign_with_key(st: &State, signing: Option<&str>) -> String {
 }
 
 /// The three conditions, each with what to do about it.
-fn missing(st: &State, ideas: &IdeasCheck, signing: Option<&str>) -> Vec<String> {
+fn missing(st: &State, project: &str, ideas: &IdeasCheck, signing: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
     if !scope::plan_signed(st) {
         out.push(if st.policy.require_signatures {
@@ -90,8 +90,8 @@ fn missing(st: &State, ideas: &IdeasCheck, signing: Option<&str>) -> Vec<String>
     }
     match ideas {
         IdeasCheck::NotFound(dir) => out.push(format!(
-            "No .pm/items.md found from {dir}, so the user's ideas and messages can't be checked. \
-             Run `kontext handoff` from the repo that has .pm/ (where the planning chat runs)."
+            "From {dir} the user's ideas and messages can't be checked. {}",
+            crate::ideas::not_found_text(project)
         )),
         IdeasCheck::Read(i) => {
             if !i.not_placed.is_empty() {
@@ -179,7 +179,7 @@ pub fn check(
     named: Vec<Named>,
     signing: Option<&str>,
 ) -> Handoff {
-    let missing = missing(st, ideas, signing);
+    let missing = missing(st, project, ideas, signing);
     let ready = missing.is_empty();
     let last = scope::last(st);
     let mut notes = Vec::new();

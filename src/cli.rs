@@ -2641,14 +2641,16 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// The `.pm/` folder and its `items.md` (what `kontext ideas` and
-    /// `kontext tree` read), or the folder where none was found.
+    /// The `.pm/` folder and its `items.md` of a repo of this project
+    /// ([`crate::ideas::locate_for`]), or the folder where none was found.
     fn ideas_source(&self, project: &Project) -> Result<crate::scope::IdeasSource> {
         let cwd = std::env::current_dir()?;
         let repos = Repos::load(project, &cwd)?;
         let own = crate::capture::Settings::of(project).worktrees;
         let not_found = || crate::scope::IdeasSource::NotFound(cwd.display().to_string());
-        let Some(pm) = crate::ideas::locate(&repos, own) else {
+        // Only a `.pm/` of this project's repos: one in any other folder
+        // (another repo, an empty table) would vouch for ideas it never saw.
+        let Some(pm) = crate::ideas::locate_for(&repos, &project.name, own) else {
             return Ok(not_found());
         };
         let Ok(items_md) = fs::read_to_string(pm.join("items.md")) else {

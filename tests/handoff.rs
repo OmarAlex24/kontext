@@ -58,6 +58,8 @@ fn setup() -> Setup {
     let repo = p.dir.path().join("repo");
     fs::create_dir_all(repo.join(".pm/dumps")).unwrap();
     git(&repo, &["init", "-q"]);
+    // The project's repo: its .kontext.toml names it (`kontext install`).
+    fs::write(repo.join(".kontext.toml"), "project = \"demo\"\n").unwrap();
     fs::write(
         repo.join(".pm/dumps/2026-11-12.md"),
         "## 2026-11-12 10:00\n\n**User:**\n\nrefunds without email\n\nand a dark mode\n",
@@ -178,7 +180,10 @@ fn handoff_refuses_for_each_reason_then_prints_the_prompt() {
     // From a folder without .pm/: that is a reason too.
     let (code, _, err) = s.run(s.p.dir.path(), &["handoff"]);
     assert_eq!(code, 2);
-    assert!(err.contains("No .pm/items.md found from"), "{err}");
+    assert!(
+        err.contains("No .pm/items.md found in a repo of demo from here"),
+        "{err}"
+    );
 
     // Placed, audited and signed: ready.
     s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | discarded | | not now |\n");
@@ -357,6 +362,54 @@ fn capture_here_replace_leaves_only_the_new_chat() {
     ))
     .unwrap();
     assert!(v.get("forgotten").is_none());
+}
+
+/// A `.pm/` counts only in a repo of the project. Another git folder with
+/// an empty `items.md` (or one whose .kontext.toml names another project)
+/// vouches for nothing: `handoff` refuses there, and the summary signed there
+/// says the ideas were not checked, with no folder in it. A linked worktree
+/// of the project's repo reads the main checkout's `.pm/`.
+#[test]
+fn a_pm_folder_counts_only_in_a_repo_of_the_project() {
+    let s = setup();
+    s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | discarded | | not now |\n");
+    s.mark_audited("2026-11-12T11:00:00Z");
+    s.items("| P2 | dark mode | dumps/2026-11-12.md:7 | | | |\n");
+    let other = s.p.dir.path().join("other");
+    fs::create_dir_all(other.join(".pm")).unwrap();
+    git(&other, &["init", "-q"]);
+    fs::write(other.join(".pm/items.md"), format!("# Ideas\n\n{HEADER}")).unwrap();
+    for link in [None, Some("project = \"elsewhere\"\n")] {
+        if let Some(l) = link {
+            fs::write(other.join(".kontext.toml"), l).unwrap();
+        }
+        let (code, _, err) = s.run(&other, &["handoff"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("No .pm/items.md found in a repo of demo from here"),
+            "{err}"
+        );
+        assert!(!err.contains("Ready"), "{err}");
+        let (_, sum, _) = s.run(&other, &["scope", "summary"]);
+        assert!(
+            sum.contains(
+                "Ideas not checked: no .pm/items.md found in a repo of this project where this ran."
+            ),
+            "{sum}"
+        );
+        assert!(!sum.contains("Not placed: 0"), "{sum}");
+        assert!(!sum.contains(&other.display().to_string()), "{sum}");
+    }
+    // From the repo itself, the unplaced idea is seen.
+    let (_, sum, _) = s.run(&s.repo, &["scope", "summary"]);
+    assert!(sum.contains("Not placed: 1 of your ideas"), "{sum}");
+    // A linked worktree of the repo: the main checkout's .pm/ and .kontext.toml.
+    git(&s.repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+    let wt = s.p.dir.path().join("wt");
+    git(&s.repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    let (code, _, err) = s.run(&wt, &["handoff"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("P2 \"and a dark mode\""), "{err}");
 }
 
 /// Under `require_signatures`, the reason names the key and a command that

@@ -695,7 +695,7 @@ fn not_placed_line(np: &NotPlaced) -> String {
 /// from `.pm/items.md`, or that there was none to read from where it ran.
 pub enum IdeasCheck {
     Read(Ideas),
-    /// No `.pm/items.md` found from this folder (nor in the mapped repos).
+    /// No `.pm/items.md` of this project's repos found from this folder.
     NotFound(String),
 }
 
@@ -719,9 +719,12 @@ impl IdeasCheck {
 /// and a signature run where it was not never match.
 fn ideas_lines(ic: &IdeasCheck, plan: bool, l: &mut Vec<String>) {
     match ic {
-        IdeasCheck::NotFound(dir) => l.push(format!(
-            "Ideas not checked: no .pm/items.md found from {dir}."
-        )),
+        // No folder in it: the text is signed and synced, and a path is this
+        // machine's only.
+        IdeasCheck::NotFound(_) => l.push(
+            "Ideas not checked: no .pm/items.md found in a repo of this project where this ran."
+                .into(),
+        ),
         IdeasCheck::Read(i) if i.not_placed.is_empty() => {
             l.push("Not placed: 0 of your ideas.".into())
         }

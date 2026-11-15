@@ -286,6 +286,48 @@ pub fn locate(repos: &Repos, own_in_worktrees: bool) -> Option<PathBuf> {
         .find(|pm| pm.join("items.md").is_file())
 }
 
+/// The `.pm/` with an `items.md` that belongs to `project`, for what binds
+/// the owner (`scope summary`, `scope sign`, `handoff`). The `.pm/` of the
+/// repo the command runs in counts only if that repo is the project's: its
+/// own `.kontext.toml` names it (a linked worktree without one, the main
+/// checkout's), or `projects.toml` maps it, or its remote is in `[[repos]]`.
+/// Then the project's repos tied the same way. Never one found by folder
+/// name alone, and never another project's: from any other folder, `None`.
+pub fn locate_for(repos: &Repos, project: &str, own_in_worktrees: bool) -> Option<PathBuf> {
+    let tied = repos.tied();
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(h) = repos.here() {
+        let ours = crate::config::checkout_project(&h.root).as_deref() == Some(project)
+            || tied.contains(&h.root);
+        if ours && let Some(pm) = pm_dir(&h.root, own_in_worktrees) {
+            out.push(pm);
+        }
+    }
+    for root in tied {
+        // A mapped repo that names another project is not this one's.
+        if crate::config::checkout_project(&root).is_some_and(|p| p != project) {
+            continue;
+        }
+        let pm = root.join(PM_DIR);
+        if !out.contains(&pm) {
+            out.push(pm);
+        }
+    }
+    out.into_iter().find(|pm| pm.join("items.md").is_file())
+}
+
+/// What `scope summary`, `scope sign` and `handoff` say when [`locate_for`]
+/// finds nothing: where a `.pm/` counts, and how to make a repo the project's.
+pub fn not_found_text(project: &str) -> String {
+    format!(
+        "No .pm/items.md found in a repo of {project} from here. A repo counts when its \
+         .kontext.toml names {project} (`kontext install` writes it; `kontext install \
+         --link-only` writes only that file), when projects.toml maps it for {project}, or when \
+         its remote is in [[repos]] of project.toml. Run it from that repo (where the planning \
+         chat runs)."
+    )
+}
+
 // ------------------------------------------------------------ table
 
 /// The cells of a table line, trimmed. `\|` is a `|` inside a cell.
