@@ -77,8 +77,13 @@ fn missing(st: &State, ideas: &IdeasCheck) -> Vec<String> {
                     })
                     .collect();
                 out.push(format!(
-                    "{} not placed: {}. Give each one a feature, task or decision in \
-                     .pm/items.md, or ask the user whether to discard it.",
+                    "{} not placed: {}. Give each one a feature, a task or a decision and write \
+                     its id in the row's `where` cell of .pm/items.md: an existing one, or a new \
+                     one from `kontext feature add \"<title>\" --epic <epic> --acceptance \"…\" \
+                     --why \"…\"`, `kontext task add \"<title>\" --feature <U> --acceptance \
+                     \"…\"` or `kontext decide \"…\" --why \"…\"` (a feature is a scope change \
+                     once the plan is signed). If the user discards it, set the row's state to \
+                     `discarded`. `kontext ideas` lists them.",
                     plural(
                         i.not_placed.len(),
                         "idea of the user's is",

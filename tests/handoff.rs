@@ -156,6 +156,15 @@ fn handoff_refuses_for_each_reason_then_prints_the_prompt() {
         err.contains("1 idea of the user's is not placed: P2 \"and a dark mode\""),
         "{err}"
     );
+    // That reason names the commands that give an idea a destination.
+    for cmd in [
+        "kontext feature add",
+        "kontext task add",
+        "kontext decide",
+        "`where` cell",
+    ] {
+        assert!(err.contains(cmd), "{cmd}: {err}");
+    }
     assert!(
         err.contains("1 message of the user's was not seen by any audit"),
         "{err}"
