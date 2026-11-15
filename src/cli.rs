@@ -2029,12 +2029,17 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             let p = config::resolve_project(project)?;
             match crate::remote::Link::of(&p.name)? {
                 crate::remote::Link::None => {}
-                crate::remote::Link::NoToken(url) => bail!(
-                    "project {} syncs with {url}, and this machine has no token for it: ask an owner for \
-                     one and save it in {} (mode 0600)",
-                    p.name,
-                    config::Token::path(&p.name)?.display()
-                ),
+                crate::remote::Link::NoToken(url) => {
+                    if let Some(why) = config::token_elsewhere(&p.name, &url) {
+                        bail!("project {} syncs with {url}, and {why}", p.name);
+                    }
+                    bail!(
+                        "project {} syncs with {url}, and this machine has no token for it: ask an owner \
+                         for one and save it in {} (mode 0600)",
+                        p.name,
+                        config::Token::path(&p.name)?.display()
+                    )
+                }
                 crate::remote::Link::Ready(remote) => {
                     let mut store = Store::open(&p.home, &p.writer)?;
                     let before = store.state()?;

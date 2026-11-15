@@ -948,6 +948,16 @@ fn a_failed_pull_never_holds_back_the_push() {
     let projects = b.config.join("projects.toml");
     let t = fs::read_to_string(&projects).unwrap();
     fs::write(&projects, t.replace(net.url(), &proxy)).unwrap();
+    // The token was issued by the server's first address: it is not sent to
+    // the new one until the human says it is the same server, by removing
+    // the record of its issuer, as status says.
+    let status = b.ok(&["status"]);
+    assert!(
+        status.contains("kontext sends it only to its issuer"),
+        "{status}"
+    );
+    assert!(status.contains("demo.server"), "{status}");
+    fs::remove_file(b.config.join("tokens/demo.server")).unwrap();
     a.ok(&["log", "from A"]);
     let t = Instant::now();
     b.ok(&["log", "first from B"]);

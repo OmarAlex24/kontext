@@ -949,6 +949,24 @@ pub fn token_for_server(
     )
 }
 
+/// Why the token saved for `project` is not sent to `url`, when there is
+/// one: it was issued by another server. Says what to do.
+pub fn token_elsewhere(project: &str, url: &str) -> Option<String> {
+    let t = token_for(project).ok()??;
+    if token_for_server(project, url, Some(url)).ok()?.is_some() {
+        return None;
+    }
+    let issuer = token_issuer(project, &t)?;
+    let sidecar = Token::issuer_path(project).ok()?;
+    Some(format!(
+        "the token saved for project {project} was issued by {issuer}, not {url}, and kontext sends it \
+         only to its issuer. If {url} is that same server at a new address, remove {} and the token goes \
+         to the server the project is registered with; otherwise join from {url} with a line from \
+         `kontext invite`",
+        sidecar.display()
+    ))
+}
+
 pub(crate) fn base64url_decode(s: &str) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let mut acc: u32 = 0;

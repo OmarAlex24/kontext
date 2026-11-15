@@ -1934,6 +1934,10 @@ pub struct Status {
     pub unpushed: Option<u64>,
     pub refused: Vec<Problem>,
     pub forks: Vec<Problem>,
+    /// A token is saved for the project but was issued by another server,
+    /// so it is not sent to this one: why, and what to do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_elsewhere: Option<String>,
 }
 
 pub fn status(home: &Path, link: &Link) -> Option<Status> {
@@ -1943,6 +1947,11 @@ pub fn status(home: &Path, link: &Link) -> Option<Status> {
         Link::Ready(r) => (r.url.clone(), Some(r)),
     };
     let st = State::load(home, &url);
+    let token_elsewhere = remote
+        .is_none()
+        .then(|| project_for_home(home))
+        .flatten()
+        .and_then(|(_, name)| config::token_elsewhere(&name, &url));
     let unpushed = remote.map(|r| {
         let w = &r.token.writer;
         let local = read_tail(&home.join("ledger").join(format!("{w}.jsonl")))
@@ -1961,6 +1970,7 @@ pub fn status(home: &Path, link: &Link) -> Option<Status> {
         unpushed,
         refused: st.refused,
         forks: st.forks,
+        token_elsewhere,
     })
 }
 
@@ -1969,8 +1979,9 @@ impl Status {
         let mut l = vec![format!(
             "Server: {}{}",
             self.url,
-            match (&self.project, &self.writer) {
-                (Some(p), Some(w)) => format!(" (project {p}, token for writer {w})"),
+            match (&self.project, &self.writer, &self.token_elsewhere) {
+                (Some(p), Some(w), _) => format!(" (project {p}, token for writer {w})"),
+                (_, _, Some(why)) => format!(" (no token for it: {why})"),
                 _ => " (no token: ask an owner for one and save it in the kontext config folder, \
                        tokens/<project>.token, mode 0600)"
                     .into(),
@@ -2449,9 +2460,12 @@ pub fn mint_writer(person: &str, role: &str, epic: Option<&str>) -> Result<Strin
 fn owner_conn(project: &str) -> Result<(Remote, Conn)> {
     let remote = match Link::of(project)? {
         Link::Ready(r) => r,
-        Link::NoToken(url) => bail!(
-            "project {project} has server {url} but no token on this machine (set KONTEXT_TOKEN)"
-        ),
+        Link::NoToken(url) => match config::token_elsewhere(project, &url) {
+            Some(why) => bail!("project {project} has server {url}, and {why}"),
+            None => bail!(
+                "project {project} has server {url} but no token on this machine (set KONTEXT_TOKEN)"
+            ),
+        },
         Link::None => bail!(
             "project {project} has no kontext server (`kontext server connect <url>` attaches one)"
         ),
