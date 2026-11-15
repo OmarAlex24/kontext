@@ -2619,7 +2619,7 @@ fn set_backoff(config: &Path, project: &str, until: Option<i64>) {
 
 /// Did the clone fail because the server could not be reached (or answered
 /// too late)?
-fn unreachable(e: &anyhow::Error) -> bool {
+pub(crate) fn unreachable(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<crate::http::Unreachable>())
 }
 

@@ -328,3 +328,48 @@ fn setup_help_is_enough_for_an_agent() {
         assert!(t.contains(want), "{want}: {t}");
     }
 }
+
+#[test]
+fn a_server_that_does_not_answer_leaves_the_local_steps_done_and_exit_0() {
+    let dir = tempfile::tempdir().unwrap();
+    // One that accepts and never answers, and one that is down.
+    let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hung_url = format!("http://{}", hung.local_addr().unwrap());
+    let down_url = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", l.local_addr().unwrap())
+    };
+    for (n, url) in [("hung", &hung_url), ("down", &down_url)] {
+        let a = Machine::new(dir.path(), n, "omar@a");
+        a.deployed(url);
+        let r = a.repo("billing");
+        let started = std::time::Instant::now();
+        let (code, v, text) = a.setup(&r, &[]);
+        assert!(
+            started.elapsed().as_secs() < 15,
+            "{n}: took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(code, Some(0), "{n}: {text}");
+        assert_eq!(v["ok"], false, "{text}");
+        assert_eq!(v["offline"], true, "{text}");
+        let s = statuses(&v);
+        assert_eq!(s["project"], "done", "{text}");
+        assert_eq!(s["install"], "done", "{text}");
+        assert_eq!(s["server project"], "needed", "{text}");
+        assert_eq!(s["sync"], "needed", "{text}");
+        assert!(
+            v["next"].as_str().unwrap().contains("setup` again when"),
+            "{text}"
+        );
+        // As text, the same, with no error.
+        let o = a.run(&r, &["setup"]);
+        let t = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success(), "{t}");
+        assert!(t.contains("did not answer"), "{t}");
+        // The ledger still takes entries.
+        let o = a.run(&r, &["--actor", "human:omar", "log", "offline"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    drop(hung);
+}

@@ -814,6 +814,10 @@ pub enum Cmd {
     /// never ask for the token in the chat, and run `kontext setup` again once they say it is done;
     /// 2 refused (it says what to run instead); 1 error.
     ///
+    /// A server that does not answer within a few seconds is not an error: the project and the
+    /// install are done, the server steps print as needed, "ok" is false and "offline" true, the
+    /// exit code is 0, and "next" says to run `kontext setup` again when the server answers.
+    ///
     /// Another machine does not run setup for a project that already exists: on a machine that has
     /// it, `kontext invite` prints a `kontext join …` line to run there.
     #[command(verbatim_doc_comment)]
@@ -1824,7 +1828,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             }
             Ok(if o.needs_human.is_some() {
                 ExitCode::from(crate::human::EXIT_CODE)
-            } else if o.ok {
+            } else if o.ok || o.offline {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE

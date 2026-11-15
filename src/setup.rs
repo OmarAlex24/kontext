@@ -8,6 +8,10 @@
 //! A step only the human can do (the Cloudflare API token) stops it with exit
 //! code 4 and says what the human does ([`crate::human::NeedsHuman`]); it never
 //! waits on a prompt.
+//!
+//! The network never blocks it: a server that does not answer within a few
+//! seconds leaves the local steps done, the server steps `needed`, `offline`
+//! set, and exit code 0 with the command to run again.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -63,6 +67,10 @@ pub struct Outcome {
     pub steps: Vec<Step>,
     /// Everything is in place.
     pub ok: bool,
+    /// The server did not answer: the local steps are done, the server steps
+    /// are `needed`, and the exit code is 0 (not an error of the setup).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub offline: bool,
     pub needs_human: Option<NeedsHuman>,
     /// Notes (files kept because they were changed by hand, warnings).
     pub notes: Vec<String>,
@@ -178,6 +186,7 @@ pub fn run(a: &Args) -> Result<Outcome> {
         server: None,
         steps: Vec::new(),
         ok: false,
+        offline: false,
         needs_human: None,
         notes: Vec::new(),
         next: String::new(),
@@ -192,6 +201,8 @@ pub fn run(a: &Args) -> Result<Outcome> {
     } else {
         pick_server(&name, own_server.as_deref(), a.server.as_deref())?
     };
+    // Does it answer? If not, the local steps still go ahead.
+    let silent = server.as_deref().and_then(no_answer);
 
     // 1. The project.
     if registered {
@@ -212,6 +223,7 @@ pub fn run(a: &Args) -> Result<Outcome> {
         // A project that is already on the server is not made again here: it
         // comes with an invitation.
         if let Some(url) = &server
+            && silent.is_none()
             && let Some(admin) = server::admin_secret(url)?
             && exists_on(url, &admin, &name)?
         {
@@ -301,53 +313,14 @@ pub fn run(a: &Args) -> Result<Outcome> {
     out.server = Some(url.clone());
 
     // 4. The project on the server, with its history; then a sync.
-    let token = config::token_for(&name)?.filter(|t| t.project == name);
-    let report = if own_server.as_deref() == Some(url.as_str()) && token.is_some() {
-        let remote = Link::of(&name)?
-            .remote()
-            .context("the project's token went missing")?;
-        out.step(
-            "server project",
-            "already",
-            format!("{name} syncs with {url} (writer {})", remote.token.writer),
-        );
-        remote::sync(&resolved.home, &remote, &Options::full(true))?
-    } else {
-        let Some(admin) = server::admin_secret(&url)? else {
-            return Err(Refused(format!(
-                "no admin secret for {url} on this machine, so project {name} cannot be created there: run \
-                 `kontext setup` on the machine that deployed it, or set KONTEXT_ADMIN_SECRET; to join a \
-                 project that is already there, run `kontext invite` on a machine that has it"
-            ))
-            .into());
-        };
-        if token.is_none() {
-            let project = config::Project::load(&resolved.home)?;
-            let person = config::human_name_in(&project, &resolved.home);
-            match remote::create_project(&url, &admin, &name, &person, &resolved.writer)? {
-                Some(t) => {
-                    t.save(&name)?;
-                }
-                None => {
-                    return Err(Refused(format!(
-                        "another project named {name} is already on {url}: name this one differently with \
-                         `kontext setup --project <other>`, or, if it is this project, join it with \
-                         `kontext invite` on a machine that has it"
-                    ))
-                    .into());
-                }
-            }
+    if let Some(why) = silent {
+        return Ok(offline(out, &url, &why, a));
+    }
+    let report = match server_steps(&mut out, &name, &url, own_server.as_deref(), &resolved) {
+        Err(e) if remote::unreachable(&e) => {
+            return Ok(offline(out, &url, &format!("{e:#}"), a));
         }
-        let r = remote::connect(&name, &resolved.home, &resolved.writer, &url)?;
-        out.step(
-            "server project",
-            "done",
-            format!(
-                "{name} is on {url} with its history (writer {})",
-                resolved.writer
-            ),
-        );
-        r
+        r => r?,
     };
     let mut sent: Vec<String> = Vec::new();
     if report.pushed_total() > 0 {
@@ -394,6 +367,95 @@ pub fn run(a: &Args) -> Result<Outcome> {
         "Almost: run `kontext sync` (or `kontext setup` again) to send the rest.".to_string()
     };
     Ok(out)
+}
+
+/// The project on the server (made there with its history, or already
+/// there) and the sync that follows.
+fn server_steps(
+    out: &mut Outcome,
+    name: &str,
+    url: &str,
+    own_server: Option<&str>,
+    resolved: &config::Resolved,
+) -> Result<remote::Report> {
+    let token = config::token_for(name)?.filter(|t| t.project == name);
+    Ok(if own_server == Some(url) && token.is_some() {
+        let remote = Link::of(name)?
+            .remote()
+            .context("the project's token went missing")?;
+        out.step(
+            "server project",
+            "already",
+            format!("{name} syncs with {url} (writer {})", remote.token.writer),
+        );
+        remote::sync(&resolved.home, &remote, &Options::full(true))?
+    } else {
+        let Some(admin) = server::admin_secret(url)? else {
+            return Err(Refused(format!(
+                "no admin secret for {url} on this machine, so project {name} cannot be created there: run \
+                 `kontext setup` on the machine that deployed it, or set KONTEXT_ADMIN_SECRET; to join a \
+                 project that is already there, run `kontext invite` on a machine that has it"
+            ))
+            .into());
+        };
+        if token.is_none() {
+            let project = config::Project::load(&resolved.home)?;
+            let person = config::human_name_in(&project, &resolved.home);
+            match remote::create_project(url, &admin, name, &person, &resolved.writer)? {
+                Some(t) => {
+                    t.save(name)?;
+                }
+                None => {
+                    return Err(Refused(format!(
+                        "another project named {name} is already on {url}: name this one differently with \
+                         `kontext setup --project <other>`, or, if it is this project, join it with \
+                         `kontext invite` on a machine that has it"
+                    ))
+                    .into());
+                }
+            }
+        }
+        let r = remote::connect(name, &resolved.home, &resolved.writer, url)?;
+        out.step(
+            "server project",
+            "done",
+            format!(
+                "{name} is on {url} with its history (writer {})",
+                resolved.writer
+            ),
+        );
+        r
+    })
+}
+
+/// The server did not answer: what is local is done, the rest waits.
+fn offline(mut out: Outcome, url: &str, why: &str, a: &Args) -> Outcome {
+    let again = setup_again(a);
+    if !out.steps.iter().any(|s| s.step == "server project") {
+        out.step(
+            "server project",
+            "needed",
+            format!("{url} did not answer ({why})"),
+        );
+        out.step("sync", "needed", "waits for the server");
+    } else {
+        out.step("sync", "needed", format!("{url} did not answer ({why})"));
+    }
+    out.offline = true;
+    out.next = format!(
+        "The server did not answer; the project and the install are done here. Run `{again}` again \
+         when {url} answers (check the network, or the URL)."
+    );
+    out
+}
+
+/// `None` if the server answers `/v1/info` within a few seconds; else why not.
+fn no_answer(url: &str) -> Option<String> {
+    let http = crate::http::Http::new(Duration::from_secs(5));
+    match http.request("GET", &format!("{url}/v1/info"), &[], None) {
+        Ok(_) => None,
+        Err(e) => Some(format!("{e:#}")),
+    }
 }
 
 /// The command to run again, with the flags that change what it does, as
