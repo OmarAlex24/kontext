@@ -856,7 +856,11 @@ pub enum ServerCmd {
     /// "Workers Scripts: Edit": CLOUDFLARE_API_TOKEN, typed when it asks on a terminal (it prints
     /// a link that creates one with that permission filled in), or piped on stdin. Without a
     /// terminal and with no token it does not wait: it exits with 4 and says what the human does
-    /// (with --json, {"needs_human": …}). The token is used once and not stored. Running it again
+    /// (with --json, {"needs_human": …}). It never prompts when CI, CLAUDECODE or
+    /// KONTEXT_NO_PROMPT=1 is set (an agent or CI runs it, even on a pseudo-terminal), and a
+    /// prompt nobody answers in 5 minutes ends the same way. An account with no workers.dev
+    /// subdomain is asked for one on a terminal, else exit 4 naming --subdomain. The token is
+    /// used once and not stored. Running it again
     /// updates the Worker and keeps its admin secret (saved in servers.json in the kontext config
     /// folder, mode 0600)
     Deploy {

@@ -291,6 +291,7 @@ fn deploy(config: &Path, api: &str, token: &str, args: &[&str]) -> Output {
         .env("CLOUDFLARE_API_TOKEN", token)
         .env_remove("CLOUDFLARE_ACCOUNT_ID")
         .env_remove("KONTEXT_ADMIN_SECRET")
+        .stdin(std::process::Stdio::null())
         .output()
         .unwrap()
 }
@@ -309,10 +310,11 @@ fn deploy_creates_then_updates_the_worker() {
     let config = dir.path().join("config");
     let (api, cf) = fake_cf();
 
-    // An account with no workers.dev subdomain: it says so and changes nothing.
+    // An account with no workers.dev subdomain: the human picks it (exit 4),
+    // and nothing changes.
     let o = deploy(&config, &api, TOKEN, &[]);
-    assert!(!o.status.success(), "{}", text(&o));
-    assert!(text(&o).contains("--subdomain"), "{}", text(&o));
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    assert!(text(&o).contains("--subdomain <name>"), "{}", text(&o));
     assert!(cf.lock().unwrap().scripts.is_empty());
     assert!(!config.join("servers.json").exists());
 
@@ -551,6 +553,134 @@ fn deploy_without_a_token_says_what_the_human_does() {
     drop(stdin);
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("https://kontext.omar-kx.workers.dev"));
+    assert!(
+        !fs::read_to_string(config.join("servers.json"))
+            .unwrap()
+            .contains(TOKEN)
+    );
+}
+
+/// A child whose stdin is a fresh pseudo-terminal, as some agent harnesses
+/// run commands: "stdin is a terminal" with nobody typing. Returns the child
+/// and the terminal's other end (what is written there is typed).
+fn on_a_pty(mut c: Command) -> (std::process::Child, fs::File) {
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty fills the two descriptors; the others may be null.
+    let r = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(r, 0, "openpty");
+    // SAFETY: both were just opened and are owned here only.
+    let (master, slave) = unsafe { (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave)) };
+    let child = c
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (child, master)
+}
+
+fn no_agent_env(c: &mut Command) -> &mut Command {
+    c.env_remove("CI")
+        .env_remove("CLAUDECODE")
+        .env_remove("KONTEXT_NO_PROMPT")
+}
+
+/// On a terminal nobody types at, deploy gives up after the prompt's limit
+/// with exit 4; when the environment says an agent or CI runs it, it does not
+/// prompt at all; a human typing at the terminal still deploys.
+#[test]
+fn deploy_on_a_terminal_with_nobody_there_stops_with_exit_4() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let (api, cf) = fake_cf();
+
+    // Nobody types: the prompt waits KONTEXT_PROMPT_WAIT_MS (five minutes
+    // when it is not set), then exit 4 with the needs-human result.
+    let mut c = deploy_no_token(&config, &api, &["--json"]);
+    no_agent_env(&mut c).env("KONTEXT_PROMPT_WAIT_MS", "1500");
+    let started = Instant::now();
+    let (child, _master) = on_a_pty(c);
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    assert!(started.elapsed() < Duration::from_secs(15));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("Cloudflare API token"), "{err}");
+    assert!(err.contains("Nothing was typed"), "{err}");
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["needs_human"]["reason"], "cloudflare_token");
+
+    // An agent or CI: no prompt, at once.
+    for (k, v) in [
+        ("CLAUDECODE", "1"),
+        ("CI", "true"),
+        ("KONTEXT_NO_PROMPT", "1"),
+    ] {
+        let mut c = deploy_no_token(&config, &api, &["--json"]);
+        no_agent_env(&mut c).env(k, v);
+        let started = Instant::now();
+        let (child, _master) = on_a_pty(c);
+        let o = child.wait_with_output().unwrap();
+        assert_eq!(o.status.code(), Some(4), "{k}: {}", text(&o));
+        assert!(started.elapsed() < Duration::from_secs(10), "{k}");
+        assert!(
+            !String::from_utf8_lossy(&o.stderr).contains("Cloudflare API token ("),
+            "{k} prompted: {}",
+            text(&o)
+        );
+        let j: Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert_eq!(j["needs_human"]["exit_code"], 4, "{k}");
+    }
+    assert!(
+        cf.lock().unwrap().log.is_empty(),
+        "{:?}",
+        cf.lock().unwrap().log
+    );
+
+    // The token is given, the account has no subdomain, nobody picks one:
+    // exit 4 that names --subdomain, and nothing is uploaded.
+    let mut c = deploy_no_token(&config, &api, &["--json"]);
+    no_agent_env(&mut c)
+        .env("CLOUDFLARE_API_TOKEN", TOKEN)
+        .env("KONTEXT_PROMPT_WAIT_MS", "1500");
+    let (child, _master) = on_a_pty(c);
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["needs_human"]["reason"], "workers_subdomain");
+    assert!(
+        v["needs_human"]["run"]
+            .as_str()
+            .unwrap()
+            .ends_with("server deploy --subdomain <name>")
+    );
+    assert!(cf.lock().unwrap().scripts.is_empty());
+
+    // A human types the token and the subdomain: it deploys.
+    let mut c = deploy_no_token(&config, &api, &[]);
+    no_agent_env(&mut c).env("KONTEXT_PROMPT_WAIT_MS", "20000");
+    let (child, mut master) = on_a_pty(c);
+    std::thread::sleep(Duration::from_millis(300));
+    writeln!(master, "{TOKEN}").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    writeln!(master, "omar-pty").unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("https://kontext.omar-pty.workers.dev"),
+        "{}",
+        text(&o)
+    );
     assert!(
         !fs::read_to_string(config.join("servers.json"))
             .unwrap()

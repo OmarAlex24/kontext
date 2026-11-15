@@ -90,6 +90,51 @@ impl NeedsHuman {
         }
     }
 
+    /// A `workers.dev` subdomain for an account that has none: a public name
+    /// that only the human picks. `command` is the command that takes it as
+    /// `--subdomain <name>` (`kontext server deploy`, or `kontext setup`). The
+    /// name is not a secret: the agent may run it once the human says it.
+    pub fn workers_subdomain(
+        account: &str,
+        script: &str,
+        command: &str,
+        then: Option<&str>,
+    ) -> NeedsHuman {
+        let run = format!("{command} --subdomain <name>");
+        let then = then.map(str::to_string);
+        let steps = vec![
+            format!(
+                "Pick a name for the Cloudflare account's workers.dev subdomain. It is public, and the \
+                 server's URL will be https://{script}.<name>.workers.dev."
+            ),
+            format!("Run `{run}` with that name (or tell the agent the name: it is not a secret)."),
+        ];
+        let say = format!(
+            "Your Cloudflare account ({account}) has no workers.dev subdomain yet. It is part of the \
+             server's public URL (https://{script}.<name>.workers.dev), so you pick it: tell me the name \
+             and I will run `{run}` with it, or run that yourself. {}",
+            match &then {
+                Some(t) => format!("Then I will run `{t}`."),
+                None => String::new(),
+            }
+        )
+        .trim_end()
+        .to_string();
+        NeedsHuman {
+            reason: "workers_subdomain".into(),
+            why: format!(
+                "Cloudflare account {account} has no workers.dev subdomain yet; it is a public name that \
+                 only the human picks"
+            ),
+            open: None,
+            steps,
+            run,
+            then,
+            say,
+            exit_code: EXIT_CODE,
+        }
+    }
+
     pub fn text(&self) -> String {
         let mut l = vec![format!("Needs you: {}.", self.why)];
         for (i, s) in self.steps.iter().enumerate() {
@@ -152,6 +197,59 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|p| {
             std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
+}
+
+/// The environment says an agent or CI runs this command, so nobody is there
+/// to answer a prompt even when stdin is a terminal (some agent harnesses give
+/// commands a pseudo-terminal): `CI`, `CLAUDECODE`, or `KONTEXT_NO_PROMPT=1`.
+/// A command that would prompt gives the needs-human result instead.
+pub fn no_prompt() -> bool {
+    let set = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .is_some_and(|v| !v.is_empty() && v != "0" && v != "false")
+    };
+    set("CI") || set("CLAUDECODE") || set("KONTEXT_NO_PROMPT")
+}
+
+/// How long a prompt on a terminal waits for the human before it gives up
+/// with the needs-human result: five minutes (`KONTEXT_PROMPT_WAIT_MS` sets
+/// it, for the tests).
+pub fn prompt_wait() -> Duration {
+    std::env::var("KONTEXT_PROMPT_WAIT_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5 * 60))
+}
+
+/// Waits until stdin has something to read, at most `wait`: false if the
+/// time ran out. On a terminal in its usual (canonical) mode that is a whole
+/// typed line, or its end.
+pub fn stdin_ready(wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let mut fds = libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = left.as_millis().min(i32::MAX as u128) as i32;
+        // SAFETY: one valid pollfd, for stdin.
+        let r = unsafe { libc::poll(&mut fds, 1, ms) };
+        if r < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return true;
+        }
+        return r > 0;
+    }
 }
 
 /// How long a command waits for a secret piped on stdin when stdin is not a
@@ -235,5 +333,19 @@ mod tests {
         );
         assert!(n.say.contains("not here"), "{}", n.say);
         assert!(n.text().contains("Then run `kontext setup` again."));
+    }
+
+    #[test]
+    fn a_subdomain_is_the_humans_to_pick() {
+        let n = NeedsHuman::workers_subdomain("acc1", "kontext", "kontext server deploy", None);
+        assert_eq!(n.reason, "workers_subdomain");
+        assert_eq!(n.exit_code, 4);
+        assert!(
+            n.run.ends_with("server deploy --subdomain <name>"),
+            "{}",
+            n.run
+        );
+        assert!(n.why.contains("acc1"), "{}", n.why);
+        assert!(n.say.contains("tell me the name"), "{}", n.say);
     }
 }

@@ -274,50 +274,66 @@ impl std::fmt::Display for CfError {
 
 impl std::error::Error for CfError {}
 
-/// `$CLOUDFLARE_API_TOKEN`; on a terminal, typed without echo; otherwise a
-/// line piped on stdin, waited for at most [`crate::human::STDIN_WAIT`]. With
-/// none of them it does not wait: it says what the human has to do
-/// ([`crate::human::NeedsHuman`], exit 4).
+/// `$CLOUDFLARE_API_TOKEN`; on a terminal with a human at it, typed without
+/// echo (waited for at most [`crate::human::prompt_wait`]); otherwise a line
+/// piped on stdin, waited for at most [`crate::human::STDIN_WAIT`]. With none
+/// of them it does not wait: it says what the human has to do
+/// ([`crate::human::NeedsHuman`], exit 4). When the environment says an agent
+/// or CI runs it ([`crate::human::no_prompt`]), a terminal is not taken as a
+/// human: no prompt.
 fn cloudflare_token() -> Result<String> {
     if let Ok(t) = std::env::var("CLOUDFLARE_API_TOKEN")
         && !t.trim().is_empty()
     {
         return Ok(t.trim().to_string());
     }
+    let needs = || anyhow::Error::from(crate::human::NeedsHuman::cloudflare_token(None));
     if !std::io::stdin().is_terminal() {
-        return match crate::human::piped_line(crate::human::STDIN_WAIT) {
-            Some(t) => Ok(t),
-            None => Err(crate::human::NeedsHuman::cloudflare_token(None).into()),
-        };
+        return crate::human::piped_line(crate::human::STDIN_WAIT).ok_or_else(needs);
+    }
+    if crate::human::no_prompt() {
+        return Err(needs());
     }
     eprintln!(
         "Create a token with the permission it needs (already filled in) at\n  {}\n\
          and paste it here. It is used once and not stored.",
         crate::human::cloudflare_token_url()
     );
-    let t = read_tty_line("Cloudflare API token (Workers Scripts: Edit): ", true)?;
-    if t.is_empty() {
-        bail!("no Cloudflare API token: set CLOUDFLARE_API_TOKEN or type it on stdin");
+    match read_tty_line("Cloudflare API token (Workers Scripts: Edit): ", true)? {
+        Some(t) if !t.is_empty() => Ok(t),
+        Some(_) => bail!("no Cloudflare API token: set CLOUDFLARE_API_TOKEN or type it on stdin"),
+        None => Err(needs()),
     }
-    Ok(t)
 }
 
 /// One line typed on the terminal after `prompt` (on stderr), without echo if
-/// `secret`.
-fn read_tty_line(prompt: &str, secret: bool) -> Result<String> {
+/// `secret`. `None` if nobody typed one within [`crate::human::prompt_wait`].
+fn read_tty_line(prompt: &str, secret: bool) -> Result<Option<String>> {
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
     if secret {
         stty(&["-echo"]);
     }
+    let wait = crate::human::prompt_wait();
     let mut line = String::new();
-    let read = std::io::stdin().lock().read_line(&mut line);
+    let read = if crate::human::stdin_ready(wait) {
+        std::io::stdin().lock().read_line(&mut line).map(Some)
+    } else {
+        Ok(None)
+    };
     if secret {
         stty(&["echo"]);
         eprintln!();
     }
-    read.context("could not read from the terminal")?;
-    Ok(line.trim().to_string())
+    if read.as_ref().is_ok_and(Option::is_none) {
+        eprintln!(
+            "Nothing was typed in {} s: kontext stops here instead of waiting.",
+            wait.as_secs()
+        );
+    }
+    Ok(read
+        .context("could not read from the terminal")?
+        .map(|_| line.trim().to_string()))
 }
 
 fn stty(args: &[&str]) {
@@ -492,9 +508,10 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
                 .to_string()
         }
         (None, None) => {
-            // On a terminal the human picks it here, in the same run; without
-            // one, the command says how and changes nothing.
-            let picked = if std::io::stdin().is_terminal() {
+            // On a terminal with a human at it, the human picks it here, in
+            // the same run; otherwise the command says how (exit 4) and
+            // changes nothing.
+            let picked = if std::io::stdin().is_terminal() && !crate::human::no_prompt() {
                 eprintln!(
                     "Account {account} has no workers.dev subdomain yet. Pick one: it is public, and \
                      the server's URL will be https://{}.<name>.workers.dev",
@@ -502,14 +519,17 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
                 );
                 read_tty_line("workers.dev subdomain: ", false)?
             } else {
-                String::new()
+                None
             };
-            if picked.is_empty() {
-                bail!(
-                    "account {account} has no workers.dev subdomain yet. Pick one (it is public: \
-                     <name>.workers.dev) and run again with --subdomain <name>. Nothing was changed"
-                );
-            }
+            let Some(picked) = picked.filter(|p| !p.is_empty()) else {
+                return Err(crate::human::NeedsHuman::workers_subdomain(
+                    &account,
+                    &args.name,
+                    &format!("{} server deploy", crate::human::self_command()),
+                    None,
+                )
+                .into());
+            };
             let v = cf.call(
                 "PUT",
                 &sub_path,
