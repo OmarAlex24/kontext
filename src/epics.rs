@@ -22,8 +22,9 @@ fn refused<T>(msg: impl Into<String>) -> Result<T> {
     Err(Refused(msg.into()).into())
 }
 
-/// The record kinds this module reads, all with `refs[0]` = the epic.
-pub const EPIC_RECORDS: &[&str] = &["after", "touches"];
+/// The record kinds this module reads, all with `refs[0]` = the epic
+/// (`parallel` also names the other epic in `refs[1]`).
+pub const EPIC_RECORDS: &[&str] = &["after", "touches", "parallel"];
 
 /// The `after` and `touches` records of an epic that count, in `hlc` order.
 pub fn records<'a>(st: &'a State, epic: &str, kind: &str) -> Vec<&'a Entry> {
@@ -62,6 +63,19 @@ pub fn touches(st: &State, epic: &str) -> Vec<String> {
             if !keys.contains(&k) {
                 keys.push(k);
                 out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// The epics a `parallel` record that counts pairs with this one (ids).
+pub fn parallel_with(st: &State, epic: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in records(st, epic, "parallel") {
+        for other in r.refs.iter().take(2).filter(|x| *x != epic) {
+            if !out.contains(other) {
+                out.push(other.clone());
             }
         }
     }
@@ -325,6 +339,74 @@ pub fn add_touches(
         entries,
         warnings: Vec::new(),
     })
+}
+
+/// `kontext epic parallel <a> <b> --why`: these two epics may run in the
+/// same wave although they touch the same paths, and why. It silences the
+/// warning for that pair in `plan`, `tree` and the summary, which shows it
+/// with its why instead.
+pub fn add_parallel(
+    store: &mut Store,
+    actor: &Actor,
+    a: &str,
+    b: &str,
+    why: &str,
+) -> Result<Written> {
+    if why.trim().is_empty() {
+        bail!(
+            "--why is required: say why they may run at once (it shows in the plan the owner signs)"
+        );
+    }
+    let mut warnings = Vec::new();
+    let ((), entries) = store.transact(|bt| {
+        let st = bt.state()?;
+        may_write(st, actor, "a parallel record")?;
+        let ea = epic_in_force(st, a)?;
+        let eb = epic_in_force(st, b)?;
+        if ea.id == eb.id {
+            return refused("name two different epics");
+        }
+        if parallel_with(st, &ea.id).contains(&eb.id) {
+            return refused(format!(
+                "{} and {} already have a parallel record",
+                epic_name(ea),
+                epic_name(eb)
+            ));
+        }
+        let shared = crate::plan::shared_paths(&touches(st, &ea.id), &touches(st, &eb.id));
+        if shared.is_empty() {
+            warnings.push(format!(
+                "{} and {} share no recorded paths yet (`kontext epic touches`)",
+                epic_name(ea),
+                epic_name(eb)
+            ));
+        }
+        let plan = crate::plan::of_state(st);
+        let wave_of = |id: &str| {
+            plan.waves
+                .iter()
+                .find(|w| w.epics.iter().any(|e| e.id == id))
+                .map(|w| w.n)
+        };
+        if wave_of(&ea.id).is_none() || wave_of(&ea.id) != wave_of(&eb.id) {
+            warnings.push(format!(
+                "{} and {} are not in the same wave of `kontext plan` now",
+                epic_name(ea),
+                epic_name(eb)
+            ));
+        }
+        let mut r = RawEntry::new(
+            "parallel",
+            &format!("{} and {} in parallel", epic_name(ea), epic_name(eb)),
+        );
+        r.actor = Some(actor.clone());
+        r.why = why.trim().to_string();
+        r.refs = vec![ea.id.clone(), eb.id.clone()];
+        r.fields.insert("paths".into(), json!(shared));
+        bt.push(r)?;
+        Ok(())
+    })?;
+    Ok(Written { entries, warnings })
 }
 
 #[cfg(test)]

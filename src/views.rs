@@ -42,6 +42,7 @@ pub fn kind_label(kind: &str) -> &str {
         "dismiss" => "dismissal",
         "after" => "dependency",
         "touches" => "paths",
+        "parallel" => "parallel record",
         other => other,
     }
 }
@@ -133,6 +134,11 @@ pub(crate) fn record_line(st: &State, r: &Entry) -> String {
         "touches" => format!(
             "{target} {title} touches {} ({by})",
             crate::state::string_list(r.fields.get("paths")).join(", ")
+        ),
+        "parallel" => format!(
+            "{target} {title} may run in parallel with {} ({by}; why: {})",
+            r.refs.get(1).map(String::as_str).unwrap_or("?"),
+            one_line(&r.why, 120)
         ),
         other => format!("{} of {target} by {by}", kind_label(other)),
     }

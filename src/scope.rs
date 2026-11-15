@@ -570,12 +570,48 @@ fn epic_record_lines(st: &State, e: &Entry, indent: &str, l: &mut Vec<String>) {
             ));
         }
     }
+    for r in crate::epics::records(st, &e.id, "parallel") {
+        let other = r
+            .refs
+            .iter()
+            .take(2)
+            .find(|x| **x != e.id)
+            .map(|x| {
+                st.get(x)
+                    .map(|o| whole(&o.title))
+                    .unwrap_or_else(|| x.clone())
+            })
+            .unwrap_or_else(|| "?".into());
+        l.push(format!(
+            "{indent}May run in parallel with {other} ({}): {}",
+            r.id,
+            whole(&r.why)
+        ));
+    }
 }
 
 /// An epic of the plan: its line, what records added to it, its features.
 fn epic_block(st: &State, e: &Entry, head: String, l: &mut Vec<String>) {
+    epic_block_with(st, e, head, &[], l);
+}
+
+/// The same, with the epics of its wave it shares paths with (whole).
+fn epic_block_with(
+    st: &State,
+    e: &Entry,
+    head: String,
+    overlaps: &[plan::Overlap],
+    l: &mut Vec<String>,
+) {
     l.push(head);
     epic_record_lines(st, e, "  ", l);
+    for o in overlaps {
+        l.push(format!(
+            "  ⚠ Same paths as {} in this wave: {}",
+            whole(&o.title),
+            o.paths.join(", ")
+        ));
+    }
     feature_lines(st, &e.id, "  ", l);
 }
 
@@ -720,7 +756,7 @@ fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
         }
         for pe in &w.epics {
             if let Some(e) = st.get(&pe.id) {
-                epic_block(st, e, epic_line(e), &mut l);
+                epic_block_with(st, e, epic_line(e), &pe.overlaps, &mut l);
             }
         }
     }

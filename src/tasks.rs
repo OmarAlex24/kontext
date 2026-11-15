@@ -687,9 +687,7 @@ fn resolve_after(
             active: true,
             tasks: 0,
             closed_tasks: 0,
-            features: 0,
-            done_features: 0,
-            open_loose: 0,
+            ..Default::default()
         });
         let plan = crate::plan::compute(&nodes);
         if let Some(c) = plan.cycles.iter().find(|c| c.iter().any(|n| n == own)) {

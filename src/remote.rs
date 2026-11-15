@@ -1760,6 +1760,7 @@ const GOVERNANCE: &[&str] = &[
     // An epic's dependency and paths, added after it was written.
     "after",
     "touches",
+    "parallel",
 ];
 /// What a coordinator hands out, and an implementer or tester may not.
 const COORDINATION: &[&str] = &["task", "assign"];
@@ -3015,6 +3016,20 @@ mod tests {
                 true,
             ),
             ("owner", Actor::human("omar"), "after", false, true),
+            (
+                "pm",
+                agent("plan-checker", Some("pm")),
+                "parallel",
+                false,
+                true,
+            ),
+            (
+                "coordinator",
+                agent("epic:payments", Some("coordinator")),
+                "parallel",
+                false,
+                false,
+            ),
             (
                 "coordinator",
                 agent("epic:payments", Some("coordinator")),

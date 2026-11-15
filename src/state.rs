@@ -1308,7 +1308,7 @@ impl State {
             "confirm" if target_kind.as_deref() == Some("question") => {
                 self.joined.entry(target).or_default().push(e.id.clone());
             }
-            "after" | "touches" if target_kind.as_deref() == Some("epic") => {
+            "after" | "touches" | "parallel" if target_kind.as_deref() == Some("epic") => {
                 // The pm or an owner, as for a feature.
                 if let Err(reason) = crate::epics::may_write_line(self, e) {
                     self.not_counting.insert(e.id.clone(), reason.clone());
@@ -1320,10 +1320,17 @@ impl State {
                     });
                     return;
                 }
-                self.epic_records
-                    .entry(target)
-                    .or_default()
-                    .push(e.id.clone());
+                // A `parallel` names two epics: it belongs to both.
+                let mut epics = vec![target];
+                if e.kind == "parallel"
+                    && let Some(other) = e.refs.get(1)
+                    && self.kind_of(other) == Some("epic")
+                {
+                    epics.push(other.clone());
+                }
+                for ep in epics {
+                    self.epic_records.entry(ep).or_default().push(e.id.clone());
+                }
             }
             _ => {}
         }

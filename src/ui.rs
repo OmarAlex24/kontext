@@ -112,8 +112,8 @@ fn category_of(st: &State, e: &Entry, depth: usize) -> &'static str {
         "decision" | "proposal" | "accept" | "reject" => "decision",
         "question" | "answer" => "question",
         "fact" | "confirm" => "fact",
-        "epic" | "feature" | "task" | "after" | "touches" | "assign" | "claim" | "release"
-        | "done" | "reopen" => "task",
+        "epic" | "feature" | "task" | "after" | "touches" | "parallel" | "assign" | "claim"
+        | "release" | "done" | "reopen" => "task",
         "journal" => "journal",
         "supersede" => match e.refs.first().and_then(|t| st.get(t)) {
             Some(t) if depth < 4 => category_of(st, t, depth + 1),
@@ -198,6 +198,11 @@ fn row_title(st: &State, e: &Entry) -> String {
             "{} touches {}",
             with_title(st, target),
             crate::state::string_list(e.fields.get("paths")).join(", ")
+        ),
+        "parallel" => format!(
+            "{} may run in parallel with {}",
+            with_title(st, target),
+            e.refs.get(1).map(String::as_str).unwrap_or("?")
         ),
         k => format!("{} of {}", kind_label(k), with_title(st, target)),
     }

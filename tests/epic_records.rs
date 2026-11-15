@@ -760,3 +760,118 @@ fn a_change_summary_compares_against_the_dependencies_the_signature_saw() {
     assert!(!s.contains("Dependencies added since"), "{s}");
     assert!(s.contains("Unchanged: "), "{s}");
 }
+
+/// Two epics of one wave that touch the same paths: a warning in `plan`,
+/// `tree` and the summary (never a reorder). One pair is resolved with a
+/// dependency, another with a parallel record, which shows with its why.
+#[test]
+fn overlapping_epics_warn_until_a_dependency_or_a_parallel_record() {
+    let t = planned();
+    let p = &t.p;
+    let g = json(p, &["resume", "--as", "pm"])["goals"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    pm_ok(
+        p,
+        &[
+            "epic", "add", "Search", "--goal", &g, "--name", "search", "--after", "found",
+        ],
+    );
+    pm_ok(p, &["epic", "touches", "pay", "src/billing"]);
+    pm_ok(
+        p,
+        &[
+            "epic",
+            "touches",
+            "cat",
+            "src/billing/prices.rs",
+            "src/catalog",
+        ],
+    );
+    pm_ok(p, &["epic", "touches", "search", "src/catalog/index.rs"]);
+    let plan = pm_ok(p, &["plan"]);
+    assert!(
+        plan.contains("  ⚠ same paths as Catalog (src/billing/prices.rs)"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("  ⚠ same paths as Search (src/catalog/index.rs)"),
+        "{plan}"
+    );
+    // Only a warning: same waves, exit 0.
+    assert_eq!(waves(p), vec![vec!["found"], vec!["pay", "cat", "search"]]);
+    let tree = pm_ok(p, &["tree"]);
+    assert!(
+        tree.contains("⚠ same paths as Payments (src/billing/prices.rs)"),
+        "{tree}"
+    );
+    let tj = json(p, &["tree"]);
+    assert_eq!(
+        tj["waves"][1]["epics"][0]["overlaps"][0]["paths"][0],
+        "src/billing/prices.rs"
+    );
+    let s = pm_ok(p, &["scope", "summary"]);
+    assert!(
+        s.contains("  ⚠ Same paths as Catalog in this wave: src/billing/prices.rs"),
+        "{s}"
+    );
+    // Pair 1: search waits for catalog. Pair 2: payments and catalog are fine.
+    pm_ok(
+        p,
+        &[
+            "epic",
+            "after",
+            "search",
+            "cat",
+            "--why",
+            "the index reads the catalog tables",
+        ],
+    );
+    let why = "catalog only reads prices.rs; payments owns it and the catalog PR goes second";
+    pm_ok(p, &["epic", "parallel", "pay", "cat", "--why", why]);
+    let plan = pm_ok(p, &["plan"]);
+    assert!(!plan.contains("⚠"), "{plan}");
+    assert_eq!(
+        waves(p),
+        vec![vec!["found"], vec!["pay", "cat"], vec!["search"]]
+    );
+    assert!(!pm_ok(p, &["tree"]).contains("⚠"));
+    let s = pm_ok(p, &["scope", "summary"]);
+    assert!(!s.contains("⚠"), "{s}");
+    assert!(
+        s.contains("  May run in parallel with Catalog (R-") && s.contains(why),
+        "{s}"
+    );
+    assert!(s.contains("Comes after Catalog (R-"), "{s}");
+    // Refusals: the same pair again, one epic twice, no why, a coordinator.
+    let (c, _, err) = run(p, PM, &["epic", "parallel", "cat", "pay", "--why", "x"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("already have a parallel record"), "{err}");
+    let (c, _, _) = run(p, PM, &["epic", "parallel", "pay", "pay", "--why", "x"]);
+    assert_eq!(c, 2);
+    let (c, _, _) = run(
+        p,
+        COORD,
+        &["epic", "parallel", "pay", "found", "--why", "x"],
+    );
+    assert_eq!(c, 2);
+}
+
+/// A parallel record from someone who is not the pm or an owner does not
+/// silence anything.
+#[test]
+fn a_parallel_record_from_a_coordinator_does_not_count() {
+    let t = planned();
+    let p = &t.p;
+    pm_ok(p, &["epic", "touches", "pay", "src/billing"]);
+    pm_ok(p, &["epic", "touches", "cat", "src/billing"]);
+    let line = format!(
+        "{{\"kind\":\"parallel\",\"title\":\"pay and cat\",\"why\":\"x\",\
+         \"actor\":{{\"type\":\"agent\",\"name\":\"epic:pay\",\"role\":\"coordinator\"}},\
+         \"refs\":[\"{}\",\"{}\"],\"fields\":{{\"paths\":[\"src/billing\"]}}}}\n",
+        t.pay, t.cat
+    );
+    p.append(&line);
+    assert!(pm_ok(p, &["plan"]).contains("⚠ same paths as Catalog (src/billing)"));
+}

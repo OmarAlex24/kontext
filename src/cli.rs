@@ -174,6 +174,17 @@ pub enum EpicCmd {
         #[arg(long, default_value = "")]
         why: String,
     },
+    /// Records that two epics of one wave may run in parallel although they touch the same paths,
+    /// and why: it silences `kontext plan`'s warning for that pair. The pm or an owner
+    Parallel {
+        /// One epic: E-…, epic:<name> or <name>
+        epic: String,
+        /// The other
+        other: String,
+        /// Why running them at once is fine (shown in the plan the owner signs)
+        #[arg(long)]
+        why: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1339,6 +1350,12 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             cmd: EpicCmd::After { epic, deps, why },
         } => cx.written_warn("the dependency", |s, a| {
             let w = crate::epics::add_after(s, a, &epic, &deps, &why)?;
+            Ok((w.entries, w.warnings))
+        }),
+        Cmd::Epic {
+            cmd: EpicCmd::Parallel { epic, other, why },
+        } => cx.written_warn("the parallel record", |s, a| {
+            let w = crate::epics::add_parallel(s, a, &epic, &other, &why)?;
             Ok((w.entries, w.warnings))
         }),
         Cmd::Epic {
