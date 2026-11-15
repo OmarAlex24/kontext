@@ -861,6 +861,8 @@ export class Project extends DurableObject {
         this.sql.exec("UPDATE tokens SET revoked = ? WHERE id = ?", new Date().toISOString(), parts[1]);
         this.setMeta("registry", this.registryVersion() + 1);
       }
+      // The invitations it made and nobody used die with it.
+      this.sql.exec("DELETE FROM invites WHERE created_by = ? AND used IS NULL", parts[1]);
       for (const ws of this.ctx.getWebSockets(`tok:${parts[1]}`)) this.closeSocket(ws, "the token was revoked");
       const t = this.sql.exec("SELECT * FROM tokens WHERE id = ?", parts[1]).toArray()[0];
       return json({ token: tokenRow(t) });
@@ -895,20 +897,32 @@ export class Project extends DurableObject {
   }
 
   /// `POST join` with the code as the bearer: the token of the invitation,
-  /// once. A used or expired code is refused, and says which. Nothing that
-  /// can fail comes between the check and marking it used, and there is no
-  /// await between them, so two joins with one code get one token.
+  /// once. A used or expired code is refused, and says which; so is one made
+  /// by a token that has been revoked or has expired since (revoking a token
+  /// also deletes its unused invitations). A project that does not exist
+  /// answers as an unknown code does, so a code tells nothing about which
+  /// projects exist. Nothing that can fail comes between the check and
+  /// marking it used, and there is no await between them, so two joins with
+  /// one code get one token.
   async join(req, project) {
     await drain(req);
-    this.requireProject();
     const code = bearer(req) || "";
     const hash = await sha256Hex(code);
+    const unknown = () => new HttpError(404, "invite_unknown", "this invitation code is not one of this project's");
+    if (!this.meta("name")) throw unknown();
     const rows = this.sql.exec("SELECT * FROM invites WHERE hash = ?", hash).toArray();
-    if (!rows.length) throw new HttpError(404, "invite_unknown", "this invitation code is not one of this project's");
+    if (!rows.length) throw unknown();
     const inv = rows[0];
     if (inv.used) throw new HttpError(410, "invite_used", `this invitation was already used (${inv.used})`);
     if (Date.now() > inv.expires) {
       throw new HttpError(410, "invite_expired", `this invitation expired at ${new Date(inv.expires).toISOString()}`);
+    }
+    if (inv.created_by !== "admin") {
+      const by = this.sql.exec("SELECT revoked, expires FROM tokens WHERE id = ?", inv.created_by).toArray()[0];
+      if (!by || by.revoked || (by.expires && Date.now() > by.expires)) {
+        throw new HttpError(410, "invite_revoked",
+          `the token that made this invitation (${inv.created_by}) was revoked or has expired, and its invitations with it`);
+      }
     }
     const want = JSON.parse(inv.spec);
     const spec = this.insertToken({

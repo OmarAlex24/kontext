@@ -547,4 +547,45 @@ test("invitations: a one-time code a new machine trades for its own token", asyn
   const got = await call("POST", `/v1/p/${p.name}/join`, { token: timed.data.code });
   assert.equal(got.status, 201);
   assert.ok(got.data.expires > Date.now() && got.data.expires <= Date.now() + 3600 * 1000);
+  // A project that does not exist answers as an unknown code does.
+  const none = await call("POST", `/v1/p/no-such-project-${Date.now()}/join`, { token: "kxi1.nope" });
+  assert.equal(none.status, 404);
+  assert.equal(none.data.error, "invite_unknown");
+});
+
+test("invitations die with the token that made them", async () => {
+  const p = await project();
+  // A second owner token invites, then is revoked: its unused invitation
+  // dies; one made by the token that stays works.
+  const second = await call("POST", `/v1/p/${p.name}/tokens`, {
+    token: p.token, body: { person: "omar", role: "owner", writer: "omar.owner.two@kontext" },
+  });
+  assert.equal(second.status, 201, JSON.stringify(second.data));
+  const by2 = await call("POST", `/v1/p/${p.name}/invites`, {
+    token: second.data.token, body: { person: "ana", role: "implementer", writer: "ana.r@kontext" },
+  });
+  assert.equal(by2.status, 201);
+  const by1 = await call("POST", `/v1/p/${p.name}/invites`, {
+    token: p.token, body: { person: "bo", role: "implementer", writer: "bo.r@kontext" },
+  });
+  const rv = await call("POST", `/v1/p/${p.name}/tokens/${second.data.id}/revoke`, { token: p.token });
+  assert.equal(rv.status, 200, JSON.stringify(rv.data));
+  const dead = await call("POST", `/v1/p/${p.name}/join`, { token: by2.data.code });
+  assert.ok([404, 410].includes(dead.status), JSON.stringify(dead.data));
+  assert.equal((await call("POST", `/v1/p/${p.name}/join`, { token: by1.data.code })).status, 201);
+
+  // A token that expires after inviting: its invitation is refused at join,
+  // and says why.
+  const brief = await call("POST", `/v1/p/${p.name}/tokens`, {
+    token: p.token, body: { person: "omar", role: "owner", writer: "omar.owner.brief@kontext", ttl_ms: 400 },
+  });
+  assert.equal(brief.status, 201, JSON.stringify(brief.data));
+  const byBrief = await call("POST", `/v1/p/${p.name}/invites`, {
+    token: brief.data.token, body: { person: "cy", role: "implementer", writer: "cy.r@kontext" },
+  });
+  assert.equal(byBrief.status, 201, JSON.stringify(byBrief.data));
+  await new Promise((done) => setTimeout(done, 500));
+  const late = await call("POST", `/v1/p/${p.name}/join`, { token: byBrief.data.code });
+  assert.equal(late.status, 410, JSON.stringify(late.data));
+  assert.equal(late.data.error, "invite_revoked");
 });
