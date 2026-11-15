@@ -687,3 +687,125 @@ fn deploy_on_a_terminal_with_nobody_there_stops_with_exit_4() {
             .contains(TOKEN)
     );
 }
+
+/// A second machine (no servers.json) deploying to an account that already
+/// has the kontext Worker is refused: a new admin secret would break every
+/// other machine's. `--replace-admin-secret` is the explicit way through.
+#[test]
+fn deploy_from_another_machine_keeps_the_admin_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (api, cf) = fake_cf();
+    cf.lock().unwrap().subdomain = Some("omar-kx".into());
+    let o = deploy(&a, &api, TOKEN, &[]);
+    assert!(o.status.success(), "{}", text(&o));
+    let secret = cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"].clone();
+
+    let o = deploy(&b, &api, TOKEN, &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    let t = text(&o);
+    assert!(t.contains("deployed from another machine"), "{t}");
+    assert!(t.contains("--replace-admin-secret"), "{t}");
+    assert!(t.contains("every other machine"), "{t}");
+    assert!(t.contains("kontext invite"), "{t}");
+    assert_eq!(
+        cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"],
+        secret
+    );
+    assert!(!b.join("servers.json").exists());
+    // The machine that deployed it still updates it, keeping the secret.
+    let o = deploy(&a, &api, TOKEN, &[]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"],
+        secret
+    );
+
+    let o = deploy(&b, &api, TOKEN, &["--replace-admin-secret"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_ne!(
+        cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"],
+        secret
+    );
+}
+
+/// `kontext setup` deploys with CLOUDFLARE_API_TOKEN set; an account with no
+/// workers.dev subdomain is exit 4 naming `kontext setup --subdomain <name>`,
+/// and that flag registers it.
+#[test]
+fn setup_deploys_with_its_subdomain_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let home = dir.path().join("home");
+    let repo = home.join("code/notes");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("projects.toml"), "writer = \"omar@a\"\n").unwrap();
+    let gitconfig = dir.path().join("gitconfig");
+    fs::write(
+        &gitconfig,
+        "[user]\n\tname = Omar\n\temail = o@example.com\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (api, cf) = fake_cf();
+    let setup = |args: &[&str]| {
+        Command::new(BIN)
+            .arg("setup")
+            .arg("--json")
+            .args(args)
+            .current_dir(&repo)
+            .env("HOME", &home)
+            .env("KONTEXT_CONFIG_DIR", &config)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("KONTEXT_CF_API", &api)
+            .env("CLOUDFLARE_API_TOKEN", TOKEN)
+            .env_remove("CLOUDFLARE_ACCOUNT_ID")
+            .env_remove("KONTEXT_ADMIN_SECRET")
+            .env_remove("KONTEXT_PROJECT")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let o = setup(&[]);
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let n = &v["needs_human"];
+    assert_eq!(n["reason"], "workers_subdomain", "{}", text(&o));
+    assert!(
+        n["run"]
+            .as_str()
+            .unwrap()
+            .ends_with(" setup --subdomain <name>"),
+        "{}",
+        text(&o)
+    );
+    assert!(cf.lock().unwrap().scripts.is_empty());
+
+    let o = setup(&["--subdomain", "omar-setup"]);
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let server = v["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step"] == "server")
+        .unwrap()
+        .clone();
+    assert_eq!(server["status"], "done", "{}", text(&o));
+    assert!(
+        server["detail"]
+            .as_str()
+            .unwrap()
+            .contains("https://kontext.omar-setup.workers.dev"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(cf.lock().unwrap().subdomain.as_deref(), Some("omar-setup"));
+}

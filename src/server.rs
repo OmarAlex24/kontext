@@ -144,6 +144,13 @@ pub struct DeployArgs {
     pub no_check: bool,
     /// Replace a Worker with this name that kontext did not deploy.
     pub replace: bool,
+    /// Set a new admin secret on a kontext Worker that this machine has no
+    /// record of (deployed from another machine): every other machine's
+    /// admin secret for it stops working.
+    pub replace_admin_secret: bool,
+    /// The command a needs-human result tells the human to run again
+    /// (default: this binary's `server deploy`); `kontext setup` passes its own.
+    pub command: Option<String>,
 }
 
 /// What it did.
@@ -525,7 +532,9 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
                 return Err(crate::human::NeedsHuman::workers_subdomain(
                     &account,
                     &args.name,
-                    &format!("{} server deploy", crate::human::self_command()),
+                    &args.command.clone().unwrap_or_else(|| {
+                        format!("{} server deploy", crate::human::self_command())
+                    }),
                     None,
                 )
                 .into());
@@ -591,11 +600,31 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
     // before uploading so a failure halfway never loses it.
     let mut servers = Servers::load()?;
     let url = format!("https://{}.{subdomain}.workers.dev", args.name);
+    let ours = existing.as_ref().is_some_and(|s| {
+        s.get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|t| t.iter().any(|x| x.as_str() == Some(SCRIPT_TAG)))
+    });
     let (secret, secret_new) = match servers
         .by_script(&account, &args.name)
         .or_else(|| servers.by_url(&url))
     {
         Some(s) => (s.admin_secret.clone(), false),
+        // A kontext server deployed from another machine: a new secret here
+        // would replace the one every other machine has.
+        None if ours && !args.replace_admin_secret => {
+            return Err(crate::store::Refused(format!(
+                "account {account} already has the kontext server {url}, deployed from another machine: \
+                 this machine has no record of its admin secret, and deploying from here would set a new \
+                 one, so the admin secret on every other machine (their `kontext setup`, `init --server` \
+                 and `server connect`) would stop working. Nothing was changed. To work on a project that \
+                 is on that server, run `kontext invite` on a machine that has it and `kontext join \
+                 <line>` here; to update the server, run `kontext server deploy` on the machine that \
+                 deployed it. Only if no machine has its admin secret any more, run again with \
+                 --replace-admin-secret (every other machine's admin secret for it stops working)"
+            ))
+            .into());
+        }
         None => (new_secret()?, true),
     };
     servers.upsert(ServerEntry {
@@ -637,7 +666,9 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
         )),
     )?;
 
-    let reachable = if args.no_check {
+    // With a fake Cloudflare API (the tests), the URL is not a real one.
+    let fake_api = std::env::var("KONTEXT_CF_API").is_ok_and(|s| !s.trim().is_empty());
+    let reachable = if args.no_check || fake_api {
         None
     } else {
         Some(wait_reachable(&url))

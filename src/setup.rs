@@ -37,6 +37,11 @@ pub struct Args {
     pub server: Option<String>,
     /// No server: the project and the install only.
     pub no_server: bool,
+    /// The `workers.dev` subdomain, when it deploys to an account with none.
+    pub subdomain: Option<String>,
+    /// Create the project the repo's `.kontext.toml` names although this
+    /// machine does not have it (it exists nowhere yet).
+    pub new_project: bool,
     /// `install`'s flags.
     pub role: String,
     pub force: bool,
@@ -155,25 +160,41 @@ pub fn run(a: &Args) -> Result<Outcome> {
     // The project's name: --project, $KONTEXT_PROJECT, the repo's
     // .kontext.toml, or the repo's folder name.
     let machine = Machine::load()?;
-    let name = match a.project.clone().or_else(|| {
+    let given = a.project.clone().or_else(|| {
         std::env::var("KONTEXT_PROJECT")
             .ok()
             .filter(|s| !s.is_empty())
-    }) {
-        Some(n) => n,
-        None => match config::find_repo_link(&repo)? {
-            Some(f) => f.link.project,
-            None => name_from_dir(&repo).with_context(|| {
-                format!(
-                    "no project name can be made from {}: pass `kontext setup --project <name>`",
-                    repo.display()
-                )
-            })?,
-        },
+    });
+    let link = config::find_repo_link(&repo)?;
+    let name = match (&given, &link) {
+        (Some(n), _) => n.clone(),
+        (None, Some(f)) => f.link.project.clone(),
+        (None, None) => name_from_dir(&repo).with_context(|| {
+            format!(
+                "no project name can be made from {}: pass `kontext setup --project <name>`",
+                repo.display()
+            )
+        })?,
     };
     if !crate::cli::valid_name(&name) {
         return Err(Refused(format!(
             "invalid project name {name:?}: pass `kontext setup --project <name>` with letters, digits, - _ and ."
+        ))
+        .into());
+    }
+    // The repo already says which project it belongs to: another name would
+    // be a second project that the repo's hooks never use.
+    if let (Some(g), Some(f)) = (&given, &link)
+        && *g != f.link.project
+    {
+        return Err(Refused(format!(
+            "{} names project {}, not {g}: this repo belongs to {}. Run `kontext setup` without --project \
+             (and without KONTEXT_PROJECT) to set {} up here; to put this repo in another project, \
+             change `project` in that file first",
+            f.path.display(),
+            f.link.project,
+            f.link.project,
+            f.link.project
         ))
         .into());
     }
@@ -195,6 +216,32 @@ pub fn run(a: &Args) -> Result<Outcome> {
     // The server, as far as it can be known without the human: the
     // project's, --server, or the one this machine deployed.
     let registered = machine.projects.contains_key(&name);
+
+    // A clone of a repo whose project was set up on another machine: nothing
+    // is made here (it would be a second project with that name and none of
+    // its history); it comes with an invitation.
+    if !registered
+        && !a.new_project
+        && let Some(f) = link.as_ref().filter(|f| f.link.project == name)
+    {
+        let file = f.path.display().to_string();
+        out.step(
+            "project",
+            "needed",
+            format!(
+                "{file} names project {name}, which is not on this machine: it joins with `kontext join \
+                 <line>` from `kontext invite` on a machine that has it"
+            ),
+        );
+        let n =
+            NeedsHuman::join_project(&name, &file, &format!("{} --new-project", setup_again(a)));
+        out.next = format!(
+            "Waiting on the human: once `kontext invite` on a machine that has project {name} prints a \
+             `kontext join kxj1.…` line, run it here."
+        );
+        out.needs_human = Some(n);
+        return Ok(out);
+    }
     let own_server = machine.server_for(&name);
     let server = if a.no_server {
         None
@@ -202,7 +249,7 @@ pub fn run(a: &Args) -> Result<Outcome> {
         pick_server(&name, own_server.as_deref(), a.server.as_deref())?
     };
     // Does it answer? If not, the local steps still go ahead.
-    let silent = server.as_deref().and_then(no_answer);
+    let mut silent = server.as_deref().and_then(no_answer);
 
     // 1. The project.
     if registered {
@@ -214,6 +261,7 @@ pub fn run(a: &Args) -> Result<Outcome> {
             ))
             .into());
         }
+        crate::cli::finish_home(&home);
         out.step(
             "project",
             "already",
@@ -221,20 +269,38 @@ pub fn run(a: &Args) -> Result<Outcome> {
         );
     } else {
         // A project that is already on the server is not made again here: it
-        // comes with an invitation.
+        // comes with an invitation. A server that fails to say is offline:
+        // the local steps go ahead.
         if let Some(url) = &server
             && silent.is_none()
             && let Some(admin) = server::admin_secret(url)?
-            && exists_on(url, &admin, &name)?
         {
-            return Err(Refused(format!(
-                "project {name} already exists on {url}, and this machine does not have it: on a machine \
-                 that has it, run `kontext invite --role owner` and then the `kontext join …` line it \
-                 prints here; or name this one differently with `kontext setup --project <other>`"
-            ))
-            .into());
+            match exists_on(url, &admin, &name) {
+                Ok(true) => {
+                    return Err(Refused(format!(
+                        "project {name} already exists on {url}, and this machine does not have it: on a \
+                         machine that has it, run `kontext invite --role owner` and then the `kontext join …` \
+                         line it prints here; or name this one differently with `kontext setup --project \
+                         <other>`"
+                    ))
+                    .into());
+                }
+                Ok(false) => {}
+                Err(e) if remote::offline(&e) => silent = Some(format!("{e:#}")),
+                Err(e) => return Err(e),
+            }
         }
         let writer = machine.writer()?;
+        // A home an earlier run was killed in the middle of making: made again.
+        let path = crate::cli::home_path(&name, a.home.clone())?;
+        if crate::cli::half_made_home(&path) {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("could not remove the half-made {}", path.display()))?;
+            out.notes.push(format!(
+                "{} was left half made by a `kontext setup` that stopped before it finished: made again",
+                path.display()
+            ));
+        }
         let home = crate::cli::new_home_path(&name, a.home.clone())?;
         let home = crate::cli::make_home(&name, &home, None, &writer)?;
         out.step(
@@ -243,12 +309,14 @@ pub fn run(a: &Args) -> Result<Outcome> {
             format!("created {name} in {}", home.display()),
         );
     }
+    crate::cli::kill_point("setup:project");
     let resolved = config::resolve_project(Some(&name))?;
     out.home = Some(resolved.home.display().to_string());
     out.writer = Some(resolved.writer.clone());
 
     // 2. The hooks, skills and agent files.
     install_step(&mut out, &name, a)?;
+    crate::cli::kill_point("setup:install");
 
     // 3. The server.
     if a.no_server {
@@ -280,13 +348,24 @@ pub fn run(a: &Args) -> Result<Outcome> {
         }
         None => {
             if std::env::var("CLOUDFLARE_API_TOKEN").is_ok_and(|t| !t.trim().is_empty()) {
-                let d = server::deploy(&server::DeployArgs {
+                let d = match server::deploy(&server::DeployArgs {
                     name: "kontext".into(),
                     account_id: None,
-                    subdomain: None,
+                    subdomain: a.subdomain.clone(),
                     no_check: false,
                     replace: false,
-                })?;
+                    replace_admin_secret: false,
+                    command: Some(setup_again(a)),
+                }) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let n = e.downcast::<NeedsHuman>()?;
+                        out.step("server", "needed", n.why.clone());
+                        out.next = format!("Waiting on the human: {}", n.say);
+                        out.needs_human = Some(n);
+                        return Ok(out);
+                    }
+                };
                 out.step(
                     "server",
                     "done",
@@ -317,7 +396,7 @@ pub fn run(a: &Args) -> Result<Outcome> {
         return Ok(offline(out, &url, &why, a));
     }
     let report = match server_steps(&mut out, &name, &url, own_server.as_deref(), &resolved) {
-        Err(e) if remote::unreachable(&e) => {
+        Err(e) if remote::offline(&e) => {
             return Ok(offline(out, &url, &format!("{e:#}"), a));
         }
         r => r?,
@@ -401,19 +480,39 @@ fn server_steps(
         if token.is_none() {
             let project = config::Project::load(&resolved.home)?;
             let person = config::human_name_in(&project, &resolved.home);
-            match remote::create_project(url, &admin, name, &person, &resolved.writer)? {
-                Some(t) => {
-                    t.save(name)?;
-                }
-                None => {
-                    return Err(Refused(format!(
-                        "another project named {name} is already on {url}: name this one differently with \
-                         `kontext setup --project <other>`, or, if it is this project, join it with \
-                         `kontext invite` on a machine that has it"
-                    ))
-                    .into());
-                }
-            }
+            let made = remote::create_project(url, &admin, name, &person, &resolved.writer)?;
+            crate::cli::kill_point("setup:created");
+            let t = match made {
+                Some(t) => t,
+                // Already there: an earlier run's create whose answer never
+                // came back is taken back with the admin secret; anything
+                // else is another project with the same name.
+                None => match remote::take_back_lost_create(
+                    url,
+                    &admin,
+                    name,
+                    &person,
+                    &resolved.writer,
+                )? {
+                    Some(t) => {
+                        out.notes.push(format!(
+                            "{name} was already on {url} with nothing in it but a token whose answer never \
+                             reached this machine: that token was revoked and a new one made here"
+                        ));
+                        t
+                    }
+                    None => {
+                        return Err(Refused(format!(
+                            "another project named {name} is already on {url}: name this one differently \
+                             with `kontext setup --project <other>`, or, if it is this project, join it \
+                             with `kontext invite` on a machine that has it"
+                        ))
+                        .into());
+                    }
+                },
+            };
+            t.save(name)?;
+            crate::cli::kill_point("setup:token");
         }
         let r = remote::connect(name, &resolved.home, &resolved.writer, url)?;
         out.step(
@@ -449,10 +548,12 @@ fn offline(mut out: Outcome, url: &str, why: &str, a: &Args) -> Outcome {
     out
 }
 
-/// `None` if the server answers `/v1/info` within a few seconds; else why not.
+/// `None` if the server answers `/v1/info` within a few seconds; else why not
+/// (no answer, or a 5xx: the server failing).
 fn no_answer(url: &str) -> Option<String> {
     let http = crate::http::Http::new(Duration::from_secs(5));
     match http.request("GET", &format!("{url}/v1/info"), &[], None) {
+        Ok(r) if r.status >= 500 => Some(format!("GET {url}/v1/info answered {}", r.status)),
         Ok(_) => None,
         Err(e) => Some(format!("{e:#}")),
     }
@@ -470,6 +571,9 @@ fn setup_again(a: &Args) -> String {
             " --home {}",
             crate::install::shell_quote(&h.display().to_string())
         ));
+    }
+    if let Some(u) = &a.server {
+        c.push_str(&format!(" --server {}", crate::install::shell_quote(u)));
     }
     c
 }
@@ -506,9 +610,10 @@ fn pick_server(name: &str, own: Option<&str>, flag: Option<&str>) -> Result<Opti
     }
 }
 
-/// Is `project` on the server? (The admin secret can ask any project.)
+/// Is `project` on the server? (The admin secret can ask any project.) A
+/// server that fails to say gives an error [`remote::offline`] counts.
 fn exists_on(url: &str, admin: &str, project: &str) -> Result<bool> {
-    let conn = Conn::new(url, project, admin, Duration::from_secs(20));
+    let conn = Conn::new(url, project, admin, Duration::from_secs(5));
     let r = match conn.get("whoami") {
         Err(e) if e.downcast_ref::<remote::TokenRefused>().is_some() => bail!(
             "{url} did not take the admin secret: is it the one `kontext server deploy` saved for it \
@@ -519,10 +624,9 @@ fn exists_on(url: &str, admin: &str, project: &str) -> Result<bool> {
     match r.status {
         200 => Ok(true),
         404 => Ok(false),
-        s => bail!(
-            "{url} answered {s} when asked for project {project}: {}",
-            r.text()
-        ),
+        _ => {
+            Err(remote::ServerAnswered::of(&r, &format!("ask {url} for project {project}")).into())
+        }
     }
 }
 

@@ -135,13 +135,61 @@ impl NeedsHuman {
         }
     }
 
+    /// A project that was set up on another machine (the repo's committed
+    /// `.kontext.toml` names it) and is not on this one: it comes here with a
+    /// one-time invitation from a machine that has it, never by making it
+    /// again here (that would be a second project with the same name, with
+    /// none of its history). `new_project` is the command for the one other
+    /// case: a project that exists nowhere yet.
+    pub fn join_project(project: &str, file: &str, new_project: &str) -> NeedsHuman {
+        let me = self_command();
+        let run = "kontext invite".to_string();
+        let then = format!("{me} join <the line `kontext invite` printed>");
+        let steps = vec![
+            format!(
+                "On a machine that has project {project}, in its code repo, run `kontext invite` (an \
+                 agent there can run it). It prints a line `kontext join kxj1.…` that works once, for 10 \
+                 minutes, and carries a one-time code, not a token."
+            ),
+            format!(
+                "Here, run that line (`{me} join kxj1.…`), or give it to the agent to run: it brings the \
+                 project with its history and installs the hooks in this repo."
+            ),
+            format!(
+                "Only if project {project} exists on no machine yet ({file} was committed before it was \
+                 set up anywhere): `{new_project}` creates it here instead."
+            ),
+        ];
+        let say = format!(
+            "This repo belongs to kontext project {project}, which was set up on another machine, so it is \
+             not made again here (that would be a second {project} with none of its history). 1) On a \
+             machine that has it, run `kontext invite` in its code repo (or ask the agent there to). 2) It \
+             prints a line that starts with `kontext join kxj1.`: run it here, or give it to me and I will \
+             run it (it works once, for 10 minutes, and is not a token). If {project} was never set up \
+             anywhere, tell me and I will run `{new_project}` instead."
+        );
+        NeedsHuman {
+            reason: "join_project".into(),
+            why: format!(
+                "this repo's {file} names project {project}, which is not on this machine: it was set up on \
+                 another machine, and it comes here with an invitation from there"
+            ),
+            open: None,
+            steps,
+            run,
+            then: Some(then),
+            say,
+            exit_code: EXIT_CODE,
+        }
+    }
+
     pub fn text(&self) -> String {
         let mut l = vec![format!("Needs you: {}.", self.why)];
         for (i, s) in self.steps.iter().enumerate() {
             l.push(format!("  {}. {s}", i + 1));
         }
         if let Some(t) = &self.then {
-            l.push(format!("Then run `{t}` again."));
+            l.push(format!("Then run `{t}`."));
         }
         l.join("\n") + "\n"
     }
@@ -332,7 +380,22 @@ mod tests {
                 .contains("workers_scripts")
         );
         assert!(n.say.contains("not here"), "{}", n.say);
-        assert!(n.text().contains("Then run `kontext setup` again."));
+        assert!(n.text().contains("Then run `kontext setup`."));
+    }
+
+    #[test]
+    fn a_project_from_another_machine_comes_with_an_invitation() {
+        let n = NeedsHuman::join_project("billing", ".kontext.toml", "kontext setup --new-project");
+        assert_eq!(n.reason, "join_project");
+        assert_eq!(n.exit_code, 4);
+        assert_eq!(n.run, "kontext invite");
+        assert!(
+            n.then.as_deref().unwrap().contains(" join "),
+            "{:?}",
+            n.then
+        );
+        assert!(n.say.contains("kontext setup --new-project"), "{}", n.say);
+        assert!(n.text().contains("kontext join kxj1."), "{}", n.text());
     }
 
     #[test]

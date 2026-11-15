@@ -373,3 +373,247 @@ fn a_server_that_does_not_answer_leaves_the_local_steps_done_and_exit_0() {
     }
     drop(hung);
 }
+
+/// The setup run a test killed: SIGKILL, as a killed process.
+fn killed(o: &Output) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    o.status.signal() == Some(9)
+}
+
+/// Machine B clones a repo whose committed .kontext.toml names a project set
+/// up on machine A, and runs setup as the README says: nothing is made on B
+/// (no stray project with that name and none of its history); it exits with
+/// 4 and says to join. With B's own server and admin secret, the same.
+/// `--project <other>` is refused (the repo's hooks would never use it), and
+/// `--new-project` is the way to make it when it exists nowhere yet.
+#[test]
+fn a_clone_of_a_project_set_up_elsewhere_makes_nothing_here() {
+    let Some(server) = LocalServer::start() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", "omar@a");
+    a.deployed(&server.url);
+    let ra = a.repo("billing");
+    let (code, _, text) = a.setup(&ra, &[]);
+    assert_eq!(code, Some(0), "{text}");
+
+    let b = Machine::new(dir.path(), "b", "omar@b");
+    let rb = b.repo("billing");
+    fs::copy(ra.join(".kontext.toml"), rb.join(".kontext.toml")).unwrap();
+    let projects = fs::read_to_string(b.config.join("projects.toml")).unwrap();
+    for deployed in [false, true] {
+        if deployed {
+            b.deployed(&server.url);
+        }
+        let (code, v, text) = b.setup(&rb, &[]);
+        assert_eq!(code, Some(4), "{text}");
+        let n = &v["needs_human"];
+        assert_eq!(n["reason"], "join_project", "{text}");
+        assert_eq!(n["run"], "kontext invite", "{text}");
+        assert!(n["then"].as_str().unwrap().contains(" join "), "{text}");
+        assert!(
+            n["say"].as_str().unwrap().contains("--new-project"),
+            "{text}"
+        );
+        assert_eq!(statuses(&v)["project"], "needed", "{text}");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 1, "{text}");
+        assert!(!b.base.join("home/kontext-home").exists(), "{text}");
+        assert_eq!(
+            fs::read_to_string(b.config.join("projects.toml")).unwrap(),
+            projects
+        );
+        assert!(!rb.join(".claude").exists(), "{text}");
+    }
+    // The text says it too.
+    let o = b.run(&rb, &["setup"]);
+    assert_eq!(o.status.code(), Some(4));
+    let t = String::from_utf8_lossy(&o.stdout);
+    assert!(t.contains("kontext join kxj1."), "{t}");
+
+    // Another name for this repo is refused, naming the file.
+    let (code, _, text) = b.setup(&rb, &["--project", "billing-b"]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(
+        text.contains(".kontext.toml names project billing"),
+        "{text}"
+    );
+
+    // --new-project: still not made twice where the server has it.
+    let (code, _, text) = b.setup(&rb, &["--new-project"]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("kontext invite"), "{text}");
+    assert!(!b.base.join("home/kontext-home/billing").exists());
+
+    // A project that exists nowhere yet: --new-project makes it.
+    let c = Machine::new(dir.path(), "c", "omar@c");
+    let rc = c.repo("fresh");
+    fs::write(
+        rc.join(".kontext.toml"),
+        "project = \"fresh\"\ndefault_role = \"pm\"\n",
+    )
+    .unwrap();
+    let (code, _, text) = c.setup(&rc, &["--no-server"]);
+    assert_eq!(code, Some(4), "{text}");
+    let (code, v, text) = c.setup(&rc, &["--no-server", "--new-project"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(statuses(&v)["project"], "done", "{text}");
+}
+
+/// The server made the project, and the answer to `POST create` (with this
+/// machine's token) never came back: the next setup takes it back with the
+/// admin secret (the token nobody has is revoked, a new one made here) and
+/// syncs. A project of the same name that is anything else is not taken.
+#[test]
+fn a_lost_answer_to_create_is_taken_back_on_the_next_run() {
+    let Some(server) = LocalServer::start() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", "omar@a");
+    a.deployed(&server.url);
+    let r = a.repo("billing");
+    // Killed right after the server answered, before the token is saved:
+    // what this machine has is the same as when the answer is lost.
+    let o = a
+        .cmd(&r, &["setup", "--json"])
+        .env("KONTEXT_TEST_KILL_AT", "setup:created")
+        .output()
+        .unwrap();
+    assert!(killed(&o), "{o:?}");
+    assert!(!a.config.join("tokens/billing.token").exists());
+    let (code, v, text) = a.setup(&r, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(v["ok"], true, "{text}");
+    assert_eq!(statuses(&v)["server project"], "done", "{text}");
+    assert!(
+        v["notes"].as_array().unwrap().iter().any(|n| n
+            .as_str()
+            .unwrap()
+            .contains("that token was revoked and a new one made here")),
+        "{text}"
+    );
+    assert!(a.config.join("tokens/billing.token").exists());
+    let (code, v, text) = a.setup(&r, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(statuses(&v)["server project"], "already", "{text}");
+
+    // B has a local `billing` of its own and the admin secret: A's billing
+    // on the server has lines, so it is not B's lost create.
+    let b = Machine::new(dir.path(), "b", "omar@b");
+    let rb = b.repo("billing");
+    let (code, _, text) = b.setup(&rb, &["--no-server"]);
+    assert_eq!(code, Some(0), "{text}");
+    b.deployed(&server.url);
+    let (code, _, text) = b.setup(&rb, &[]);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("another project named billing"), "{text}");
+    assert!(!b.config.join("tokens/billing.token").exists());
+}
+
+/// A tiny server: `/v1/info` answers as a kontext server; anything else
+/// gets a 500 (`fail`) or no answer at all.
+fn odd_server(fail: bool) -> (String, std::net::TcpListener) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let l2 = l.try_clone().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for mut s in l2.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            if head.starts_with("GET /v1/info ") {
+                let body = r#"{"kontext_server":1}"#;
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            } else if fail {
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 14\r\nconnection: close\r\n\r\ninternal error"
+                );
+            } else {
+                held.push(s);
+            }
+        }
+    });
+    (url, l)
+}
+
+/// A server that answers 500, or answers `/v1/info` and then hangs, does not
+/// hold up the local steps: the project and the install are done, setup
+/// says it is offline and exits 0, within seconds.
+#[test]
+fn a_server_that_fails_or_hangs_after_info_leaves_the_local_steps_done() {
+    let dir = tempfile::tempdir().unwrap();
+    for (n, fail) in [("fails", true), ("hangs", false)] {
+        let (url, _keep) = odd_server(fail);
+        let a = Machine::new(dir.path(), n, "omar@a");
+        a.deployed(&url);
+        let r = a.repo("billing");
+        let started = std::time::Instant::now();
+        let (code, v, text) = a.setup(&r, &[]);
+        assert!(
+            started.elapsed().as_secs() < 15,
+            "{n}: took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(code, Some(0), "{n}: {text}");
+        assert_eq!(v["offline"], true, "{n}: {text}");
+        let s = statuses(&v);
+        assert_eq!(s["project"], "done", "{n}: {text}");
+        assert_eq!(s["install"], "done", "{n}: {text}");
+        assert_eq!(s["server project"], "needed", "{n}: {text}");
+        assert!(r.join(".kontext.toml").exists(), "{n}");
+    }
+}
+
+/// Killed between any two of its steps (and inside the making of the
+/// kontext-home), setup run again finishes, and a third run changes nothing.
+#[test]
+fn setup_killed_between_any_two_steps_resumes() {
+    let Some(server) = LocalServer::start() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for point in [
+        "home:folders",
+        "home:files",
+        "home:git",
+        "home:registered",
+        "setup:project",
+        "setup:install",
+        "setup:created",
+        "setup:token",
+    ] {
+        let name = point.replace(':', "-");
+        let a = Machine::new(dir.path(), &name, "omar@a");
+        a.deployed(&server.url);
+        let r = a.repo(&format!("p-{name}"));
+        let o = a
+            .cmd(&r, &["setup", "--json"])
+            .env("KONTEXT_TEST_KILL_AT", point)
+            .output()
+            .unwrap();
+        assert!(killed(&o), "{point}: not killed: {o:?}");
+        let (code, v, text) = a.setup(&r, &[]);
+        assert_eq!(code, Some(0), "{point}: {text}");
+        assert_eq!(v["ok"], true, "{point}: {text}");
+        let (code, v, text) = a.setup(&r, &[]);
+        assert_eq!(code, Some(0), "{point}: {text}");
+        let s = statuses(&v);
+        for step in ["project", "install", "server", "server project"] {
+            assert_eq!(s[step], "already", "{point}: {step}: {text}");
+        }
+        let o = a.run(&r, &["--actor", "human:omar", "log", "after the kill"]);
+        assert!(
+            o.status.success(),
+            "{point}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}

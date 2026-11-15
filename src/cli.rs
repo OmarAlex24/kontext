@@ -819,7 +819,9 @@ pub enum Cmd {
     /// exit code is 0, and "next" says to run `kontext setup` again when the server answers.
     ///
     /// Another machine does not run setup for a project that already exists: on a machine that has
-    /// it, `kontext invite` prints a `kontext join …` line to run there.
+    /// it, `kontext invite` prints a `kontext join …` line to run there. In a clone whose
+    /// .kontext.toml names a project this machine does not have, setup creates nothing and exits
+    /// with 4 saying that (`--new-project` creates it, only if it exists on no machine yet).
     #[command(verbatim_doc_comment)]
     Setup {
         /// Where to create the project's kontext-home if it is new (default ~/kontext-home/<name>)
@@ -832,6 +834,15 @@ pub enum Cmd {
         /// Only the project and the install, without a server (git sync, as `kontext init`)
         #[arg(long)]
         no_server: bool,
+        /// When it deploys the server (CLOUDFLARE_API_TOKEN set) to an account with no
+        /// workers.dev subdomain yet: registers this one (it is public)
+        #[arg(long, value_name = "NAME", conflicts_with = "no_server")]
+        subdomain: Option<String>,
+        /// The repo's .kontext.toml names a project this machine does not have, and that project
+        /// exists on no other machine yet: create it here. (When it was set up on another machine,
+        /// it comes with `kontext invite` there and `kontext join <line>` here instead)
+        #[arg(long)]
+        new_project: bool,
         /// As in `kontext install`: also replaces the agent files you changed by hand
         #[arg(long)]
         force: bool,
@@ -921,6 +932,10 @@ pub enum ServerCmd {
         /// Registers this workers.dev subdomain for the account, if it has none yet
         #[arg(long)]
         subdomain: Option<String>,
+        /// Sets a new admin secret on a kontext Worker that this machine did not deploy (it has
+        /// no record of it): the admin secret every other machine has for it stops working
+        #[arg(long)]
+        replace_admin_secret: bool,
         /// Does not wait for the URL to answer
         #[arg(long)]
         no_check: bool,
@@ -1818,6 +1833,8 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             home,
             server,
             no_server,
+            subdomain,
+            new_project,
             force,
             local,
             worktree_role,
@@ -1827,6 +1844,8 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 home,
                 server,
                 no_server,
+                subdomain,
+                new_project,
                 role: cx.role.unwrap_or("pm").to_string(),
                 force,
                 local,
@@ -2165,6 +2184,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                     subdomain,
                     no_check,
                     replace,
+                    replace_admin_secret,
                 },
         } => {
             let d = crate::server::deploy(&crate::server::DeployArgs {
@@ -2173,6 +2193,8 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 subdomain,
                 no_check,
                 replace,
+                replace_admin_secret,
+                command: None,
             })?;
             if cx.json {
                 print_json(&d)?;
@@ -3418,36 +3440,80 @@ fn init(
 }
 
 /// Where a new project's kontext-home goes (default
-/// `~/kontext-home/<name>`), absolute; refused if it is there and not empty.
-pub(crate) fn new_home_path(name: &str, home: Option<PathBuf>) -> Result<PathBuf> {
+/// `~/kontext-home/<name>`), absolute.
+pub(crate) fn home_path(name: &str, home: Option<PathBuf>) -> Result<PathBuf> {
     let home = match home {
         Some(h) => h,
         None => config::home_dir()?.join("kontext-home").join(name),
     };
-    let home = if home.is_absolute() {
+    Ok(if home.is_absolute() {
         home
     } else {
         std::env::current_dir()?.join(home)
-    };
+    })
+}
+
+/// [`home_path`], refused if it is there and not empty.
+pub(crate) fn new_home_path(name: &str, home: Option<PathBuf>) -> Result<PathBuf> {
+    let home = home_path(name, home)?;
     if home.exists() && fs::read_dir(&home)?.next().is_some() {
         bail!("{} already exists and is not empty", home.display());
     }
     Ok(home)
 }
 
+/// The file [`make_home`] writes in the kontext-home's internal folder before
+/// anything else and removes once the project is registered: a home that
+/// still has it was left half made by a run that was killed.
+pub(crate) const HOME_MARKER: &str = "making-home";
+
+fn home_marker(home: &Path) -> PathBuf {
+    home.join(config::INTERNAL_DIR).join(HOME_MARKER)
+}
+
+/// A kontext-home that [`make_home`] started and did not finish: a real
+/// folder (not a link) with its marker. Only such a folder is ever removed.
+pub(crate) fn half_made_home(home: &Path) -> bool {
+    fs::symlink_metadata(home).is_ok_and(|m| m.is_dir())
+        && fs::symlink_metadata(home_marker(home)).is_ok_and(|m| m.is_file())
+}
+
+/// The marker of a home that is registered (its run was killed after the
+/// registration, before the marker went): it is not needed any more.
+pub(crate) fn finish_home(home: &Path) {
+    let _ = fs::remove_file(home_marker(home));
+}
+
+/// For the tests that kill `setup` between its steps: with
+/// `KONTEXT_TEST_KILL_AT=<point>`, the process kills itself (SIGKILL, as a
+/// killed run: no cleanup) when it reaches `point`.
+pub(crate) fn kill_point(point: &str) {
+    if std::env::var("KONTEXT_TEST_KILL_AT").is_ok_and(|p| p == point) {
+        // SAFETY: sends a signal to this process.
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGKILL);
+        }
+    }
+}
+
 /// The local part of `kontext init`: the kontext-home's folders,
 /// `project.toml`, its git repo, the registration and the index. Returns the
-/// kontext-home, canonical.
+/// kontext-home, canonical. Until the project is registered, the home carries
+/// [`HOME_MARKER`], so a run killed halfway leaves a home that `setup` knows
+/// it may remove and make again.
 pub(crate) fn make_home(
     name: &str,
     home: &Path,
     remote: Option<&str>,
     writer: &str,
 ) -> Result<PathBuf> {
+    fs::create_dir_all(home.join(config::INTERNAL_DIR))?;
+    fs::write(home_marker(home), "")?;
     for d in ["ledger", "cursors"] {
         fs::create_dir_all(home.join(d))?;
         fs::write(home.join(d).join(".gitkeep"), "")?;
     }
+    kill_point("home:folders");
     let home = fs::canonicalize(home)?;
     fs::write(
         home.join("project.toml"),
@@ -3457,12 +3523,16 @@ pub(crate) fn make_home(
         home.join(".gitignore"),
         format!("{}/\n", config::INTERNAL_DIR),
     )?;
+    kill_point("home:files");
     git(&home, &["init", "-q"])?;
     if let Some(url) = remote {
         git(&home, &["remote", "add", "origin", url])?;
     }
+    kill_point("home:git");
     Machine::register(name, &home)?;
+    kill_point("home:registered");
     Store::open(&home, writer)?;
+    finish_home(&home);
     Ok(home)
 }
 

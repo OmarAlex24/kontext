@@ -146,18 +146,68 @@ impl Conn {
         self.send(method, path, Some("application/octet-stream"), Some(body))
     }
 
-    /// A JSON answer that must be 2xx.
+    /// A JSON answer that must be 2xx; otherwise a [`ServerAnswered`].
     pub fn ok(r: Reply, what: &str) -> Result<Value> {
-        let v = r.json().with_context(|| what.to_string())?;
         if !r.ok() {
-            bail!(
-                "{what}: the server answered {}: {}",
-                r.status,
-                v.get("message").and_then(Value::as_str).unwrap_or("")
-            );
+            return Err(ServerAnswered::of(&r, what).into());
         }
-        Ok(v)
+        r.json().with_context(|| what.to_string())
     }
+}
+
+/// The server answered with an error status. A 5xx is the server failing,
+/// which [`offline`] counts as not answering.
+#[derive(Debug)]
+pub struct ServerAnswered {
+    pub what: String,
+    pub status: u16,
+    /// The `error` code of the answer (`forbidden`, `no_project`, …), if any.
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl ServerAnswered {
+    pub fn of(r: &Reply, what: &str) -> ServerAnswered {
+        let v = r.json().ok();
+        let text = |k: &str| {
+            v.as_ref()
+                .and_then(|v| v.get(k))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        ServerAnswered {
+            what: what.to_string(),
+            status: r.status,
+            code: text("error"),
+            message: text("message").unwrap_or_else(|| {
+                let t = r.text();
+                t.chars().take(200).collect::<String>().trim().to_string()
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for ServerAnswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: the server answered {}: {}",
+            self.what, self.status, self.message
+        )
+    }
+}
+
+impl std::error::Error for ServerAnswered {}
+
+/// The server is not there to do the job: no answer in time (the network,
+/// the server down, a timeout), or an answer that says it failed (5xx).
+/// What only needs the server waits; nothing local is held up by it.
+pub(crate) fn offline(e: &anyhow::Error) -> bool {
+    unreachable(e)
+        || e.chain().any(|c| {
+            c.downcast_ref::<ServerAnswered>()
+                .is_some_and(|s| s.status >= 500)
+        })
 }
 
 /// The server does not take the token (unknown, revoked or expired).
@@ -1983,6 +2033,80 @@ pub fn create_project(
         .and_then(Value::as_str)
         .context("the server gave no token")?;
     Ok(Some(Token::parse(raw)?))
+}
+
+/// The project on the server is this machine's own create whose answer
+/// never came back (the request went through, the reply was lost): no
+/// lines, no config, and no token but the owner tokens the admin secret made
+/// for `writer`. Then those tokens, which nobody holds, are revoked and a new
+/// owner token for `writer` is made with the admin secret. `Ok(None)` if the
+/// project there is anything else (another project with the same name).
+pub fn take_back_lost_create(
+    url: &str,
+    admin: &str,
+    project: &str,
+    person: &str,
+    writer: &str,
+) -> Result<Option<Token>> {
+    let conn = Conn::new(url, project, admin, Duration::from_secs(10));
+    let frontier = Conn::ok(conn.get("frontier")?, "read the project on the server")?;
+    let empty = |k: &str| {
+        frontier
+            .get(k)
+            .is_none_or(|v| v.as_object().is_some_and(|o| o.is_empty()))
+    };
+    if !empty("tails") || !empty("config") {
+        return Ok(None);
+    }
+    let list = Conn::ok(conn.get("tokens")?, "list the project's tokens")?;
+    let now = now_ms();
+    let active: Vec<&Value> = list
+        .get("tokens")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter(|t| t.get("revoked").is_none_or(Value::is_null))
+                .filter(|t| {
+                    t.get("expires")
+                        .and_then(Value::as_i64)
+                        .is_none_or(|x| x > now)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ours = |t: &Value| {
+        t.get("writer").and_then(Value::as_str) == Some(writer)
+            && t.get("created_by").and_then(Value::as_str) == Some("admin")
+            && t.get("role").and_then(Value::as_str) == Some("owner")
+    };
+    if !active.iter().all(|t| ours(t)) {
+        return Ok(None);
+    }
+    for t in &active {
+        if let Some(id) = t.get("id").and_then(Value::as_str) {
+            Conn::ok(
+                conn.json("POST", &format!("tokens/{id}/revoke"), &json!({}))?,
+                "revoke the token whose answer was lost",
+            )?;
+        }
+    }
+    let v = Conn::ok(
+        conn.json(
+            "POST",
+            "tokens",
+            &json!({ "person": person, "role": "owner", "writer": writer }),
+        )?,
+        "make this machine's owner token",
+    )?;
+    let raw = v
+        .get("token")
+        .and_then(Value::as_str)
+        .context("the server gave no token")?;
+    let t = Token::parse(raw)?;
+    if t.project != project || t.writer != writer {
+        bail!("the server sent a token for another project or writer");
+    }
+    Ok(Some(t))
 }
 
 /// The admin secret for `url`, or an error that says where to get it.
