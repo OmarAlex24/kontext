@@ -899,7 +899,7 @@ impl Token {
     }
 }
 
-fn base64url_decode(s: &str) -> Result<Vec<u8>> {
+pub(crate) fn base64url_decode(s: &str) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let mut acc: u32 = 0;
     let mut bits = 0;

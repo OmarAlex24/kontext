@@ -54,6 +54,14 @@ const MAX_MEDIA_BYTES = 32 * 1024 * 1024;
 // A SQLite row in a Durable Object holds at most 8 MB; 1 MiB chunks stay far
 // below it and keep each statement small.
 const MEDIA_CHUNK = 1024 * 1024;
+// What this server does beyond protocol 1, for a client to check before using
+// it (`GET /v1/info`): an older server lacks the field.
+const FEATURES = ["invites"];
+// An invitation: a one-time code a new machine trades for its own token
+// (`kontext invite` / `kontext join`). Ten minutes unless said otherwise, a
+// day at most.
+const INVITE_DEFAULT_MS = 10 * 60 * 1000;
+const INVITE_MAX_MS = 24 * 60 * 60 * 1000;
 
 function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
@@ -180,6 +188,26 @@ function actorAllowed(p, e) {
   return null;
 }
 
+/// The token a request asks for (`POST tokens`, `POST invites`), checked:
+/// {person, role, writer, epic, actors, ttl (ms or null)}.
+function tokenWanted(body) {
+  const role = String(body.role || "");
+  const person = String(body.person || "").trim();
+  const writer = String(body.writer || "").trim();
+  const epic = body.epic == null ? null : String(body.epic).trim() || null;
+  const actors = Array.isArray(body.actors) ? body.actors.map((a) => String(a).trim()).filter(Boolean) : [];
+  const ttl = body.ttl_ms == null ? null : Number(body.ttl_ms);
+  if (!ROLES.includes(role)) throw new HttpError(400, "bad_role", `role is one of ${ROLES.join(", ")}`);
+  if (!person || person.length > 128) throw new HttpError(400, "bad_person", "person is required (at most 128 characters)");
+  if (!WRITER_RE.test(writer)) throw new HttpError(400, "bad_writer", `invalid writer ${JSON.stringify(writer)}`);
+  if (role === "coordinator" && (!epic || !actors.length)) {
+    throw new HttpError(400, "bad_epic", "a coordinator token needs its epic and the names it coordinates as");
+  }
+  if (actors.length > 8 || actors.some((a) => a.length > 128)) throw new HttpError(400, "bad_actors", "at most 8 names");
+  if (ttl != null && !(Number.isFinite(ttl) && ttl > 0)) throw new HttpError(400, "bad_ttl", "ttl_ms must be a positive number");
+  return { person, role, epic, actors: role === "coordinator" ? actors : [], writer, ttl: ttl ? Math.floor(ttl) : null };
+}
+
 function parseActors(v) {
   if (!v) return [];
   try {
@@ -213,7 +241,7 @@ export default {
     if (parts[0] !== "v1") return fail(404, "not_found", "kontext server: try /v1/info");
     if (parts.length === 2 && parts[1] === "info") {
       await drain(req);
-      return json({ kontext_server: PROTOCOL });
+      return json({ kontext_server: PROTOCOL, features: FEATURES });
     }
     if (parts[1] !== "p" || parts.length < 4) return fail(404, "not_found", "no such route");
     let project;
@@ -262,6 +290,8 @@ export class Project extends DurableObject {
       CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT NOT NULL, person TEXT NOT NULL,
         role TEXT NOT NULL, epic TEXT, actors TEXT, writer TEXT NOT NULL, created TEXT NOT NULL, expires INTEGER,
         revoked TEXT, created_by TEXT, first_n INTEGER NOT NULL DEFAULT 1, ord INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS invites(hash TEXT PRIMARY KEY, spec TEXT NOT NULL, created TEXT NOT NULL,
+        expires INTEGER NOT NULL, used TEXT, created_by TEXT NOT NULL) WITHOUT ROWID;
     `);
   }
 
@@ -473,6 +503,8 @@ export class Project extends DurableObject {
     const project = req.headers.get("x-kontext-project");
     const parts = url.pathname.split("/").filter(Boolean);
     const m = req.method;
+    // An invitation code is not a token: it is traded here, once, for one.
+    if (parts[0] === "join" && parts.length === 1 && m === "POST") return this.join(req, project);
     const p = await this.principal(req);
 
     if (parts[0] === "create" && m === "POST") return this.create(req, p, project);
@@ -497,6 +529,7 @@ export class Project extends DurableObject {
     if (parts[0] === "media" && parts.length === 2 && m === "GET") return this.getMedia(parts[1]);
     if (parts[0] === "media" && parts.length === 2 && m === "PUT") return this.putMedia(req, parts[1]);
     if (parts[0] === "tokens") return this.tokens(req, p, parts, project);
+    if (parts[0] === "invites" && parts.length === 1 && m === "POST") return this.invite(req, p);
     return error(404, "not_found", `no route ${m} ${url.pathname}`);
   }
 
@@ -813,23 +846,9 @@ export class Project extends DurableObject {
     }
     if (parts.length === 1 && m === "POST") {
       const body = await readJson(req, 4096);
-      const role = String(body.role || "");
-      const person = String(body.person || "").trim();
-      const writer = String(body.writer || "").trim();
-      const epic = body.epic == null ? null : String(body.epic).trim() || null;
-      const actors = Array.isArray(body.actors) ? body.actors.map((a) => String(a).trim()).filter(Boolean) : [];
-      const ttl = body.ttl_ms == null ? null : Number(body.ttl_ms);
-      if (!ROLES.includes(role)) throw new HttpError(400, "bad_role", `role is one of ${ROLES.join(", ")}`);
-      if (!person || person.length > 128) throw new HttpError(400, "bad_person", "person is required (at most 128 characters)");
-      if (!WRITER_RE.test(writer)) throw new HttpError(400, "bad_writer", `invalid writer ${JSON.stringify(writer)}`);
-      if (role === "coordinator" && (!epic || !actors.length)) {
-        throw new HttpError(400, "bad_epic", "a coordinator token needs its epic and the names it coordinates as");
-      }
-      if (actors.length > 8 || actors.some((a) => a.length > 128)) throw new HttpError(400, "bad_actors", "at most 8 names");
-      if (ttl != null && !(Number.isFinite(ttl) && ttl > 0)) throw new HttpError(400, "bad_ttl", "ttl_ms must be a positive number");
+      const want = tokenWanted(body);
       const spec = this.insertToken({
-        person, role, epic, actors: role === "coordinator" ? actors : [], writer,
-        expires: ttl ? Date.now() + Math.floor(ttl) : null, createdBy: p.admin ? "admin" : p.id,
+        ...want, expires: want.ttl ? Date.now() + want.ttl : null, createdBy: p.admin ? "admin" : p.id,
       });
       const t = await this.storeToken(spec, project);
       return json({ project, ...t }, 201);
@@ -847,5 +866,56 @@ export class Project extends DurableObject {
       return json({ token: tokenRow(t) });
     }
     throw new HttpError(404, "not_found", "no such token route");
+  }
+
+  /// `POST invites` (an owner token or the admin): a one-time code for a new
+  /// machine, with the token it will get (as `POST tokens` takes it) and how
+  /// long the code is good for (`valid_ms`, ten minutes by default). Only the
+  /// code's sha256 is kept; the code is in this answer and nowhere else.
+  async invite(req, p) {
+    if (!p.admin && p.role !== "owner") throw new HttpError(403, "forbidden", "only an owner invites");
+    const body = await readJson(req, 4096);
+    const want = tokenWanted(body);
+    const valid = body.valid_ms == null ? INVITE_DEFAULT_MS : Number(body.valid_ms);
+    if (!(Number.isFinite(valid) && valid > 0 && valid <= INVITE_MAX_MS)) {
+      throw new HttpError(400, "bad_valid", `valid_ms must be a positive number of at most ${INVITE_MAX_MS}`);
+    }
+    // The writer must be free now (and is checked again when the code is used).
+    this.insertToken({ ...want, expires: null, createdBy: null });
+    const code = "kxi1." + b64url(crypto.getRandomValues(new Uint8Array(24)));
+    const hash = await sha256Hex(code);
+    const expires = Date.now() + Math.floor(valid);
+    // Invitations a week past their expiry are of no use to anyone.
+    this.sql.exec("DELETE FROM invites WHERE expires < ?", Date.now() - 7 * 24 * 60 * 60 * 1000);
+    this.sql.exec(
+      "INSERT INTO invites(hash, spec, created, expires, used, created_by) VALUES(?,?,?,?,NULL,?)",
+      hash, JSON.stringify(want), new Date().toISOString(), expires, p.admin ? "admin" : p.id,
+    );
+    return json({ code, expires, person: want.person, role: want.role, epic: want.epic, writer: want.writer }, 201);
+  }
+
+  /// `POST join` with the code as the bearer: the token of the invitation,
+  /// once. A used or expired code is refused, and says which. Nothing that
+  /// can fail comes between the check and marking it used, and there is no
+  /// await between them, so two joins with one code get one token.
+  async join(req, project) {
+    await drain(req);
+    this.requireProject();
+    const code = bearer(req) || "";
+    const hash = await sha256Hex(code);
+    const rows = this.sql.exec("SELECT * FROM invites WHERE hash = ?", hash).toArray();
+    if (!rows.length) throw new HttpError(404, "invite_unknown", "this invitation code is not one of this project's");
+    const inv = rows[0];
+    if (inv.used) throw new HttpError(410, "invite_used", `this invitation was already used (${inv.used}): ask for a new one (kontext invite)`);
+    if (Date.now() > inv.expires) {
+      throw new HttpError(410, "invite_expired", `this invitation expired at ${new Date(inv.expires).toISOString()}: ask for a new one (kontext invite)`);
+    }
+    const want = JSON.parse(inv.spec);
+    const spec = this.insertToken({
+      ...want, expires: want.ttl ? Date.now() + want.ttl : null, createdBy: `invite:${inv.created_by}`,
+    });
+    this.sql.exec("UPDATE invites SET used = ? WHERE hash = ?", new Date().toISOString(), hash);
+    const t = await this.storeToken(spec, project);
+    return json({ project, ...t }, 201);
   }
 }

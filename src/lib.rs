@@ -27,6 +27,7 @@ pub mod import_v0;
 pub mod inbox;
 pub mod index;
 pub mod install;
+pub mod invite;
 pub mod measure;
 pub mod media;
 pub mod model;

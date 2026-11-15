@@ -84,7 +84,12 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    fn step(&mut self, step: &'static str, status: &'static str, detail: impl Into<String>) {
+    pub(crate) fn step(
+        &mut self,
+        step: &'static str,
+        status: &'static str,
+        detail: impl Into<String>,
+    ) {
         self.steps.push(Step {
             step,
             status,
@@ -631,7 +636,7 @@ fn exists_on(url: &str, admin: &str, project: &str) -> Result<bool> {
 }
 
 /// `install` for this repo, as a step.
-fn install_step(out: &mut Outcome, name: &str, a: &Args) -> Result<()> {
+pub(crate) fn install_step(out: &mut Outcome, name: &str, a: &Args) -> Result<()> {
     let how = InstallHow {
         dry_run: false,
         force: a.force,

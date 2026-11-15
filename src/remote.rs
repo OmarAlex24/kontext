@@ -2225,6 +2225,9 @@ pub struct CloneArgs {
     /// which the network never holds up. What does not fit comes with the
     /// next commands.
     pub quick: bool,
+    /// The token to use instead of `$KONTEXT_TOKEN` (`kontext join`, which
+    /// got it from the server and keeps it in this process).
+    pub token: Option<Token>,
 }
 
 /// `kontext clone --server <url> <project>`: brings a project down from its
@@ -2232,13 +2235,18 @@ pub struct CloneArgs {
 /// token (0600). This copy writes as the token's writer.
 pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
     let url = crate::server::normalize_url(&a.url);
-    let raw = std::env::var("KONTEXT_TOKEN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .context(
-            "set KONTEXT_TOKEN to a token for the project (the owner makes one with `kontext token create`)",
-        )?;
-    let token = Token::parse(&raw).context("$KONTEXT_TOKEN")?;
+    let token = match a.token.clone() {
+        Some(t) => t,
+        None => {
+            let raw = std::env::var("KONTEXT_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .context(
+                    "set KONTEXT_TOKEN to a token for the project (the owner makes one with `kontext token create`)",
+                )?;
+            Token::parse(&raw).context("$KONTEXT_TOKEN")?
+        }
+    };
     if !crate::cli::valid_name(&a.project) {
         bail!("invalid project name {:?}", a.project);
     }
@@ -2434,6 +2442,68 @@ fn owner_conn(project: &str) -> Result<(Remote, Conn)> {
 
 /// Makes a token on the project's server, with this machine's owner token.
 pub fn token_create(project: &str, home: &Path, a: &TokenArgs) -> Result<Minted> {
+    let (remote, conn, body) = token_body(project, home, a)?;
+    let role = body["role"].as_str().unwrap_or("").to_string();
+    let person = body["person"].as_str().unwrap_or("").to_string();
+    let writer = body["writer"].as_str().unwrap_or("").to_string();
+    let epic = body.get("epic").and_then(Value::as_str).map(str::to_string);
+    let v = Conn::ok(conn.json("POST", "tokens", &body)?, "token create")?;
+    let token = v
+        .get("token")
+        .and_then(Value::as_str)
+        .context("the server sent no token")?
+        .to_string();
+    let actors: Vec<String> = v
+        .get("actors")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut env = vec![
+        format!("KONTEXT_SERVER={}", remote.url),
+        format!("KONTEXT_PROJECT={}", remote.token.project),
+        format!("KONTEXT_TOKEN={token}"),
+    ];
+    match role.as_str() {
+        "owner" => env.push(format!("KONTEXT_ACTOR=human:{person}")),
+        "pm" => env.push("KONTEXT_ACTOR=agent:pm".into()),
+        "coordinator" if !actors.is_empty() => {
+            env.push(format!("KONTEXT_ACTOR=agent:{}", actors[0]))
+        }
+        _ => {}
+    }
+    if role != "owner" {
+        env.push(format!("KONTEXT_ROLE={role}"));
+    }
+    Ok(Minted {
+        id: v
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        token,
+        project: remote.token.project.clone(),
+        server: remote.url.clone(),
+        person,
+        role,
+        epic,
+        actors,
+        writer,
+        expires: v.get("expires").and_then(Value::as_i64),
+        env,
+    })
+}
+
+/// The token `token create` (or `invite`) asks the server for: its role,
+/// person, epic and the names a coordinator writes as, writer and lifetime.
+pub(crate) fn token_body(
+    project: &str,
+    home: &Path,
+    a: &TokenArgs,
+) -> Result<(Remote, Conn, Value)> {
     let role = a.role.trim().to_lowercase();
     if !ROLES.contains(&role.as_str()) {
         bail!("--role is one of {}", ROLES.join(", "));
@@ -2492,54 +2562,7 @@ pub fn token_create(project: &str, home: &Path, a: &TokenArgs) -> Result<Minted>
     if let Some(t) = ttl_ms {
         body["ttl_ms"] = json!(t);
     }
-    let v = Conn::ok(conn.json("POST", "tokens", &body)?, "token create")?;
-    let token = v
-        .get("token")
-        .and_then(Value::as_str)
-        .context("the server sent no token")?
-        .to_string();
-    let actors: Vec<String> = v
-        .get("actors")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut env = vec![
-        format!("KONTEXT_SERVER={}", remote.url),
-        format!("KONTEXT_PROJECT={}", remote.token.project),
-        format!("KONTEXT_TOKEN={token}"),
-    ];
-    match role.as_str() {
-        "owner" => env.push(format!("KONTEXT_ACTOR=human:{person}")),
-        "pm" => env.push("KONTEXT_ACTOR=agent:pm".into()),
-        "coordinator" if !actors.is_empty() => {
-            env.push(format!("KONTEXT_ACTOR=agent:{}", actors[0]))
-        }
-        _ => {}
-    }
-    if role != "owner" {
-        env.push(format!("KONTEXT_ROLE={role}"));
-    }
-    Ok(Minted {
-        id: v
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        token,
-        project: remote.token.project.clone(),
-        server: remote.url.clone(),
-        person,
-        role,
-        epic,
-        actors,
-        writer,
-        expires: v.get("expires").and_then(Value::as_i64),
-        env,
-    })
+    Ok((remote, conn, body))
 }
 
 impl Minted {
@@ -2797,6 +2820,7 @@ fn bootstrap_project(url: &str, token: &Token) -> Result<String> {
         home: Some(home),
         name: None,
         quick: true,
+        token: None,
     });
     // Done, or nothing was made: the marker goes. A home left half made
     // keeps it, so the next attempt may remove that home.

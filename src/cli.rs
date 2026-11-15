@@ -853,6 +853,58 @@ pub enum Cmd {
         #[arg(long, value_name = "ROLE")]
         worktree_role: Option<String>,
     },
+    /// Invites another machine (or person) to the project: prints a `kontext join …` line to run
+    /// there, which works once and for 10 minutes (--valid-for). It carries a one-time code, not
+    /// a token: the server keeps only the code's hash, and the joining machine gets its own token,
+    /// which never leaves it. Needs this machine's owner token and a server deployed with
+    /// invitations (an older one: it says to run `kontext server deploy`)
+    Invite {
+        /// owner (the default: your own other machine), pm, coordinator, implementer, tester or scout
+        #[arg(long, default_value = "owner")]
+        role: String,
+        /// The epic (id or name); a coordinator needs it, and writes as its coordinator
+        #[arg(long)]
+        epic: Option<String>,
+        /// Whose it is (default: this machine's human)
+        #[arg(long)]
+        person: Option<String>,
+        /// The token it gives stops working after this long (`8h`, `7d`); default: it does not
+        #[arg(long)]
+        ttl: Option<String>,
+        /// The writer the new machine writes as (default: a new one, as in `token create`)
+        #[arg(long)]
+        writer: Option<String>,
+        /// How long the line works (`10m` by default, a day at most)
+        #[arg(long, value_name = "DURATION")]
+        valid_for: Option<String>,
+    },
+    /// Joins a project with the line `kontext invite` printed on a machine that has it: trades its
+    /// one-time code for this machine's own token, brings the project as `clone --server` does
+    /// and, run inside a code repo, installs the hooks as `install` does. Running it again resumes
+    /// and does not spend the code twice. A used or expired line is refused (exit 2): ask for a new
+    /// one
+    Join {
+        /// The join string (`kxj1.…`)
+        join: String,
+        /// Where to put the kontext-home (default: ~/kontext-home/<project>)
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// Name to register it under (default: the project's)
+        #[arg(long)]
+        name: Option<String>,
+        /// Only the project: no install in the current repo
+        #[arg(long)]
+        no_install: bool,
+        /// As in `kontext install`: also replaces the agent files you changed by hand
+        #[arg(long)]
+        force: bool,
+        /// As in `kontext install`: the hooks go in .claude/settings.local.json
+        #[arg(long)]
+        local: bool,
+        /// As in `kontext install`: the role of sessions in linked git worktrees
+        #[arg(long, value_name = "ROLE")]
+        worktree_role: Option<String>,
+    },
     /// Checks this installation: the binary, PATH, config and project, kontext-home, hooks,
     /// capture, skills and the hook log. Writes nothing; exits with 1 if anything is a problem
     Doctor,
@@ -1261,7 +1313,11 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
     // the first command (quietly in the hook, which must stay silent).
     if !matches!(
         cli.cmd,
-        Cmd::Init { .. } | Cmd::Clone { .. } | Cmd::Server { .. } | Cmd::Measure { .. }
+        Cmd::Init { .. }
+            | Cmd::Clone { .. }
+            | Cmd::Join { .. }
+            | Cmd::Server { .. }
+            | Cmd::Measure { .. }
     ) && let Some(r) = crate::remote::bootstrap()
         && !matches!(cli.cmd, Cmd::Hook { .. })
     {
@@ -1302,6 +1358,8 @@ fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
         | Cmd::Server { .. }
         | Cmd::Token { .. }
         | Cmd::Setup { .. }
+        | Cmd::Invite { .. }
+        | Cmd::Join { .. }
         | Cmd::Ui { .. } => return None,
         Cmd::Install {
             skills_only: true, ..
@@ -1864,6 +1922,62 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 ExitCode::FAILURE
             })
         }
+        Cmd::Invite {
+            role,
+            epic,
+            person,
+            ttl,
+            writer,
+            valid_for,
+        } => {
+            let p = config::resolve_project(project)?;
+            let i = crate::invite::invite(
+                &p.name,
+                &p.home,
+                &crate::invite::InviteArgs {
+                    token: crate::remote::TokenArgs {
+                        role,
+                        epic,
+                        person,
+                        ttl,
+                        writer,
+                    },
+                    valid_for,
+                },
+            )?;
+            if cx.json {
+                print_json(&i)?;
+            } else {
+                print!("{}", i.text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Join {
+            join,
+            home,
+            name,
+            no_install,
+            force,
+            local,
+            worktree_role,
+        } => {
+            let o = crate::invite::join(&crate::invite::JoinArgs {
+                join,
+                home,
+                name,
+                no_install,
+                role: cx.role.unwrap_or("pm").to_string(),
+                force,
+                local,
+                worktree_role,
+            })?;
+            if cx.json {
+                print_json(&o)?;
+            } else {
+                print!("{}", o.text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Init {
             name,
             home,
@@ -1882,6 +1996,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 home,
                 name,
                 quick: false,
+                token: None,
             })?;
             if cx.json {
                 print_json(&json!({ "clone": c, "sync": r }))?;

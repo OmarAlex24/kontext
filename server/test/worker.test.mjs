@@ -481,3 +481,70 @@ test("a revoked or expired token's socket hears nothing more", async () => {
   assert.equal(expiring.frontiers.length, 1, "the expired token heard more");
   owner.ws.close();
 });
+
+test("invitations: a one-time code a new machine trades for its own token", async () => {
+  const info = await call("GET", "/v1/info");
+  assert.deepEqual(info.data.features, ["invites"]);
+  const p = await project();
+  const want = { person: "omar", role: "owner", writer: "omar.owner.b1@kontext" };
+  // Only an owner (or the admin) invites.
+  const impl = await call("POST", `/v1/p/${p.name}/tokens`, { token: p.token, body: { person: "ana", role: "implementer", writer: "ana@x" } });
+  assert.equal((await call("POST", `/v1/p/${p.name}/invites`, { token: impl.data.token, body: want })).status, 403);
+  // A taken writer is refused when inviting, not only when joining.
+  assert.equal((await call("POST", `/v1/p/${p.name}/invites`, { token: p.token, body: { ...want, writer: p.writer } })).status, 409);
+  assert.equal((await call("POST", `/v1/p/${p.name}/invites`, { token: p.token, body: { ...want, valid_ms: 2 * 24 * 3600 * 1000 } })).status, 400);
+
+  const inv = await call("POST", `/v1/p/${p.name}/invites`, { token: p.token, body: want });
+  assert.equal(inv.status, 201, JSON.stringify(inv.data));
+  const code = inv.data.code;
+  assert.match(code, /^kxi1\.[A-Za-z0-9_-]{32}$/);
+  assert.ok(inv.data.expires > Date.now() + 9 * 60 * 1000 && inv.data.expires <= Date.now() + 10 * 60 * 1000);
+  // The code is no token: it opens nothing but join.
+  assert.equal((await call("GET", `/v1/p/${p.name}/frontier`, { token: code })).status, 401);
+  // Another project's join does not know it.
+  const q = await project();
+  assert.equal((await call("POST", `/v1/p/${q.name}/join`, { token: code })).status, 404);
+
+  // Two joins at once with the same code: one token.
+  const [a, b] = await Promise.all([
+    call("POST", `/v1/p/${p.name}/join`, { token: code }),
+    call("POST", `/v1/p/${p.name}/join`, { token: code }),
+  ]);
+  const ok = [a, b].filter((r) => r.status === 201);
+  const used = [a, b].filter((r) => r.status === 410);
+  assert.equal(ok.length, 1, JSON.stringify([a.data, b.data]));
+  assert.equal(used.length, 1);
+  assert.equal(used[0].data.error, "invite_used");
+  const t = ok[0].data;
+  assert.deepEqual([t.person, t.role, t.writer, t.project], ["omar", "owner", "omar.owner.b1@kontext", p.name]);
+  const who = await call("GET", `/v1/p/${p.name}/whoami`, { token: t.token });
+  assert.deepEqual([who.data.role, who.data.writer], ["owner", "omar.owner.b1@kontext"]);
+  // Used once: refused after, and says so.
+  const again = await call("POST", `/v1/p/${p.name}/join`, { token: code });
+  assert.equal(again.status, 410);
+  assert.equal(again.data.error, "invite_used");
+  // The server keeps the code's hash, never the code.
+  const list = await call("GET", `/v1/p/${p.name}/tokens`, { token: p.token });
+  assert.ok(!JSON.stringify(list.data).includes(code));
+  const made = list.data.tokens.find((x) => x.writer === "omar.owner.b1@kontext");
+  assert.ok(made.created_by.startsWith("invite:"), made.created_by);
+
+  // An expired code is refused, and says so; it gives no token.
+  const short = await call("POST", `/v1/p/${p.name}/invites`, {
+    token: p.token, body: { person: "ana", role: "implementer", writer: "ana.impl@kontext", valid_ms: 200, ttl_ms: 8 * 3600 * 1000 },
+  });
+  assert.equal(short.status, 201);
+  await new Promise((done) => setTimeout(done, 300));
+  const late = await call("POST", `/v1/p/${p.name}/join`, { token: short.data.code });
+  assert.equal(late.status, 410);
+  assert.equal(late.data.error, "invite_expired");
+  // An unknown code.
+  assert.equal((await call("POST", `/v1/p/${p.name}/join`, { token: "kxi1.nope" })).status, 404);
+  // The token's own lifetime (ttl_ms) is carried through.
+  const timed = await call("POST", `/v1/p/${p.name}/invites`, {
+    token: p.token, body: { person: "bo", role: "tester", writer: "bo.tester@kontext", ttl_ms: 3600 * 1000 },
+  });
+  const got = await call("POST", `/v1/p/${p.name}/join`, { token: timed.data.code });
+  assert.equal(got.status, 201);
+  assert.ok(got.data.expires > Date.now() && got.data.expires <= Date.now() + 3600 * 1000);
+});
