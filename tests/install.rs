@@ -424,6 +424,7 @@ fn installs_agent_files_and_keeps_edited_ones() {
         "kontext epic after",
         "kontext epic parallel",
         "Leave no ⚠",
+        "write it after both epics' `touches`",
         "do not invent one",
         "Never read `.pm/dumps/`",
         "no `scope sign`",
