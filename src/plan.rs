@@ -100,16 +100,19 @@ impl Overlap {
     }
 }
 
-/// Is `inner` the path `outer` or under it?
-fn under(inner: &str, outer: &str) -> bool {
-    inner == outer
-        || (inner.len() > outer.len()
-            && inner.starts_with(outer)
-            && inner.as_bytes()[outer.len()] == b'/')
+/// Is `inner` the path `outer` or under it? Compared by
+/// [`crate::epics::path_key`] (normalized again, ignoring case): another
+/// writer may have stored either one raw. The empty key is the whole repo.
+pub fn under(inner: &str, outer: &str) -> bool {
+    let (i, o) = (crate::epics::path_key(inner), crate::epics::path_key(outer));
+    o.is_empty()
+        || i == o
+        || (i.len() > o.len() && i.starts_with(&o) && i.as_bytes()[o.len()] == b'/')
 }
 
 /// The paths two lists share: equal paths, or a file or folder inside a
-/// folder of the other (then the more specific one). In order, no repeats.
+/// folder of the other (then the more specific one, as stored). In order,
+/// no repeats.
 pub fn shared_paths(a: &[String], b: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for x in a {
@@ -121,7 +124,8 @@ pub fn shared_paths(a: &[String], b: &[String]) -> Vec<String> {
             } else {
                 continue;
             };
-            if !out.contains(p) {
+            let k = crate::epics::path_key(p);
+            if !out.iter().any(|o| crate::epics::path_key(o) == k) {
                 out.push(p.clone());
             }
         }
@@ -849,6 +853,31 @@ mod tests {
         assert!(p.waves[1].epics.iter().all(|e| e.overlaps.is_empty()));
         assert!(!p.text().contains("⚠"));
         assert!(p.json()["waves"][1]["epics"][0].get("overlaps").is_none());
+    }
+
+    #[test]
+    fn overlaps_compare_raw_paths_by_their_key() {
+        let paths = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for raw in [
+            "/src/billing",
+            "src/./billing/x.rs",
+            "src/Billing",
+            "\"src/billing\"",
+            "src/billing{a,b}",
+        ] {
+            assert!(
+                !shared_paths(&paths(&["src/billing"]), &paths(&[raw])).is_empty(),
+                "{raw}"
+            );
+        }
+        // Printed as stored: the more specific one.
+        assert_eq!(
+            shared_paths(&paths(&["src/billing"]), &paths(&["src/./billing/x.rs"])),
+            paths(&["src/./billing/x.rs"])
+        );
+        // The controls.
+        assert!(!shared_paths(&paths(&["src/billing"]), &paths(&["src/billing/y.rs"])).is_empty());
+        assert!(shared_paths(&paths(&["src/bill"]), &paths(&["src/billing"])).is_empty());
     }
 
     #[test]

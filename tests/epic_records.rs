@@ -875,3 +875,36 @@ fn a_parallel_record_from_a_coordinator_does_not_count() {
     p.append(&line);
     assert!(pm_ok(p, &["plan"]).contains("⚠ same paths as Catalog (src/billing)"));
 }
+
+/// Paths another writer stored raw still overlap: they are compared by
+/// their key, case ignored, and printed as stored.
+#[test]
+fn raw_paths_from_another_writer_still_warn() {
+    let t = planned();
+    let p = &t.p;
+    pm_ok(p, &["epic", "touches", "pay", "src/billing"]);
+    for raw in [
+        "/src/billing",
+        "src/./billing/x.rs",
+        "src/Billing",
+        "\\\"src/billing\\\"",
+        "src/billing{a,b}",
+    ] {
+        let t2 = planned();
+        let q = &t2.p;
+        pm_ok(q, &["epic", "touches", "pay", "src/billing"]);
+        q.append(&format!(
+            "{{\"kind\":\"touches\",\"title\":\"cat touches\",\"why\":\"\",\
+             \"actor\":{{\"type\":\"agent\",\"name\":\"pm\",\"role\":\"pm\"}},\
+             \"refs\":[\"{}\"],\"fields\":{{\"paths\":[\"{raw}\"]}}}}\n",
+            t2.cat
+        ));
+        let plan = pm_ok(q, &["plan"]);
+        assert!(plan.contains("⚠ same paths as Catalog"), "{raw}: {plan}");
+    }
+    // The controls: a file under it warns, a sibling prefix does not.
+    pm_ok(p, &["epic", "touches", "cat", "src/bill"]);
+    assert!(!pm_ok(p, &["plan"]).contains("⚠"));
+    pm_ok(p, &["epic", "touches", "cat", "src/billing/y.rs"]);
+    assert!(pm_ok(p, &["plan"]).contains("⚠ same paths as Catalog (src/billing/y.rs)"));
+}
