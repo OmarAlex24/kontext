@@ -976,8 +976,14 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
     l.push(format!(
         "- Progress: `kontext log \"…\" --task {task}`. Renew your claim: with no journal entry or close within {lease}, it expires and the task goes back to ready."
     ));
+    // The reader `kontext ask --task` picks (the same function routes it).
+    let reader = match tasks::task_reader(st, task) {
+        Some(r) if r.starts_with("epic:") => r,
+        Some(r) => format!("{r}, who assigned you this task"),
+        None => format!("epic:{name}"),
+    };
     l.push(format!(
-        "- Questions: if the charter or a decision answers it, keep going. If not, `kontext ask \"…\" --task {task}` (it goes to epic:{name}) and move on with what you can."
+        "- Questions: if the charter or a decision answers it, keep going. If not, `kontext ask \"…\" --task {task}` (it goes to {reader}) and move on with what you can."
     ));
     l.push("- Don't decide: if something should change, `kontext propose`.".into());
     l.push(format!(

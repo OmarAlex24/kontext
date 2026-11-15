@@ -229,7 +229,7 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 | `kontext done <U> [--run <cmd>] [--evidence <spec>]… [--since <mark>]` | Validates a feature whose tasks are all closed, against what the human should see. Only the epic's coordinator, the pm or an owner; `--since` is optional |
 | `kontext release <T> [--why]` | The task goes back to ready. Whoever has it, the coordinator, the pm or an owner |
 | `kontext reopen <T\|U> --why <text>` | Reopens a closed task, or a feature's validation; on a dropped feature, puts it back in the scope |
-| `kontext ask <title> [--to <reader>] [--task <T>] [--feature <U>]` | With `--task`, the question belongs to that task and, if you don't say who it's for, it goes to its epic. Its answer counts as new context in `done`. With `--feature`, it is about that feature |
+| `kontext ask <title> [--to <reader>] [--task <T>] [--feature <U>]` | With `--task`, the question belongs to that task and, if you don't say who it's for, it goes to its epic (to the pm, or the person, who assigned the task directly, if one did; `kontext next` says which). Its answer counts as new context in `done`. With `--feature`, it is about that feature |
 | `kontext fact <text> [--path <path>]… [--repo <name>] [--epic <epic>] [--tags a,b]` | A fact, with the fingerprint of the files it came from (phase 4). With `--epic` it shows up in that epic's `brief` and `next` |
 
 `<epic>` can be the id (`E-61e`), `epic:<name>` or `<name>`. Evidence is `cmd:"<command>"=<code>`, `file:<path>`, `pr:<url>` or `url:<url>`; a command without exit code 0 doesn't count, and `file:` has to exist (relative to the folder where you run `done`; it accepts `path:line`).

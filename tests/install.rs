@@ -437,6 +437,18 @@ fn installs_agent_files_and_keeps_edited_ones() {
         "{pm}"
     );
     assert!(orq.contains("| **S–M** | One agent"), "{orq}");
+    // The small task is assigned by the pm, so its questions reach the pm.
+    for (who, text) in [("kontext-pm", &pm), ("kontext-orchestrate", &orq)] {
+        assert!(
+            text.contains("kontext assign <T> --to agent:<x>-impl-1"),
+            "{who}: {text}"
+        );
+    }
+    assert!(
+        pm.contains("comes to you (`kontext inbox --as pm`)"),
+        "{pm}"
+    );
+    assert!(pm.contains("one coordinator per epic"), "{pm}");
     for name in ["kontext-implementer", "kontext-tester", "kontext-scout"] {
         let text = fs::read_to_string(agents.join(format!("{name}.md"))).unwrap();
         for rule in ["Hand back about five lines at most", "re-reads"] {

@@ -20,10 +20,10 @@ Your brief brings the task, its acceptance criteria, the decisions and facts tha
 
 - Leave progress: `kontext log "…" --task <T> --next "…"`. That renews your claim; without a journal entry or a close for 2 h, it expires and the task goes back to ready.
 - If `kontext next` says your claim lost to another machine ("stop working on it"), stop: the task belongs to whoever claimed it first. Do not close it or keep going; ask for another with `kontext next --epic <epic> --claim`.
-- If you have a question and the charter or a decision answers it, answer it yourself and move on. If not, `kontext ask "…" --task <T>` (it reaches your coordinator) and move on with what you can; check the answer with `kontext show <Q>`. If nobody answers, do not repeat the question: move on with whatever does not depend on it.
+- If you have a question and the charter or a decision answers it, answer it yourself and move on. If not, `kontext ask "…" --task <T>` (it reaches whoever handed you the task, your coordinator or the pm: `kontext next` says which) and move on with what you can; check the answer with `kontext show <Q>`. If nobody answers, do not repeat the question: move on with whatever does not depend on it.
 - If you find something useful for others: `kontext fact "…" --path <file> --epic <epic>`.
 - Do not decide: propose.
-- Do not ask the user anything: your level above is your coordinator, through `kontext ask --task <T>`.
+- Do not ask the user anything: your level above is your coordinator (or the pm, when the pm assigned you the task), through `kontext ask --task <T>`.
 
 ## Closing
 
