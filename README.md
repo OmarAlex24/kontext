@@ -14,7 +14,15 @@ On macOS (Apple silicon) and Linux (x86_64 and arm64), from the latest release:
 curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh
 ```
 
-It downloads the binary for your machine (static on Linux, so it runs in any container), checks it against the release's `SHA256SUMS`, and puts it in `~/.local/bin` (or `$KONTEXT_INSTALL_DIR`). `KONTEXT_VERSION=v0.2.0` picks a release. You need `git`; Rust and Node are not needed.
+It downloads the binary for your machine (static on Linux, so it runs in any container), checks it against the release's `SHA256SUMS`, and puts it in a folder of yours that is already on your `PATH` (`~/.local/bin`, `~/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, or another one under your home you can write), else in `~/.local/bin`; `$KONTEXT_INSTALL_DIR` picks the folder. Its last line says the next command. `KONTEXT_VERSION=v0.2.0` picks a release. You need `git`; Rust and Node are not needed.
+
+Then, in your code repo:
+
+```sh
+kontext setup
+```
+
+It creates the project, installs the hooks, skills and agent files, puts a sync server on your Cloudflare account and the project on it, and syncs. The one thing it needs from you is a Cloudflare API token: it prints a link that opens Cloudflare with the right permission filled in, and the command to paste the token into, in your terminal. Run `kontext setup` again afterwards; it picks up where it stopped. Another project on the same account is `kontext setup` in its repo, with nothing else. Another machine: `kontext invite` prints a line to run there (see "With a kontext server"). Without a server: `kontext setup --no-server`.
 
 From the source instead, with Rust 1.89 or newer (`rustup`):
 
@@ -23,6 +31,14 @@ cargo install --path . --locked
 ```
 
 That leaves the `kontext` binary in `~/.cargo/bin`. Install it either way before `kontext install`: the hooks it writes into `.claude/settings.json` record the absolute path of the binary that ran it. Installed from `target/debug/kontext`, they point at a file that `cargo clean` deletes, and from then on they fail without a word (`kontext install` prints a note when that is the case). If the binary moves, run `kontext install` again: it repoints the hooks. `kontext doctor` checks all of this.
+
+### Have your agent install it
+
+Paste this to your agent (Claude Code, or any agent that runs shell commands), in your code repo:
+
+> Install kontext in this repo: run `curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh`, then `kontext setup --json`; if it exits with 4, tell me exactly what its `needs_human.say` says, and run `kontext setup` again when I tell you it is done.
+
+What you do: open the link it gives you, create the token, and paste it into `kontext server deploy` in your own terminal, never into the chat (chats are captured and synced). On your other machine, ask the agent here to run `kontext invite`, and paste the line it prints there.
 
 ### Have an agent install it and migrate the memory
 
@@ -121,11 +137,7 @@ IDs are `<type>-<6 hex>`: `A` charter, `G` goal, `E` epic, `T` task, `D` decisio
 
 Each entry says who wrote it. In this order: `--actor`, the `KONTEXT_ACTOR` variable, and if there is neither, `agent:unknown`. An agent that forgets to say who it is never ends up recorded as a human. An agent's role and model come from `--role` and `--model`, or from `KONTEXT_ROLE` and `KONTEXT_MODEL`.
 
-Put your name in your shell (`~/.bashrc` or `~/.zshrc`), the same one that is in `owners` in `project.toml`:
-
-```sh
-export KONTEXT_ACTOR=human:omar
-```
+You don't need to set anything. Your name (as reader, and as the owner `kontext setup` and `init` write in `project.toml`) comes from `git config user.name`. When you approve something in the conversation, the pm writes it with `--approved-by <you>`; when you run a command that writes as you, pass `--actor human:<name>` (the same name that is in `owners`). If you prefer, put it in your shell once (`export KONTEXT_ACTOR=human:omar` in `~/.bashrc` or `~/.zshrc`).
 
 Agents use `KONTEXT_ACTOR=agent:<name>` in the environment they are launched with and, if they know it, `KONTEXT_ROLE`, `KONTEXT_MODEL` and `KONTEXT_SESSION`. Inside a session, an agent passes its identity as arguments (`kontext --actor agent:<name> --role <role> log …`), not as variables in front of the command: Claude Code's `Bash(kontext:*)` permission only covers commands that start with `kontext`, and in `claude -p` nobody approves the others. The hook and `resume` tell it how to write and how to invoke `kontext`.
 
@@ -137,8 +149,10 @@ Each reader (`omar`, `pm`, `epic:payments`) has a cursor in `cursors/<reader>/<w
 
 ### Typical flow
 
+By hand, typing every command yourself (with an agent, `kontext setup` and the pm do this):
+
 ```sh
-export KONTEXT_ACTOR=human:omar
+export KONTEXT_ACTOR=human:omar          # only because you type the commands yourself
 kontext init billing
 kontext charter --objective "Charge by card in the app" --non-goal "Invoicing" --done-when "First real charge"
 kontext sign A-1a1                       # the id that charter printed
@@ -213,7 +227,7 @@ So, with `.claude/` not committed, `--local` in the main checkout puts the hooks
 | `KONTEXT_SERVER` | A sandbox's kontext server: with `KONTEXT_TOKEN`, the first command sets up the token's project if this machine does not have it. A registered project always uses `server` in `projects.toml`, and its token never goes here |
 | `KONTEXT_TOKEN` | A token for the kontext server (`kxt1.…`) for `clone --server`, `server connect`, and a sandbox's first command (with `KONTEXT_SERVER`); it is then saved in the config folder (0600), and a registered project uses the saved one |
 | `KONTEXT_ADMIN_SECRET` | The server's admin secret, on a machine other than the one that deployed it (`init --server`, `server connect`) |
-| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | For `kontext server deploy` |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | For `kontext server deploy` (and `kontext setup`, which deploys with it when this machine has no server yet) |
 
 ## Phase 3 commands
 
@@ -599,20 +613,21 @@ Two ways to share a project: a **kontext server** (below: every command syncs on
 The server is a Cloudflare Worker that you deploy on your own account (the free plan is enough); it relays ledger lines and never decides anything. Every command pulls before it reads and pushes what it wrote, with short timeouts. Push and pull go on their own, push first, so a slow pull never holds back what you wrote. Offline, commands work on the local copy and what you wrote goes up with the next command that reaches the server. Screenshots and other media come down when a view needs them, or with `kontext sync`.
 
 ```sh
-# Once per Cloudflare account. The API token needs the account permission
-# "Workers Scripts: Edit"; the admin secret is kept in servers.json (0600).
-CLOUDFLARE_API_TOKEN=… kontext server deploy          # prints https://kontext.<subdomain>.workers.dev
+# In the code repo: the project, the hooks, the server and the project on it.
+# The first time on a Cloudflare account it stops (exit 4) with a link that
+# creates the API token ("Workers Scripts: Edit" filled in) and the command to
+# paste it into, in your terminal; then run it again.
+kontext setup
 
-# A new project on it, or an existing one with all its history
-kontext init billing --server https://kontext.<subdomain>.workers.dev
-kontext server connect https://kontext.<subdomain>.workers.dev
+# Another project on the same account: in its repo, the same command.
+kontext setup
 
-# A copy that started without the server joins it with a token of its own
-KONTEXT_TOKEN=kxt1.… kontext server connect https://kontext.<subdomain>.workers.dev
-
-# Someone else, or another machine of yours: the owner makes a token (shown once)
-kontext token create --role owner --person ana
-KONTEXT_TOKEN=kxt1.… kontext clone --server https://kontext.<subdomain>.workers.dev billing
+# Your other machine, or someone else's: one line, good once and for 10 minutes
+kontext invite                                  # owner by default; --role, --person as in token create
+#   On the other machine, in its code repo (so the hooks are installed too), run:
+#     kontext join kxj1.…
+#   If kontext is not installed there, this installs it and joins in one line:
+#     curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh -s -- kxj1.…
 
 # A sandbox for a coordinator: set the printed variables in its environment;
 # its first kontext command sets the project up there
@@ -621,9 +636,30 @@ kontext token list
 kontext token revoke tok_…
 ```
 
+What `setup` runs, by hand:
+
+```sh
+# Once per Cloudflare account. The API token needs the account permission
+# "Workers Scripts: Edit"; the admin secret is kept in servers.json (0600).
+kontext server deploy                       # asks for the token; or CLOUDFLARE_API_TOKEN=…
+kontext init billing --server https://kontext.<subdomain>.workers.dev
+kontext server connect https://kontext.<subdomain>.workers.dev   # an existing project, with its history
+kontext install
+
+# A copy that started without the server joins it with a token of its own
+KONTEXT_TOKEN=kxt1.… kontext server connect https://kontext.<subdomain>.workers.dev
+
+# A token carried by hand instead of an invitation (shown once)
+kontext token create --role owner --person ana
+KONTEXT_TOKEN=kxt1.… kontext clone --server https://kontext.<subdomain>.workers.dev billing
+```
+
 | Command | What it does |
 |---|---|
-| `kontext server deploy [--name kontext] [--account-id] [--subdomain] [--no-check] [--replace]` | Uploads the server with the Cloudflare API (no wrangler or Node) and prints its URL; running it again updates it and keeps its admin secret. It refuses (exit 2) a Worker of that name that kontext did not deploy, unless `--replace` |
+| `kontext setup [--project] [--home] [--server <url>] [--no-server] [--role] [--force] [--local] [--worktree-role]` | In a code repo, from nothing to installed and syncing: finds or creates the project (name: `--project`, the repo's `.kontext.toml`, or the repo's folder), installs as `install` (its flags go to it), uses the server this machine deployed or deploys one (with `CLOUDFLARE_API_TOKEN`), creates the project there with its history, and syncs. Each step prints as done, already or needed (`--json`: `steps`, `ok`, `needs_human`, `next`). Without a server and a token it stops with exit 4 and says what the human does. Run again it resumes and changes nothing that is right. A project already on the server is refused (exit 2) with `kontext invite` as the way in |
+| `kontext invite [--role owner] [--person] [--epic] [--ttl] [--writer] [--valid-for 10m]` | A one-time line for another machine or person: `kontext join kxj1.…`, and the same with `install.sh` for a machine without kontext. It carries a code, not a token, good once and for 10 minutes (a day at most); the server keeps only its hash. The token it gives is as `token create` makes it |
+| `kontext join <kxj1.…> [--home] [--name] [--no-install]` | Trades the code for this machine's own token (saved 0600, never printed), brings the project as `clone --server` does and, in a code repo, installs as `install`. A used or expired line is refused (exit 2); run again it resumes without spending the code |
+| `kontext server deploy [--name kontext] [--account-id] [--subdomain] [--no-check] [--replace]` | Uploads the server with the Cloudflare API (no wrangler or Node) and prints its URL; running it again updates it and keeps its admin secret. The token: `CLOUDFLARE_API_TOKEN`, typed when it asks on a terminal (it prints the link that creates one), or piped on stdin; used once, never stored. Without a terminal and with no token it exits with 4 instead of waiting. On a terminal, an account with no workers.dev subdomain picks one in the same run. It refuses (exit 2) a Worker of that name that kontext did not deploy, unless `--replace` |
 | `kontext init <name> --server <url>` | Creates the project on the server (with the admin secret) and locally, and saves this machine's owner token (0600) |
 | `kontext server connect <url>` | Attaches an existing project. With the admin secret: uploads every writer's lines, the cursors, the config and the media, going on past a writer the server refuses (exit 1 if anything was left out). With only `KONTEXT_TOKEN`: this machine's own lines. Changes nothing local; running it again resumes |
 | `kontext clone --server <url> <project> [--home] [--name]` | Brings a project down with the token in `KONTEXT_TOKEN` |
@@ -638,7 +674,8 @@ kontext token revoke tok_…
 - **Sandboxes never wait on the network:** a sandbox's set-up has the same short timeouts as every command, and after a failure no process on that machine tries again for 30 s. Token claims are not trusted until the server confirms them, and nothing outside a folder kontext set up is ever removed.
 - **Nothing in the repo:** no token, server URL or ledger goes in the code repo. Tokens live in the config folder (0600) or in the environment.
 - **If two copies write as the same writer** (a token used in two places), the server keeps the first and refuses the other's lines; `kontext status` says so, and nothing is overwritten.
-- **Old binaries** read a synced kontext-home as before (the format did not change); they just don't sync it.
+- **Old binaries** read a synced kontext-home as before (the format did not change); they just don't sync it. A 0.2.0 binary syncs with a server deployed later as before. A server deployed before invitations makes `invite` and `join` say it needs `kontext server deploy` on the machine that deployed it (that keeps its projects and admin secret).
+- **Secrets:** the Cloudflare token is typed or pasted in a terminal, used once and not stored. The admin secret and each machine's token stay in the config folder (0600). The join line is the one thing meant to be pasted elsewhere: it carries a code that works once and for minutes, never a token.
 
 ### With a git remote
 
@@ -697,7 +734,7 @@ With `require_signatures = true`, those entries only count if the signature veri
 
 ## Exit codes
 
-`0` success; `1` error; `2` rejected (a rule isn't met and nothing was written; in `sync`, git conflicted or the local state clashes with what arrived, and nothing was pushed); `3` stale context in `done`.
+`0` success; `1` error; `2` rejected (a rule isn't met and nothing was written; in `sync`, git conflicted or the local state clashes with what arrived, and nothing was pushed); `3` stale context in `done`; `4` needs the human (`setup`, `server deploy`): a step only the human can do, such as a Cloudflare API token. It never waits on a prompt: it prints why, the link to open and the command the human runs in a terminal (with `--json`, `{"needs_human": {"reason", "why", "open", "steps", "run", "then", "say"}}`).
 
 ## Development
 
