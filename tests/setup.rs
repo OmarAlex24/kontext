@@ -174,7 +174,12 @@ fn setup_stops_for_the_human_then_finishes_and_then_changes_nothing() {
     let n = &v["needs_human"];
     assert_eq!(n["reason"], "cloudflare_token");
     assert_eq!(n["exit_code"], 4);
-    assert_eq!(n["then"], "kontext setup");
+    // As it runs here: the test binary is not the `kontext` on the PATH.
+    assert!(
+        n["then"].as_str().unwrap().ends_with("/kontext setup"),
+        "{text}"
+    );
+    assert_eq!(v["command"], "setup");
     assert!(
         n["open"]
             .as_str()

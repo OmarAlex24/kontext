@@ -53,6 +53,8 @@ pub struct Step {
 /// What `kontext setup` did.
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
+    /// `setup` or `join`.
+    pub command: &'static str,
     pub repo: String,
     pub project: String,
     pub home: Option<String>,
@@ -79,8 +81,8 @@ impl Outcome {
 
     pub fn text(&self) -> String {
         let mut l = vec![format!(
-            "kontext setup in {} (project {}):",
-            self.repo, self.project
+            "kontext {} in {} (project {}):",
+            self.command, self.repo, self.project
         )];
         for s in &self.steps {
             l.push(format!("  {:<15} {:<8} {}", s.step, s.status, s.detail));
@@ -168,6 +170,7 @@ pub fn run(a: &Args) -> Result<Outcome> {
         .into());
     }
     let mut out = Outcome {
+        command: "setup",
         repo: repo.display().to_string(),
         project: name.clone(),
         home: None,
@@ -348,10 +351,16 @@ pub fn run(a: &Args) -> Result<Outcome> {
     };
     let mut sent: Vec<String> = Vec::new();
     if report.pushed_total() > 0 {
-        sent.push(format!("{} entries up", report.pushed_total()));
+        sent.push(format!(
+            "{} up",
+            crate::views::plural(report.pushed_total() as usize, "entry", "entries")
+        ));
     }
     if report.received_total() > 0 {
-        sent.push(format!("{} entries down", report.received_total()));
+        sent.push(format!(
+            "{} down",
+            crate::views::plural(report.received_total() as usize, "entry", "entries")
+        ));
     }
     if !report.config_out.is_empty() {
         sent.push(format!("config sent: {}", report.config_out.join(", ")));
@@ -387,9 +396,10 @@ pub fn run(a: &Args) -> Result<Outcome> {
     Ok(out)
 }
 
-/// The command to run again, with the flags that change what it does.
+/// The command to run again, with the flags that change what it does, as
+/// it can be run here (this binary's path if `kontext` on the PATH is not it).
 fn setup_again(a: &Args) -> String {
-    let mut c = String::from("kontext setup");
+    let mut c = format!("{} setup", crate::human::self_command());
     if let Some(p) = &a.project {
         c.push_str(&format!(" --project {p}"));
     }
@@ -472,7 +482,8 @@ fn install_step(out: &mut Outcome, name: &str, a: &Args) -> Result<()> {
     }
     out.notes.extend(plan.notes.iter().cloned());
     if let Some(n) = crate::cli::build_dir_note() {
-        out.notes.push(n);
+        out.notes
+            .push(n.strip_prefix("Note: ").unwrap_or(&n).to_string());
     }
     if plan.is_noop() {
         out.step(
