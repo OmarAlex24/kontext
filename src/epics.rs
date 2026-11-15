@@ -69,14 +69,18 @@ pub fn touches(st: &State, epic: &str) -> Vec<String> {
     out
 }
 
-/// The epics a `parallel` record that counts pairs with this one (ids).
-pub fn parallel_with(st: &State, epic: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// The `parallel` records that count for this epic: the other epic, and
+/// the shared paths each one covers (`fields.paths`, what they shared when
+/// it was written; a record that stored none covers nothing).
+pub fn parallel_with(st: &State, epic: &str) -> Vec<crate::plan::ParallelOk> {
+    let mut out = Vec::new();
     for r in records(st, epic, "parallel") {
-        for other in r.refs.iter().take(2).filter(|x| *x != epic) {
-            if !out.contains(other) {
-                out.push(other.clone());
-            }
+        if let Some(other) = r.refs.iter().take(2).find(|x| *x != epic) {
+            out.push(crate::plan::ParallelOk {
+                record: r.id.clone(),
+                with: other.clone(),
+                paths: string_list(r.fields.get("paths")),
+            });
         }
     }
     out
@@ -342,9 +346,13 @@ pub fn add_touches(
 }
 
 /// `kontext epic parallel <a> <b> --why`: these two epics may run in the
-/// same wave although they touch the same paths, and why. It silences the
-/// warning for that pair in `plan`, `tree` and the summary, which shows it
-/// with its why instead.
+/// same wave although they touch the same paths, and why. It stores the
+/// paths they share now (`fields.paths`) and covers only those: the warning
+/// for them goes away in `plan`, `tree` and the summary (which shows the
+/// record, what it covers and its why), and a path they share later warns
+/// again. Refused when they share no path, and when a record of the pair
+/// already covers all they share; a new one for the same pair is how a new
+/// overlap is accepted.
 pub fn add_parallel(
     store: &mut Store,
     actor: &Actor,
@@ -366,19 +374,30 @@ pub fn add_parallel(
         if ea.id == eb.id {
             return refused("name two different epics");
         }
-        if parallel_with(st, &ea.id).contains(&eb.id) {
+        // It covers the paths they share now, and only those.
+        let shared = crate::plan::shared_paths(&touches(st, &ea.id), &touches(st, &eb.id));
+        if shared.is_empty() {
             return refused(format!(
-                "{} and {} already have a parallel record",
+                "{} and {} share no recorded path, and a parallel record covers only the paths \
+                 they share when it is written. Record what each one touches first (`kontext epic \
+                 touches <epic> <path>… --why \"…\"`), then run this again",
                 epic_name(ea),
                 epic_name(eb)
             ));
         }
-        let shared = crate::plan::shared_paths(&touches(st, &ea.id), &touches(st, &eb.id));
-        if shared.is_empty() {
-            warnings.push(format!(
-                "{} and {} share no recorded paths yet (`kontext epic touches`)",
+        let pair: Vec<crate::plan::ParallelOk> = parallel_with(st, &ea.id)
+            .into_iter()
+            .filter(|p| p.with == eb.id)
+            .collect();
+        let covered: Vec<String> = pair.iter().flat_map(|p| p.paths.clone()).collect();
+        if !pair.is_empty() && crate::plan::uncovered(&shared, &covered).is_empty() {
+            let ids: Vec<&str> = pair.iter().map(|p| p.record.as_str()).collect();
+            return refused(format!(
+                "{} and {} already have a parallel record ({}) that covers what they share ({})",
                 epic_name(ea),
-                epic_name(eb)
+                epic_name(eb),
+                ids.join(", "),
+                shared.join(", ")
             ));
         }
         let plan = crate::plan::of_state(st);

@@ -44,8 +44,9 @@ pub struct Node {
     pub open_loose: usize,
     /// The paths it is expected to touch (`touches` records).
     pub touches: Vec<String>,
-    /// The epics a `parallel` record says may share paths with it (ids).
-    pub parallel_ok: Vec<String>,
+    /// The `parallel` records it has: with which epic, and the shared paths
+    /// each one covers (what it stored when it was written).
+    pub parallel_ok: Vec<ParallelOk>,
 }
 
 impl Node {
@@ -83,20 +84,45 @@ pub struct PlanEpic {
     pub overlaps: Vec<Overlap>,
 }
 
+/// A `parallel` record of an epic: the other epic and the paths it covers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParallelOk {
+    pub record: String,
+    pub with: String,
+    pub paths: Vec<String>,
+}
+
 /// Another epic of the same wave that shares paths with this one.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Overlap {
     pub id: String,
     pub name: String,
     pub title: String,
-    /// The shared paths: of two that overlap, the more specific one.
+    /// The shared paths no `parallel` record covers: of two that overlap,
+    /// the more specific one, as stored.
     pub paths: Vec<String>,
+    /// The pair's `parallel` records, which cover other paths (`covered`),
+    /// not these.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parallel: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub covered: Vec<String>,
 }
 
 impl Overlap {
-    /// "⚠ same paths as Payments (src/billing)".
+    /// "⚠ same paths as Payments (src/billing)", and with a parallel record
+    /// for other paths, "…; not covered by R-…".
     pub fn text(&self) -> String {
-        format!("⚠ same paths as {} ({})", self.title, self.paths.join(", "))
+        let not = if self.parallel.is_empty() {
+            String::new()
+        } else {
+            format!("; not covered by {}", self.parallel.join(", "))
+        };
+        format!(
+            "⚠ same paths as {} ({}{not})",
+            self.title,
+            self.paths.join(", ")
+        )
     }
 }
 
@@ -131,6 +157,15 @@ pub fn shared_paths(a: &[String], b: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Of `shared`, the paths no path in `covered` covers (equal, or under one).
+pub fn uncovered(shared: &[String], covered: &[String]) -> Vec<String> {
+    shared
+        .iter()
+        .filter(|p| !covered.iter().any(|c| under(p, c)))
+        .cloned()
+        .collect()
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -255,10 +290,22 @@ fn wave_overlaps(open: &[&Node], ids: &[usize]) -> BTreeMap<usize, Vec<Overlap>>
     for (k, &i) in ids.iter().enumerate() {
         for &j in &ids[k + 1..] {
             let (a, b) = (open[i], open[j]);
-            if a.parallel_ok.contains(&b.id) || b.parallel_ok.contains(&a.id) {
-                continue;
+            // A `parallel` record covers only the shared paths it stored: a
+            // path they share since then warns again.
+            let mut parallel: Vec<String> = Vec::new();
+            let mut covered: Vec<String> = Vec::new();
+            let pair = a
+                .parallel_ok
+                .iter()
+                .filter(|p| p.with == b.id)
+                .chain(b.parallel_ok.iter().filter(|p| p.with == a.id));
+            for p in pair {
+                if !parallel.contains(&p.record) {
+                    parallel.push(p.record.clone());
+                    covered.extend(p.paths.iter().cloned());
+                }
             }
-            let paths = shared_paths(&a.touches, &b.touches);
+            let paths = uncovered(&shared_paths(&a.touches, &b.touches), &covered);
             if paths.is_empty() {
                 continue;
             }
@@ -267,6 +314,8 @@ fn wave_overlaps(open: &[&Node], ids: &[usize]) -> BTreeMap<usize, Vec<Overlap>>
                 name: n.name.clone(),
                 title: n.title.clone(),
                 paths: paths.clone(),
+                parallel: parallel.clone(),
+                covered: covered.clone(),
             };
             out.entry(i).or_default().push(with(b));
             out.entry(j).or_default().push(with(a));
@@ -848,11 +897,35 @@ mod tests {
         assert!(text.contains("kontext does not reorder them"), "{text}");
         // Only a warning: the waves and `ok` are the same.
         assert!(p.ok);
-        cat.parallel_ok = vec!["E-pay".into()];
-        let p = compute(&[node("base", &[]), pay, cat]);
+        cat.parallel_ok = vec![ParallelOk {
+            record: "R-par".into(),
+            with: "E-pay".into(),
+            paths: paths(&["src/billing/prices.rs"]),
+        }];
+        let p = compute(&[node("base", &[]), pay.clone(), cat.clone()]);
         assert!(p.waves[1].epics.iter().all(|e| e.overlaps.is_empty()));
         assert!(!p.text().contains("⚠"));
         assert!(p.json()["waves"][1]["epics"][0].get("overlaps").is_none());
+        // A path they share since then is not covered: it warns again, and
+        // says the record covers something else.
+        cat.touches.push("src/billing/tax.rs".into());
+        let p = compute(&[node("base", &[]), pay.clone(), cat.clone()]);
+        let o = &p.waves[1].epics[0].overlaps[0];
+        assert_eq!(o.paths, paths(&["src/billing/tax.rs"]));
+        assert_eq!(o.parallel, paths(&["R-par"]));
+        assert!(
+            p.text()
+                .contains("⚠ same paths as CAT (src/billing/tax.rs; not covered by R-par)"),
+            "{}",
+            p.text()
+        );
+        // A record that stored no path covers nothing.
+        cat.parallel_ok[0].paths.clear();
+        let p = compute(&[node("base", &[]), pay, cat]);
+        assert_eq!(
+            p.waves[1].epics[0].overlaps[0].paths,
+            paths(&["src/billing/prices.rs", "src/billing/tax.rs"])
+        );
     }
 
     #[test]

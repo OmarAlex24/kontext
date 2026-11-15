@@ -840,7 +840,8 @@ fn overlapping_epics_warn_until_a_dependency_or_a_parallel_record() {
     let s = pm_ok(p, &["scope", "summary"]);
     assert!(!s.contains("⚠"), "{s}");
     assert!(
-        s.contains("  May run in parallel with Catalog (R-") && s.contains(why),
+        s.contains("  May run in parallel with Catalog on src/billing/prices.rs (R-")
+            && s.contains(why),
         "{s}"
     );
     assert!(s.contains("Comes after Catalog (R-"), "{s}");
@@ -874,6 +875,88 @@ fn a_parallel_record_from_a_coordinator_does_not_count() {
     );
     p.append(&line);
     assert!(pm_ok(p, &["plan"]).contains("⚠ same paths as Catalog (src/billing)"));
+}
+
+/// A `parallel` record covers only the shared paths it stored. Written when
+/// the pair shares nothing, it is refused; one already in a ledger with no
+/// paths covers nothing. A path shared later warns again, and a new record
+/// for the pair accepts it.
+#[test]
+fn a_parallel_record_covers_only_the_paths_it_stored() {
+    let t = planned();
+    let p = &t.p;
+    let (c, _, err) = run(p, PM, &["epic", "parallel", "pay", "cat", "--why", "x"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("share no recorded path"), "{err}");
+    assert!(err.contains("kontext epic touches"), "{err}");
+    // An old binary stored one with no paths: it covers nothing.
+    let legacy = p.append(&format!(
+        "{{\"kind\":\"parallel\",\"title\":\"pay and cat\",\"why\":\"they never share files\",\
+         \"actor\":{{\"type\":\"agent\",\"name\":\"pm\",\"role\":\"pm\"}},\
+         \"refs\":[\"{}\",\"{}\"],\"fields\":{{\"paths\":[]}}}}\n",
+        t.pay, t.cat
+    ))[0]
+        .clone();
+    pm_ok(p, &["epic", "touches", "pay", "src/billing"]);
+    pm_ok(p, &["epic", "touches", "cat", "src/billing/prices.rs"]);
+    let plan = pm_ok(p, &["plan"]);
+    assert!(
+        plan.contains(&format!(
+            "⚠ same paths as Catalog (src/billing/prices.rs; not covered by {legacy})"
+        )),
+        "{plan}"
+    );
+    assert!(pm_ok(p, &["tree"]).contains("⚠ same paths as Catalog"));
+    let s = pm_ok(p, &["scope", "summary"]);
+    assert!(!s.contains("May run in parallel"), "{s}");
+    assert!(
+        s.contains(&format!(
+            "  Parallel record with Catalog ({legacy}) covers no path (they shared none when it was written): they never share files"
+        )),
+        "{s}"
+    );
+    assert!(
+        s.contains(&format!(
+            "  ⚠ Same paths as Catalog in this wave: src/billing/prices.rs (not covered by {legacy}: it covers no path)"
+        )),
+        "{s}"
+    );
+    // The owner accepts the overlap with a new record: it covers prices.rs.
+    let ok = pm_id(
+        p,
+        &["epic", "parallel", "pay", "cat", "--why", "a new fn only"],
+    );
+    assert!(!pm_ok(p, &["plan"]).contains("⚠"));
+    let (c, _, err) = run(p, PM, &["epic", "parallel", "cat", "pay", "--why", "x"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("already have a parallel record"), "{err}");
+    // A path they share later is not covered: the ⚠ is back, for it only.
+    pm_ok(p, &["epic", "touches", "cat", "src/billing/tax.rs"]);
+    let plan = pm_ok(p, &["plan"]);
+    assert!(
+        plan.contains(&format!(
+            "⚠ same paths as Catalog (src/billing/tax.rs; not covered by {legacy}, {ok})"
+        )),
+        "{plan}"
+    );
+    let s = pm_ok(p, &["scope", "summary"]);
+    assert!(
+        s.contains(&format!(
+            "  May run in parallel with Catalog on src/billing/prices.rs ({ok}): a new fn only"
+        )),
+        "{s}"
+    );
+    assert!(
+        s.contains(&format!(
+            "  ⚠ Same paths as Catalog in this wave: src/billing/tax.rs (not covered by {legacy}, {ok}: they cover only src/billing/prices.rs)"
+        )),
+        "{s}"
+    );
+    pm_ok(
+        p,
+        &["epic", "parallel", "pay", "cat", "--why", "tax.rs too"],
+    );
+    assert!(!pm_ok(p, &["plan"]).contains("⚠"));
 }
 
 /// Paths another writer stored raw still overlap: they are compared by

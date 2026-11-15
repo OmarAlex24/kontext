@@ -582,11 +582,24 @@ fn epic_record_lines(st: &State, e: &Entry, indent: &str, l: &mut Vec<String>) {
                     .unwrap_or_else(|| x.clone())
             })
             .unwrap_or_else(|| "?".into());
-        l.push(format!(
-            "{indent}May run in parallel with {other} ({}): {}",
-            r.id,
-            whole(&r.why)
-        ));
+        // It covers only the paths it stored: say which (a record written
+        // when they shared none covers nothing).
+        let paths = string_list(r.fields.get("paths"));
+        if paths.is_empty() {
+            l.push(format!(
+                "{indent}Parallel record with {other} ({}) covers no path (they shared none when \
+                 it was written): {}",
+                r.id,
+                whole(&r.why)
+            ));
+        } else {
+            l.push(format!(
+                "{indent}May run in parallel with {other} on {} ({}): {}",
+                paths.join(", "),
+                r.id,
+                whole(&r.why)
+            ));
+        }
     }
 }
 
@@ -606,8 +619,24 @@ fn epic_block_with(
     l.push(head);
     epic_record_lines(st, e, "  ", l);
     for o in overlaps {
+        // With a parallel record for the pair: it covers other paths, not these.
+        let not = if o.parallel.is_empty() {
+            String::new()
+        } else {
+            let they = if o.parallel.len() == 1 {
+                "it covers"
+            } else {
+                "they cover"
+            };
+            let what = if o.covered.is_empty() {
+                "no path".to_string()
+            } else {
+                format!("only {}", o.covered.join(", "))
+            };
+            format!(" (not covered by {}: {they} {what})", o.parallel.join(", "))
+        };
         l.push(format!(
-            "  ⚠ Same paths as {} in this wave: {}",
+            "  ⚠ Same paths as {} in this wave: {}{not}",
             whole(&o.title),
             o.paths.join(", ")
         ));
