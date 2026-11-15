@@ -74,6 +74,7 @@ kontext setup --json --no-server [--home <path>]     # alone, or with a git remo
 It creates the project (named after the repo folder, or `--project <name>`), installs the hooks, skills and agent files (step 5's `kontext install`; it takes `--role`, `--local` and `--worktree-role` too), and with a server puts the project on it with its history and syncs. Each step comes back as `done`, `already` or `needed`. It is safe to run again: it resumes and changes nothing that is right.
 
 - **Exit 4, `needs_human`:** a step only the human can do (the first time on a Cloudflare account, the API token). Tell the human what `needs_human.say` says, word for word: they open the link, create the token, and paste it into the command it names, in **their** terminal. Do not ask for the token, and do not offer to run that command for them. When they say it is done, run `kontext setup --json` again. Meanwhile the project and the install are done: go on with b) and c).
+- **Exit 0 with `offline: true`:** the server did not answer; the project and the install are done. Go on, and run `kontext setup --json` again later (every command syncs on its own once the project is on the server).
 - **Exit 2:** it says what to run instead. A project of that name that is already on the server comes in with `kontext join` (below), not with setup.
 - **A git remote** instead of a server: `kontext init <name> --home <path> --remote <url>` first, then `kontext setup --no-server` to install.
 
