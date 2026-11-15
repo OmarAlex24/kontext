@@ -74,7 +74,7 @@ After saving, list back the ideas you took from the message, with the ids you ga
 
 When the user comes back after time away, or asks where things stand:
 
-1. **Do not read the dumps yourself**: that is the point, your context stays small. Run `kontext ideas --mark-audited` right before you launch the reader (it records which messages this audit covers, so the next `kontext ideas` counts only the newer ones). Then launch the `kontext-pm-reader` subagent (in Claude Code, the `Agent` tool with `subagent_type` `kontext-pm-reader`) and give it the text under "Audit task" below, word for word. It answers with JSON: `ideas` (every idea it found) and `missing` (those not in items.md), each with `quote`, `file` and `line`.
+1. **Do not read the dumps yourself**: that is the point, your context stays small. Launch the `kontext-pm-reader` subagent (in Claude Code, the `Agent` tool with `subagent_type` `kontext-pm-reader`) and give it the text under "Audit task" below, word for word. It answers with JSON: `read` (the messages it read), `ideas` (every idea it found) and `missing` (those not in items.md), each with `file` and `line`, and the ideas with `quote`. Save its reply byte for byte, as it came, to a file outside `.pm/` (`/tmp/kontext-audit.json`), then run `kontext ideas --mark-audited --from /tmp/kontext-audit.json`: it checks the result (every message it lists is a heading of the dumps, every quote is in its file at its line) and marks the messages the reader read, so the next `kontext ideas` counts only the newer ones. If it refuses, it says which check failed: launch the reader again; never edit its JSON, and never mark without a reader's result. When it refuses because no message in the result is new, there was nothing to mark: go on.
 2. **Verify each idea in `missing`** before you believe it: one targeted Grep of items.md (and of the places its rows point to) for that idea, and one Grep of the cited file for a piece of the quote. Drop the ones that are covered: on real data the reader flags an idea that items.md has in other words, and now and then a quote is not verbatim.
 3. **Add the confirmed ones** to items.md as pending, with the reader's citation as their source (`dumps/<file>:<line>`, without the `.pm/` in front), and give each a `where` (section 4) as soon as it has a feature, task or decision.
 4. **Show the user where things stand**, following the `kontext-show` skill for how to show it (do not repeat its rules here). The ideas newly found in step 3 show under "Not placed" in `kontext tree` until they have a `where`.
@@ -129,9 +129,9 @@ Which of the user's ideas in `.pm/dumps/` are not in `.pm/items.md`? Work in thi
 - **Compare.** Compare each idea on your list with `.pm/items.md` by meaning, not by wording. An idea counts as present if items.md has it, even in other words or with an outdated value.
 - **Report.** Report the ideas that are not in items.md and were not discarded. Cite each one once, quoting the user's sentence that states it.
 
-Reply only with this JSON. `ideas` is your list (List), each idea once, with `in_items` (Compare) and `discarded` (Apply changes); `missing` is your answer (Report):
+Reply only with this JSON. `read` is every message you read, by the `file` and `line` of its `## <date> <HH:MM>` heading; `ideas` is your list (List), each idea once, with `in_items` (Compare) and `discarded` (Apply changes); `missing` is your answer (Report):
 
-{"ideas": [{"quote": "...", "file": ".pm/dumps/<date>.md", "line": 41, "in_items": true, "discarded": false}], "missing": [{"quote": "...", "file": ".pm/dumps/<date>.md", "line": 41}]}
+{"read": [{"file": ".pm/dumps/<date>.md", "line": 1}], "ideas": [{"quote": "...", "file": ".pm/dumps/<date>.md", "line": 41, "in_items": true, "discarded": false}], "missing": [{"quote": "...", "file": ".pm/dumps/<date>.md", "line": 41}]}
 
 If nothing is missing, `missing` is an empty list.
 
@@ -143,6 +143,6 @@ Answer these questions about the project with the value in force: the last thing
 
 In `value` put only the value in force, with its unit if it has one: no history, no calculation.
 
-Reply only with this JSON, one answer per question:
+Reply only with this JSON, one answer per question, and in `read` every message you read, by the `file` and `line` of its `## <date> <HH:MM>` heading:
 
-{"answers": [{"id": "q1", "value": "...", "quote": "...", "file": ".pm/dumps/<date>.md", "line": 41}]}
+{"read": [{"file": ".pm/dumps/<date>.md", "line": 1}], "answers": [{"id": "q1", "value": "...", "quote": "...", "file": ".pm/dumps/<date>.md", "line": 41}]}

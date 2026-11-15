@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::{Project, git};
+use common::{Project, git, reader_result};
 use serde_json::Value;
 
 const PM: &[(&str, &str)] = &[("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")];
@@ -97,10 +97,19 @@ impl Setup {
         (code, v)
     }
 
+    /// The new flow: the reader's result saved to a file, then
+    /// `--mark-audited --from` with it.
     fn mark_audited(&self, now: &str) {
+        let result = self.p.dir.path().join("reader.json");
+        fs::write(&result, reader_result(&self.repo.join(".pm"))).unwrap();
         let out = self
             .p
-            .cmd(&["ideas", "--mark-audited"])
+            .cmd(&[
+                "ideas",
+                "--mark-audited",
+                "--from",
+                result.to_str().unwrap(),
+            ])
             .current_dir(&self.repo)
             .env("KONTEXT_NOW", now)
             .output()
@@ -167,6 +176,25 @@ fn handoff_refuses_for_each_reason_then_prints_the_prompt() {
     ] {
         assert!(err.contains(cmd), "{cmd}: {err}");
     }
+    assert!(
+        err.contains("1 message of the user's was not seen by any audit"),
+        "{err}"
+    );
+    // That reason names the new flow: the reader first, then the mark with its result.
+    assert!(
+        err.contains("launch the kontext-pm-reader")
+            && err.contains("`kontext ideas --mark-audited --from <file>`"),
+        "{err}"
+    );
+    // A bare --mark-audited is refused and does not clear it.
+    let (code, _, e) = s.run(&s.repo, &["ideas", "--mark-audited"]);
+    assert_eq!(code, 2, "{e}");
+    assert!(
+        e.contains("--mark-audited needs the reader's result"),
+        "{e}"
+    );
+    assert!(!s.repo.join(".pm/audited.json").exists());
+    let (_, _, err) = s.run(&s.repo, &["handoff"]);
     assert!(
         err.contains("1 message of the user's was not seen by any audit"),
         "{err}"

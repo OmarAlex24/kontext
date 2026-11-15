@@ -247,6 +247,29 @@ impl Project {
     }
 }
 
+/// A `kontext-pm-reader` audit result, in its format, that read every message
+/// of `<pm>/dumps/` (each `## <date> <HH:MM>` heading) and found nothing
+/// missing, as the reader would answer once items.md has every idea.
+pub fn reader_result(pm: &Path) -> String {
+    let mut read = Vec::new();
+    let mut names: Vec<_> = fs::read_dir(pm.join("dumps"))
+        .unwrap()
+        .flatten()
+        .map(|f| f.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".md"))
+        .collect();
+    names.sort();
+    for name in names {
+        let text = fs::read_to_string(pm.join("dumps").join(&name)).unwrap();
+        for (i, l) in text.lines().enumerate() {
+            if l.starts_with("## 20") {
+                read.push(serde_json::json!({"file": format!(".pm/dumps/{name}"), "line": i + 1}));
+            }
+        }
+    }
+    serde_json::json!({"read": read, "ideas": [], "missing": []}).to_string()
+}
+
 /// `git` in `dir`, without depending on the global configuration (signing, author).
 pub fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")

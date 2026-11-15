@@ -6,8 +6,8 @@
 //! the planning chat knows is only in that chat:
 //! - the plan is signed (a `scope` entry counts);
 //! - no idea of the user's is "Not placed" (`kontext ideas`);
-//! - no message of the user's is unaudited (`kontext ideas --mark-audited`
-//!   and the reader saw them all).
+//! - no message of the user's is unaudited (the reader's result, checked by
+//!   `kontext ideas --mark-audited --from <file>`, covers them all).
 //!
 //! It writes nothing. Ready, it prints the opening prompt for the new chat and
 //! how the capture moves to it (`kontext capture here --replace`).
@@ -130,9 +130,10 @@ fn missing(st: &State, project: &str, ideas: &IdeasCheck, signing: Option<&str>)
                     None => "by any audit".into(),
                 };
                 out.push(format!(
-                    "{} not seen {since}. Run the coverage audit (`kontext ideas \
-                     --mark-audited`, then the kontext-pm-reader, as the kontext-pm skill says) \
-                     and place what it finds.",
+                    "{} not seen {since}. Run the coverage audit as the kontext-pm skill says: \
+                     launch the kontext-pm-reader with the Audit task, save its JSON reply to a \
+                     file, run `kontext ideas --mark-audited --from <file>` with it, and place \
+                     what it finds.",
                     plural(
                         i.unaudited.count,
                         "message of the user's was",

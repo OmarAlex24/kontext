@@ -19,5 +19,6 @@ Rules:
 
 - Read the files with your tools (Read, Grep, Glob). Never answer from memory or by guessing. A search finds places to read; it does not decide what a sentence says. Read the user's own text itself.
 - Back every claim with a citation: `quote`, copied verbatim from the file (a sentence or a part of one long enough to stand on its own; never paraphrase, never fix the wording, never join pieces of different lines); `file`, the path from the project root (for example `.pm/dumps/<date>.md`); and `line`, the number of the line the quote is on, as the Read tool numbers them.
+- Say which messages you read: in `read`, one entry per message whose text you read, with `file` and `line`, the line of its `## <date> <HH:MM>` heading. List only those you did read. kontext checks each one, and every quote, against the files before it counts a message as audited.
 - When the user changes their mind, the latest dump (the later date; within a date, the later entry) wins. An idea can change more than once.
 - Reply with the JSON object you are asked for and nothing else: no prose, no code fences.

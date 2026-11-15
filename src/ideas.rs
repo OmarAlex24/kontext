@@ -27,9 +27,12 @@
 //! and says what it does cite ("Payments, no feature").
 //!
 //! The messages of the dumps (each `## <date> <HH:MM>` entry) are audited when
-//! the pm runs `kontext ideas --mark-audited` before the coverage audit: it
-//! writes `.pm/audited.json` with the time and how many entries each dump had.
-//! What is beyond those counts, and any dump not listed, is not audited yet.
+//! the pm gives the `kontext-pm-reader`'s result to `kontext ideas
+//! --mark-audited --from <file>` after the coverage audit: once the result
+//! passes [`check_reader_result`], it writes `.pm/audited.json` with the time
+//! and how many entries of each dump the reader read, in order. What is beyond
+//! those counts, and any dump not listed, is not audited yet. It cannot prove
+//! a reader ran; it refuses a bare command and a made-up or stale result.
 //!
 //! An id that is not in the ledger fails nothing: it stays as text, with a
 //! note. Nothing here prints: [`build`] gives a plain [`Ideas`], and
@@ -279,7 +282,8 @@ pub fn candidates(repos: &Repos, own_in_worktrees: bool) -> Vec<PathBuf> {
 }
 
 /// The `.pm/` folder that has an `items.md`: the first of [`candidates`].
-/// `kontext ideas`, `--mark-audited` and `kontext tree` all use it.
+/// `kontext ideas` and `kontext tree` use it; `--mark-audited` uses
+/// [`locate_for`], as `handoff` does.
 pub fn locate(repos: &Repos, own_in_worktrees: bool) -> Option<PathBuf> {
     candidates(repos, own_in_worktrees)
         .into_iter()
@@ -1075,9 +1079,9 @@ pub struct Audited {
     pub files: BTreeMap<String, usize>,
 }
 
-/// The entries (`## <date> <HH:MM>`) of each dump in `<pm>/dumps/`, by its
-/// path relative to `.pm/`.
-pub fn dump_entries(pm: &Path) -> BTreeMap<String, usize> {
+/// The line (1-based) of each entry's heading (`## <date> <HH:MM>`) in each
+/// dump of `<pm>/dumps/`, by its path relative to `.pm/`.
+pub fn dump_headings(pm: &Path) -> BTreeMap<String, Vec<usize>> {
     let mut out = BTreeMap::new();
     let Ok(dir) = fs::read_dir(pm.join("dumps")) else {
         return out;
@@ -1087,12 +1091,27 @@ pub fn dump_entries(pm: &Path) -> BTreeMap<String, usize> {
         if !name.ends_with(".md") || !f.path().is_file() {
             continue;
         }
-        let n = fs::read_to_string(f.path())
-            .map(|t| t.lines().filter(|l| is_entry_header(l)).count())
-            .unwrap_or(0);
-        out.insert(format!("dumps/{name}"), n);
+        let lines = fs::read_to_string(f.path())
+            .map(|t| {
+                t.lines()
+                    .enumerate()
+                    .filter(|(_, l)| is_entry_header(l))
+                    .map(|(i, _)| i + 1)
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(format!("dumps/{name}"), lines);
     }
     out
+}
+
+/// The entries (`## <date> <HH:MM>`) of each dump in `<pm>/dumps/`, by its
+/// path relative to `.pm/`.
+pub fn dump_entries(pm: &Path) -> BTreeMap<String, usize> {
+    dump_headings(pm)
+        .into_iter()
+        .map(|(f, h)| (f, h.len()))
+        .collect()
 }
 
 /// The last audit marked, if `.pm/audited.json` exists and reads.
@@ -1118,23 +1137,322 @@ pub fn unaudited(pm: &Path) -> Unaudited {
     }
 }
 
-/// Writes `<pm>/audited.json` with the time (`KONTEXT_NOW` or the clock) and
-/// the entries each dump has now.
-pub fn mark_audited(pm: &Path) -> Result<Audited> {
+/// A message of the dumps: the dump (relative to `.pm/`) and the line of its
+/// heading.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Message {
+    pub file: String,
+    pub line: usize,
+}
+
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.file, self.line)
+    }
+}
+
+/// What `--mark-audited` did with a reader's result.
+#[derive(Serialize, Clone, Debug)]
+pub struct AuditMark {
+    /// What `.pm/audited.json` holds now.
+    pub audited: Audited,
+    /// The messages this result audited, in order.
+    pub marked: Vec<Message>,
+    /// Messages the result lists that stay unaudited: a message before them
+    /// in the same dump is not in it.
+    pub left: Vec<Message>,
+    /// The messages still not audited.
+    pub unaudited: usize,
+}
+
+/// How many lines away from the cited line a quote may start.
+pub const QUOTE_NEAR: usize = 2;
+
+/// `.pm/dumps/x.md`, `dumps/x.md`, `/abs/…/.pm/dumps/x.md` → `dumps/x.md`:
+/// the path relative to `.pm/`, or `None` if it is not inside one (a path
+/// with no `.pm/` counts only when it starts with `dumps/`, as items.md cites).
+fn pm_relative(file: &str) -> Option<String> {
+    let f = file.trim().replace('\\', "/");
+    let f = f.trim_start_matches("./");
+    let rel = match f.rfind(".pm/") {
+        Some(i) if i == 0 || f[..i].ends_with('/') => f[i + 4..].to_string(),
+        _ if f.starts_with("dumps/") => f.to_string(),
+        _ => return None,
+    };
+    let ok = !rel.is_empty()
+        && !rel.starts_with('/')
+        && !rel.split('/').any(|p| p == ".." || p.is_empty());
+    ok.then_some(rel)
+}
+
+/// Whitespace runs, line breaks included, as one space; trimmed. Returns the
+/// text and, per byte of it, the 1-based line it came from.
+fn flatten(lines: &[&str]) -> (String, Vec<usize>) {
+    let (mut s, mut at) = (String::new(), Vec::new());
+    let mut space = false;
+    for (i, l) in lines.iter().enumerate() {
+        for c in l.chars() {
+            if c.is_whitespace() {
+                space = true;
+                continue;
+            }
+            if space && !s.is_empty() {
+                s.push(' ');
+                at.push(i + 1);
+            }
+            space = false;
+            s.push(c);
+            at.extend(std::iter::repeat_n(i + 1, c.len_utf8()));
+        }
+        space = true;
+    }
+    (s, at)
+}
+
+/// Checks a `kontext-pm-reader` audit result (`text`, its JSON) against the
+/// dumps in `pm`: it is an audit answer (`read`, `ideas`, `missing`); every
+/// entry of `read` is the heading of a message in `.pm/dumps/`; every
+/// citation's quote is in its file, starting at most [`QUOTE_NEAR`] lines
+/// from its line, with whitespace and line breaks taken as one space and
+/// everything else exact. Returns the messages it read, or every check that
+/// failed, one line each.
+pub fn check_reader_result(pm: &Path, text: &str) -> Result<Vec<Message>, Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(text.trim()).map_err(|e| {
+        vec![format!(
+            "format: not JSON ({e}); save the reader's reply as it came, with nothing around it"
+        )]
+    })?;
+    let Some(obj) = v.as_object() else {
+        return Err(vec!["format: not a JSON object".into()]);
+    };
+    let mut errs = Vec::new();
+    let mut list = |key: &str| match obj.get(key) {
+        Some(serde_json::Value::Array(a)) => a.clone(),
+        Some(_) => {
+            errs.push(format!("format: `{key}` is not a list"));
+            Vec::new()
+        }
+        None => {
+            errs.push(format!("format: no `{key}` list"));
+            Vec::new()
+        }
+    };
+    let (read, ideas, missing) = (list("read"), list("ideas"), list("missing"));
+    if !errs.is_empty() {
+        if obj.contains_key("answers") {
+            errs.push(
+                "format: this is a Value task answer; only the Audit task's answer marks messages"
+                    .into(),
+            );
+        }
+        return Err(errs);
+    }
+    let mut files: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut lines_of = |rel: &str| -> Option<Vec<String>> {
+        files
+            .entry(rel.to_string())
+            .or_insert_with(|| {
+                fs::read_to_string(pm.join(rel))
+                    .ok()
+                    .map(|t| t.lines().map(str::to_string).collect())
+            })
+            .clone()
+    };
+    // `file` and `line` of an entry, or why not.
+    let place = |e: &serde_json::Value| -> Result<(String, String, usize), String> {
+        let file = e.get("file").and_then(|f| f.as_str()).ok_or("no `file`")?;
+        let line = e
+            .get("line")
+            .and_then(|l| l.as_u64())
+            .filter(|l| *l > 0)
+            .ok_or_else(|| format!("{file}: no `line` (a number from 1)"))?;
+        let rel =
+            pm_relative(file).ok_or_else(|| format!("{file}:{line} is not a file in .pm/"))?;
+        Ok((file.to_string(), rel, line as usize))
+    };
+    let mut out = BTreeSet::new();
+    for (i, e) in read.iter().enumerate() {
+        let (file, rel, line) = match place(e) {
+            Ok(p) => p,
+            Err(w) => {
+                errs.push(format!("read: read[{i}]: {w}"));
+                continue;
+            }
+        };
+        let lines = if rel.starts_with("dumps/") && rel.ends_with(".md") {
+            lines_of(&rel)
+        } else {
+            None
+        };
+        match lines {
+            None => errs.push(format!(
+                "read: read[{i}]: {file}:{line}: there is no such dump in {}",
+                pm.join("dumps").display()
+            )),
+            Some(l) if l.get(line - 1).is_some_and(|l| is_entry_header(l)) => {
+                out.insert(Message { file: rel, line });
+            }
+            Some(_) => errs.push(format!(
+                "read: read[{i}]: {file}:{line} is not the heading of a message (`## <date> <HH:MM>`)"
+            )),
+        }
+    }
+    for (key, cites) in [("ideas", &ideas), ("missing", &missing)] {
+        for (i, e) in cites.iter().enumerate() {
+            let at = format!("citations: {key}[{i}]");
+            let (file, rel, line) = match place(e) {
+                Ok(p) => p,
+                Err(w) => {
+                    errs.push(format!("{at}: {w}"));
+                    continue;
+                }
+            };
+            let quote = e.get("quote").and_then(|q| q.as_str()).unwrap_or("");
+            let (q, _) = flatten(&[quote]);
+            if q.is_empty() {
+                errs.push(format!("{at}: {file}:{line}: no `quote`"));
+                continue;
+            }
+            let Some(lines) = lines_of(&rel) else {
+                errs.push(format!(
+                    "{at}: {file}:{line}: there is no such file in .pm/"
+                ));
+                continue;
+            };
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let (s, at_line) = flatten(&refs);
+            let found: Vec<usize> = s.match_indices(&q).map(|(b, _)| at_line[b]).collect();
+            if found.iter().any(|l| l.abs_diff(line) <= QUOTE_NEAR) {
+                continue;
+            }
+            let elsewhere = match found.first() {
+                Some(l) => format!(" (it is at line {l})"),
+                None => String::new(),
+            };
+            errs.push(format!(
+                "{at}: {file}:{line}: the quote \"{}\" is not in that file within {QUOTE_NEAR} \
+                 lines of line {line}{elsewhere}",
+                one_line(quote, 80)
+            ));
+        }
+    }
+    if errs.is_empty() {
+        Ok(out.into_iter().collect())
+    } else {
+        Err(errs)
+    }
+}
+
+/// What [`mark_audited`] marks for a checked result (`read`): per dump, the
+/// messages after the last audit, in order, while each one is in `read`.
+/// `last`: the counts audited so far. Never lowers a count, and keeps the
+/// dumps the result does not touch. Returns the new counts, the messages
+/// marked, and those listed that stay unaudited (after one not listed).
+pub fn advance(
+    last: &BTreeMap<String, usize>,
+    headings: &BTreeMap<String, Vec<usize>>,
+    read: &[Message],
+) -> (BTreeMap<String, usize>, Vec<Message>, Vec<Message>) {
+    let read: BTreeSet<&Message> = read.iter().collect();
+    let mut files = last.clone();
+    let (mut marked, mut left) = (Vec::new(), Vec::new());
+    for (f, lines) in headings {
+        let seen = last.get(f).copied().unwrap_or(0);
+        let msg = |line: usize| Message {
+            file: f.clone(),
+            line,
+        };
+        let mut n = seen;
+        while n < lines.len() && read.contains(&msg(lines[n])) {
+            marked.push(msg(lines[n]));
+            n += 1;
+        }
+        if n > seen {
+            files.insert(f.clone(), n);
+        }
+        left.extend(
+            lines
+                .iter()
+                .skip(n)
+                .map(|l| msg(*l))
+                .filter(|m| read.contains(m)),
+        );
+    }
+    (files, marked, left)
+}
+
+/// `kontext ideas --mark-audited --from <file>`: checks the reader's result
+/// (`text`, [`check_reader_result`]) and marks, in `<pm>/audited.json`, the
+/// messages it read ([`advance`]), with the time (`KONTEXT_NOW` or the
+/// clock). On a failed check, or when it covers no message not yet audited,
+/// it writes nothing and returns the refusal's text as the inner `Err`.
+pub fn mark_audited(pm: &Path, text: &str) -> Result<std::result::Result<AuditMark, String>> {
+    let read = match check_reader_result(pm, text) {
+        Ok(r) => r,
+        Err(errs) => {
+            return Ok(Err(format!(
+                "the reader's result did not pass the checks, so nothing was marked:\n{}\n\
+                 Launch kontext-pm-reader again with the Audit task (the kontext-pm skill, section \
+                 5) and save its reply as it comes; never edit it.",
+                errs.iter()
+                    .map(|e| format!("- {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )));
+        }
+    };
+    let last = audited(pm).map(|a| a.files).unwrap_or_default();
+    let headings = dump_headings(pm);
+    let (files, marked, left) = advance(&last, &headings, &read);
+    if marked.is_empty() {
+        let why = if !left.is_empty() {
+            format!(
+                "the messages it lists come after a message it does not list ({})",
+                left.iter()
+                    .take(3)
+                    .map(Message::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else if read.is_empty() {
+            "it lists no message as read".to_string()
+        } else {
+            format!(
+                "every message it lists ({}) was audited already",
+                read.len()
+            )
+        };
+        return Ok(Err(format!(
+            "the reader's result covers no message that is not audited yet, so nothing was \
+             marked: {why}. Launch kontext-pm-reader again with the Audit task over the dumps as \
+             they are now."
+        )));
+    }
     let at = jiff::Timestamp::from_millisecond(crate::tasks::now_ms())?
         .strftime("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let a = Audited {
-        at,
-        files: dump_entries(pm),
-    };
+    let a = Audited { at, files };
+    let unaudited = headings
+        .iter()
+        .map(|(f, h)| h.len().saturating_sub(a.files.get(f).copied().unwrap_or(0)))
+        .sum();
+    write_audited(pm, &a)?;
+    Ok(Ok(AuditMark {
+        audited: a,
+        marked,
+        left,
+        unaudited,
+    }))
+}
+
+fn write_audited(pm: &Path, a: &Audited) -> Result<()> {
     fs::create_dir_all(pm).with_context(|| format!("could not create {}", pm.display()))?;
     let path = pm.join(AUDITED_FILE);
     let tmp = pm.join(format!(".{AUDITED_FILE}.tmp"));
     fs::write(&tmp, serde_json::to_string_pretty(&a)? + "\n")
         .with_context(|| format!("could not write {}", tmp.display()))?;
     fs::rename(&tmp, &path).with_context(|| format!("could not write {}", path.display()))?;
-    Ok(a)
+    Ok(())
 }
 
 /// `2026-11-12…` → `Nov 12`.
@@ -1278,6 +1596,72 @@ pub const NONE_TEXT: &str = "There is no .pm/items.md in this repo or in the pro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_paths_resolve_inside_pm_only() {
+        for (f, rel) in [
+            (".pm/dumps/2026-11-07.md", "dumps/2026-11-07.md"),
+            ("./.pm/dumps/2026-11-07.md", "dumps/2026-11-07.md"),
+            ("dumps/2026-11-07.md", "dumps/2026-11-07.md"),
+            (
+                "/Users/x/app/.pm/dumps/2026-11-07.md",
+                "dumps/2026-11-07.md",
+            ),
+            (".pm/items.md", "items.md"),
+        ] {
+            assert_eq!(pm_relative(f).as_deref(), Some(rel), "{f}");
+        }
+        for f in [
+            "src/main.rs",
+            "items.md",
+            "x.pm/dumps/a.md",
+            ".pm/../secret",
+            ".pm//a.md",
+            ".pm/",
+        ] {
+            assert_eq!(pm_relative(f), None, "{f}");
+        }
+    }
+
+    #[test]
+    fn flatten_joins_wrapped_lines_and_keeps_their_numbers() {
+        let (s, at) = flatten(&["  a  dark", "", "mode\tfor ", "  añil"]);
+        assert_eq!(s, "a dark mode for añil");
+        assert_eq!(at.len(), s.len());
+        assert_eq!(at[s.find("mode").unwrap()], 3);
+        assert_eq!(at[s.find("añil").unwrap()], 4);
+        assert_eq!(at[0], 1);
+    }
+
+    #[test]
+    fn advance_marks_a_prefix_and_never_lowers_a_count() {
+        let m = |f: &str, line| Message {
+            file: f.into(),
+            line,
+        };
+        let headings = BTreeMap::from([
+            ("dumps/a.md".to_string(), vec![1, 5, 9]),
+            ("dumps/b.md".to_string(), vec![1]),
+        ]);
+        let last = BTreeMap::from([
+            ("dumps/a.md".to_string(), 1),
+            ("dumps/gone.md".to_string(), 4),
+        ]);
+        let (files, marked, left) = advance(
+            &last,
+            &headings,
+            &[m("dumps/a.md", 1), m("dumps/a.md", 5), m("dumps/b.md", 1)],
+        );
+        assert_eq!(marked, [m("dumps/a.md", 5), m("dumps/b.md", 1)]);
+        assert!(left.is_empty());
+        assert_eq!(files["dumps/a.md"], 2);
+        assert_eq!(files["dumps/b.md"], 1);
+        assert_eq!(files["dumps/gone.md"], 4);
+        let (files, marked, left) = advance(&last, &headings, &[m("dumps/a.md", 9)]);
+        assert!(marked.is_empty());
+        assert_eq!(left, [m("dumps/a.md", 9)]);
+        assert_eq!(files, last);
+    }
 
     #[test]
     fn cells_handle_escaped_pipes_and_edges() {
