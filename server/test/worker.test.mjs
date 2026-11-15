@@ -312,6 +312,14 @@ test("each role writes only as what it is (DESIGN §14.2)", async () => {
     ["implementer", agent("impl-1", "implementer"), "supersede", undefined, true, ["F-aaaaaa", "F-bbbbbb"]],
     ["scout", agent("s-1", "scout"), "supersede", undefined, false, ["D-aaaaaa", "D-bbbbbb"]],
     ["coordinator", agent("epic:payments", "coordinator"), "supersede", undefined, false, ["F-aaaaaa", "G-bbbbbb"]],
+    // The plan checks (DESIGN §4.3): the pm and an owner, never a coordinator.
+    ["pm", agent("plan-checker", "pm"), "after", undefined, true, ["E-aaaaaa", "E-bbbbbb"]],
+    ["pm", agent("plan-checker", "pm"), "touches", undefined, true, ["E-aaaaaa"]],
+    ["pm", agent("plan-checker", "pm"), "parallel", undefined, true, ["E-aaaaaa", "E-bbbbbb"]],
+    ["owner", { type: "human", name: "omar" }, "after", undefined, true, ["E-aaaaaa", "E-bbbbbb"]],
+    ["coordinator", agent("epic:payments", "coordinator"), "after", undefined, false, ["E-aaaaaa", "E-bbbbbb"]],
+    ["coordinator", agent("epic:payments", "coordinator"), "touches", undefined, false, ["E-aaaaaa"]],
+    ["coordinator", agent("epic:payments", "coordinator"), "parallel", undefined, false, ["E-aaaaaa", "E-bbbbbb"]],
   ];
   const tokens = {};
   for (const role of ["pm", "coordinator", "implementer", "tester", "scout"]) {
