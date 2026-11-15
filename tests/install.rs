@@ -412,6 +412,31 @@ fn installs_agent_files_and_keeps_edited_ones() {
     ] {
         assert!(coord.contains(rule), "coordinator: missing {rule:?}");
     }
+    // A small task is not fanned out (DESIGN §12.1): the same three reasons
+    // for a team in the coordinator, the pm skill and the orchestrate skill.
+    let skills = r.join(".claude/skills");
+    let pm = fs::read_to_string(skills.join("kontext-pm/SKILL.md")).unwrap();
+    let orq = fs::read_to_string(skills.join("kontext-orchestrate/SKILL.md")).unwrap();
+    for (who, text) in [
+        ("coordinator", &coord),
+        ("kontext-pm", &pm),
+        ("kontext-orchestrate", &orq),
+    ] {
+        for rule in [
+            "never by file count",
+            "really run",
+            "bulk reading that would fill",
+            "independent check of a risky change",
+        ] {
+            assert!(text.contains(rule), "{who}: missing {rule:?}");
+        }
+    }
+    assert!(coord.contains("do it yourself"), "{coord}");
+    assert!(
+        pm.contains("goes to one worker, with no coordinator"),
+        "{pm}"
+    );
+    assert!(orq.contains("| **S–M** | One agent"), "{orq}");
     for name in ["kontext-implementer", "kontext-tester", "kontext-scout"] {
         let text = fs::read_to_string(agents.join(format!("{name}.md"))).unwrap();
         for rule in ["Hand back about five lines at most", "re-reads"] {

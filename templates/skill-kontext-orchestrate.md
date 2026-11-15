@@ -20,10 +20,12 @@ Check four criteria. The highest one wins:
 
 | Size | Structure |
 |---|---|
-| **S–M** | You alone. One task in `kontext`, in the right epic, closed with evidence; a scout if something needs to be looked up. No extra confirmation |
+| **S–M** | One agent: you, or one worker you hand it to. One task in `kontext`, in the right epic, closed with evidence; a scout if something needs to be looked up. No team, no extra confirmation |
 | **L** (one epic) | This session coordinates the epic. Implementers and testers in parallel; scouts with a small model |
 | **XL** (several epics) | PM (this session, the only one that talks to the user) → one coordinator per epic, each in its own worktree → their workers. In waves, following `kontext plan` |
 | **XXL** (greenfield) | Like XL, with phase 0 before any code |
+
+**Size by understanding, risk and parallelism, never by file count.** A task that is understood, low risk and has nothing to run in parallel is done by one agent, however many files it touches. A team (or, later, a sandbox) is used only for a named reason, and you name it when you propose it: independent work that really runs in parallel, bulk reading that would fill the caller's context, or an independent check of a risky change. Without one of those reasons it is S–M, also inside a signed plan and inside an epic.
 
 ## 2. Before launching anything XL or XXL: confirm
 
