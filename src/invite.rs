@@ -96,9 +96,7 @@ impl JoinString {
 /// answers `/v1/info` without `features`.
 pub fn require_invites(url: &str) -> Result<()> {
     let http = Http::new(Duration::from_secs(10));
-    let r = http
-        .request("GET", &format!("{url}/v1/info"), &[], None)
-        .with_context(|| format!("could not reach {url}"))?;
+    let r = http.request("GET", &format!("{url}/v1/info"), &[], None)?;
     let v = r.json().ok().filter(|_| r.ok());
     let Some(v) = v.filter(|v| v.get("kontext_server").is_some()) else {
         bail!(
@@ -190,8 +188,16 @@ pub fn invite(project: &str, home: &std::path::Path, a: &InviteArgs) -> Result<I
         bail!("--valid-for is a day at most (an invitation is for now, not for later)");
     }
     body["valid_ms"] = json!(valid_ms);
-    require_invites(&remote.url)?;
-    let v = Conn::ok(conn.json("POST", "invites", &body)?, "invite")?;
+    let v = require_invites(&remote.url)
+        .and_then(|()| conn.json("POST", "invites", &body))
+        .map_err(|e| {
+            offline(
+                e,
+                &remote.url,
+                "no invitation was made; run `kontext invite` again when it answers",
+            )
+        })?;
+    let v = Conn::ok(v, "invite")?;
     let code = v
         .get("code")
         .and_then(Value::as_str)
@@ -256,6 +262,7 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
         server: Some(j.server.clone()),
         steps: Vec::new(),
         ok: false,
+        offline: false,
         needs_human: None,
         notes: Vec::new(),
         next: String::new(),
@@ -292,8 +299,16 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
         let (token, how) = match saved {
             Some(t) => (t, "with the token an earlier `kontext join` got"),
             None => {
-                require_invites(&j.server)?;
-                let t = trade(&j)?;
+                let t = require_invites(&j.server)
+                    .and_then(|()| trade(&j))
+                    .map_err(|e| {
+                        offline(
+                            e,
+                            &j.server,
+                            "the line was not used; run the same `kontext join …` again when it \
+                             answers, while the line is still valid",
+                        )
+                    })?;
                 // Saved before anything else can fail: the code is spent.
                 t.save(&name)?;
                 (t, "with a token made for this machine")
@@ -384,6 +399,15 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
 
 /// `POST join` with the code: this machine's token. A used, expired or
 /// unknown code is refused, and says what to do.
+/// A server that did not answer: say so and what to do, keep anything else.
+fn offline(e: anyhow::Error, url: &str, next: &str) -> anyhow::Error {
+    if remote::unreachable(&e) {
+        anyhow::anyhow!("{url} did not answer ({e:#}): {next}")
+    } else {
+        e
+    }
+}
+
 fn trade(j: &JoinString) -> Result<Token> {
     let conn = Conn::new(&j.server, &j.project, &j.code, Duration::from_secs(30));
     let r = conn.json("POST", "join", &json!({}))?;

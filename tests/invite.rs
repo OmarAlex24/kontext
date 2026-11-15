@@ -343,4 +343,25 @@ fn an_older_server_is_said_to_need_an_update() {
         "{:?}",
         log.lock().unwrap()
     );
+
+    // A server that is down: join says the line was not used and to run it
+    // again; invite says nothing was made; neither hangs.
+    let down = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", l.local_addr().unwrap())
+    };
+    let claims = json!({ "s": down, "p": "billing", "c": "kxi1.abc" }).to_string();
+    let started = std::time::Instant::now();
+    let (code, _, text) = b.json(&rb, &["join", &format!("kxj1.{}", b64url(&claims))]);
+    assert_eq!(code, Some(1), "{text}");
+    assert!(text.contains("did not answer"), "{text}");
+    assert!(text.contains("was not used"), "{text}");
+    assert!(!b.config.join("tokens/billing.token").exists());
+    let t = fs::read_to_string(&projects).unwrap().replace(&url, &down);
+    fs::write(&projects, t).unwrap();
+    let (code, _, text) = a.json(&a.base, &["--project", "billing", "invite"]);
+    assert_eq!(code, Some(1), "{text}");
+    assert!(text.contains("did not answer"), "{text}");
+    assert!(text.contains("run `kontext invite` again"), "{text}");
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
 }
