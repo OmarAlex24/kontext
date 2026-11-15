@@ -200,17 +200,39 @@ fn touches_normalizes_paths_skips_repeats_and_refuses_globs() {
     let (c, _, err) = run(p, PM, &["epic", "touches", "pay", "src/**"]);
     assert_ne!(c, 0);
     assert!(err.contains("is a glob"), "{err}");
-    pm_ok(p, &["epic", "touches", "pay", "src/billing", "docs"]);
+    let why = pm_id(
+        p,
+        &[
+            "epic",
+            "touches",
+            "pay",
+            "src/billing",
+            "docs",
+            "--why",
+            "the refund   rules\nare documented",
+        ],
+    );
     let show = pm_ok(p, &["show", &t.pay]);
     assert!(
         show.contains("- **Touches:** src/billing, src/api/orders.rs, docs"),
         "{show}"
     );
-    let s = pm_ok(p, &["scope", "summary"]);
     assert!(
-        s.contains("  Touches: src/billing, src/api/orders.rs, docs"),
+        show.contains(&format!(
+            "  - Why docs ({why}): the refund rules are documented\n"
+        )),
+        "{show}"
+    );
+    let s = pm_ok(p, &["scope", "summary"]);
+    // The paths, then each record's why, whole and on one line (the first
+    // record has none: no line for it).
+    assert!(
+        s.contains(&format!(
+            "  Touches: src/billing, src/api/orders.rs, docs\n    Why docs ({why}): the refund rules are documented\n"
+        )),
         "{s}"
     );
+    assert_eq!(s.matches("    Why ").count(), 1, "{s}");
     let (c, _, err) = run(p, COORD, &["epic", "touches", "pay", "lib"]);
     assert_eq!(c, 2, "{err}");
 }

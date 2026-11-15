@@ -512,6 +512,17 @@ fn epic_record_lines(st: &State, e: &Entry, indent: &str, l: &mut Vec<String>) {
     if !paths.is_empty() {
         l.push(format!("{indent}Touches: {}", paths.join(", ")));
     }
+    // Each `touches` record's why, whole: the signature binds it.
+    for r in crate::epics::records(st, &e.id, "touches") {
+        if !r.why.trim().is_empty() {
+            l.push(format!(
+                "{indent}  Why {} ({}): {}",
+                string_list(r.fields.get("paths")).join(", "),
+                r.id,
+                whole(&r.why)
+            ));
+        }
+    }
 }
 
 /// An epic of the plan: its line, what records added to it, its features.

@@ -1467,6 +1467,16 @@ pub fn show(st: &State, id: &str) -> String {
         if !paths.is_empty() {
             l.push(format!("- **Touches:** {}", paths.join(", ")));
         }
+        for r in crate::epics::records(st, id, "touches") {
+            if !r.why.trim().is_empty() {
+                l.push(format!(
+                    "  - Why {} ({}): {}",
+                    string_list(r.fields.get("paths")).join(", "),
+                    r.id,
+                    one_line(&r.why, 100_000)
+                ));
+            }
+        }
     }
     for (label, text) in [("Why", &e.why), ("Body", &e.body)] {
         if !text.trim().is_empty() {
