@@ -175,6 +175,7 @@ fn added(kind: &str) -> &'static str {
     match kind {
         "after" => "a dependency",
         "touches" => "paths",
+        "parallel" => "a parallel record",
         _ => "this record",
     }
 }

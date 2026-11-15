@@ -873,8 +873,13 @@ fn a_parallel_record_from_a_coordinator_does_not_count() {
          \"refs\":[\"{}\",\"{}\"],\"fields\":{{\"paths\":[\"src/billing\"]}}}}\n",
         t.pay, t.cat
     );
-    p.append(&line);
+    let ids = p.append(&line);
     assert!(pm_ok(p, &["plan"]).contains("⚠ same paths as Catalog (src/billing)"));
+    let show = pm_ok(p, &["show", &ids[0]]);
+    assert!(
+        show.contains("only the pm or an owner adds a parallel record to an epic"),
+        "{show}"
+    );
 }
 
 /// A `parallel` record covers only the shared paths it stored. Written when
