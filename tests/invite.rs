@@ -160,6 +160,7 @@ fn invite_on_one_machine_and_join_on_another() {
         .collect();
     assert_eq!(steps, [("project", "done"), ("install", "done")], "{text}");
     assert_eq!(v["ok"], true);
+    assert_eq!(v["command"], "join");
     // B's own token: saved (0600), never printed.
     let token_file = b.config.join("tokens/billing.token");
     let token = fs::read_to_string(&token_file).unwrap();
@@ -184,7 +185,13 @@ fn invite_on_one_machine_and_join_on_another() {
     let t = String::from_utf8_lossy(&o.stdout);
     assert!(t.contains("written on A"), "{t}");
 
-    // Again on B: already, and the code is not spent twice.
+    // Again on B: already, and the code is not spent twice; as text, it
+    // says which command it is.
+    let o = b.run(&rb, &["join", &join]);
+    let t = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success(), "{t}");
+    assert!(t.contains("kontext join in "), "{t}");
+    assert!(t.contains("project         already"), "{t}");
     let (code, v, text) = b.json(&rb, &["join", &join]);
     assert_eq!(code, Some(0), "{text}");
     assert_eq!(v["steps"][0]["status"], "already");

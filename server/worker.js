@@ -906,9 +906,9 @@ export class Project extends DurableObject {
     const rows = this.sql.exec("SELECT * FROM invites WHERE hash = ?", hash).toArray();
     if (!rows.length) throw new HttpError(404, "invite_unknown", "this invitation code is not one of this project's");
     const inv = rows[0];
-    if (inv.used) throw new HttpError(410, "invite_used", `this invitation was already used (${inv.used}): ask for a new one (kontext invite)`);
+    if (inv.used) throw new HttpError(410, "invite_used", `this invitation was already used (${inv.used})`);
     if (Date.now() > inv.expires) {
-      throw new HttpError(410, "invite_expired", `this invitation expired at ${new Date(inv.expires).toISOString()}: ask for a new one (kontext invite)`);
+      throw new HttpError(410, "invite_expired", `this invitation expired at ${new Date(inv.expires).toISOString()}`);
     }
     const want = JSON.parse(inv.spec);
     const spec = this.insertToken({

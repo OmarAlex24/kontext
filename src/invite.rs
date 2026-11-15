@@ -248,6 +248,7 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
     }
     let cwd = std::env::current_dir()?;
     let mut out = Outcome {
+        command: "join",
         repo: cwd.display().to_string(),
         project: name.clone(),
         home: None,
@@ -310,8 +311,12 @@ pub fn join(a: &JoinArgs) -> Result<Outcome> {
             "project",
             "done",
             format!(
-                "brought {} from {} into {} ({} entries, writer {}), {how}",
-                j.project, j.server, c.home, c.entries, c.writer
+                "brought {} from {} into {} ({}, writer {}), {how}",
+                j.project,
+                j.server,
+                c.home,
+                crate::views::plural(c.entries as usize, "entry", "entries"),
+                c.writer
             ),
         );
         out.notes.extend(c.warnings.iter().cloned());
