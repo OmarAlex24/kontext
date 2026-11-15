@@ -166,6 +166,7 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "**Hand off, if another chat runs the plan.**",
         "`kontext handoff`",
         "never from a summary of this one",
+        "before it has tasks, `kontext feature add` again with `--why`",
     ] {
         assert!(orq.contains(needed), "missing {needed:?}");
     }
