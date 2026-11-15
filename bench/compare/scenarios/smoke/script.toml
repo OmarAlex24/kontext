@@ -26,7 +26,7 @@ machine = "A"
 kind = "probe"
 id = "smoke-same-machine"
 text = "Quick question about this project, no code needed: what is the release codename, and on which weekday do releases go out?"
-expected = ["heron", "thursday"]
+expected = ["heron", "thursday|thursdays"]
 
 [[days]]
 day = 3
@@ -36,4 +36,4 @@ machine = "B"
 kind = "probe"
 id = "smoke-other-machine"
 text = "Quick question about this project, no code needed: what is the release codename, and on which weekday do releases go out?"
-expected = ["heron", "thursday"]
+expected = ["heron", "thursday|thursdays"]
