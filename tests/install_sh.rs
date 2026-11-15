@@ -122,7 +122,7 @@ fn install_sh_uses_a_folder_on_the_path_and_says_what_comes_next() {
         t.contains("next: in your code repo, run `kontext setup`"),
         "{t}"
     );
-    assert!(!t.contains("not in your PATH"), "{t}");
+    assert!(!t.contains("full path"), "{t}");
 
     // Another folder of the user's on the PATH, writable: that one.
     let b = new_box(dir.path(), "b", &dist);
@@ -139,12 +139,82 @@ fn install_sh_uses_a_folder_on_the_path_and_says_what_comes_next() {
     let o = b.run(sys, &b.home, &[], &[]);
     assert!(o.status.success(), "{}", err(&o));
     let t = err(&o);
-    assert!(t.contains("not in your PATH"), "{t}");
+    assert!(t.contains("is not on your PATH"), "{t}");
+    assert!(t.contains("no shell file was changed"), "{t}");
     let full = b.home.join(".local/bin/kontext");
     assert!(
         t.contains(&format!("run `{} setup`", full.display())),
         "{t}"
     );
+    // No shell startup file is written.
+    for f in [
+        ".profile",
+        ".zshrc",
+        ".bashrc",
+        ".zprofile",
+        ".bash_profile",
+    ] {
+        assert!(!b.home.join(f).exists(), "{f} was written");
+    }
+
+    // An older kontext comes first on the PATH: the new one goes in the first
+    // writable folder of the user's, and since `kontext` still finds the old
+    // one, the next command uses the full path, and says why.
+    let b = new_box(dir.path(), "f", &dist);
+    let old = b.home.join("old/bin");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("kontext"), "#!/bin/sh\necho kontext 0.1.0\n").unwrap();
+    Command::new("chmod")
+        .args(["755", old.join("kontext").to_str().unwrap()])
+        .status()
+        .unwrap();
+    // Not writable: the old one stays and comes first.
+    Command::new("chmod")
+        .args(["555", old.to_str().unwrap()])
+        .status()
+        .unwrap();
+    let local = b.home.join(".local/bin");
+    let o = b.run(
+        &format!("{}:{}:{sys}", old.display(), local.display()),
+        &b.home,
+        &[],
+        &[],
+    );
+    Command::new("chmod")
+        .args(["755", old.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(local.join("kontext").exists(), "{}", err(&o));
+    let t = err(&o);
+    assert!(
+        t.contains(&format!(
+            "another kontext comes first on your PATH ({})",
+            old.join("kontext").display()
+        )),
+        "{t}"
+    );
+    assert!(
+        t.contains(&format!("run `{} setup`", local.join("kontext").display())),
+        "{t}"
+    );
+
+    // PATH order: the first writable folder of the user's, so `kontext` is
+    // the new one.
+    let b = new_box(dir.path(), "g", &dist);
+    let first = b.home.join("first/bin");
+    fs::create_dir_all(&first).unwrap();
+    let local = b.home.join(".local/bin");
+    fs::create_dir_all(&local).unwrap();
+    let o = b.run(
+        &format!("{}:{}:{sys}", first.display(), local.display()),
+        &b.home,
+        &[],
+        &[],
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(first.join("kontext").exists(), "{}", err(&o));
+    assert!(err(&o).contains("run `kontext setup`"), "{}", err(&o));
 
     // KONTEXT_INSTALL_DIR still wins.
     let b = new_box(dir.path(), "d", &dist);
@@ -163,8 +233,24 @@ fn install_sh_uses_a_folder_on_the_path_and_says_what_comes_next() {
     let b = new_box(dir.path(), "e", &dist);
     let o = b.run(sys, &b.home, &["kxt1.not.this"], &[]);
     assert!(!o.status.success());
-    assert!(err(&o).contains("join string"), "{}", err(&o));
+    assert!(err(&o).contains("join line"), "{}", err(&o));
     assert!(!b.home.join(".local/bin/kontext").exists());
+    // A join line cut short or with a stray character: refused before the
+    // download.
+    for bad in [
+        "kxj1.eyJzIjoiaHR0cHM6",
+        "kxj1.eyJzIjoiaHR0cHM6Ly9rLmV4YW1wbGUuY29tIiwicCI6ImIiLCJj'",
+    ] {
+        let o = b.run(sys, &b.home, &[bad], &[]);
+        assert!(!o.status.success());
+        let t = err(&o);
+        assert!(
+            t.contains("not a whole join line") || t.contains("too short"),
+            "{t}"
+        );
+        assert!(!t.contains("downloading"), "{t}");
+        assert!(!b.home.join(".local/bin/kontext").exists());
+    }
 }
 
 #[test]

@@ -10,9 +10,12 @@
 #
 # It downloads the archive for this machine (macOS arm64, Linux x86_64 or
 # arm64), checks it against the release's SHA256SUMS, and puts `kontext` in
-# $KONTEXT_INSTALL_DIR, or else in a folder of yours already on the PATH
-# (~/.local/bin, ~/bin, /usr/local/bin, /opt/homebrew/bin, or another one under
-# your home that you can write), or else in ~/.local/bin.
+# $KONTEXT_INSTALL_DIR, or else in the first folder on your PATH, in PATH
+# order, that you can write and that is a usual one (~/.local/bin, ~/bin,
+# /usr/local/bin, /opt/homebrew/bin) or another one under your home, or else in
+# ~/.local/bin. It edits no shell startup file: when `kontext` on your PATH is
+# not the binary it just installed (none, or an older one earlier on the
+# PATH), every command it prints uses the full path, and it says why.
 #
 #   KONTEXT_VERSION       a tag (v0.2.0); the latest release if not set
 #   KONTEXT_INSTALL_DIR   where to put the binary
@@ -53,36 +56,31 @@ on_path() {
     esac
 }
 
-# Where to put it: $KONTEXT_INSTALL_DIR; a usual folder already on the PATH
-# that can be written (~/.local/bin is created if it is on the PATH); another
-# folder under $HOME on the PATH that can be written; ~/.local/bin.
+# Where to put it: $KONTEXT_INSTALL_DIR; else the first folder on the PATH,
+# in PATH order (the first one is where the shell finds `kontext`), that can be
+# written and is a usual one or one under $HOME (not a project's
+# node_modules or virtualenv, nor cargo's or rustup's own); ~/.local/bin is
+# created if it is on the PATH; else ~/.local/bin.
 pick_dir() {
     if [ -n "${KONTEXT_INSTALL_DIR:-}" ]; then
         echo "$KONTEXT_INSTALL_DIR"
         return
     fi
-    for d in "$HOME/.local/bin" "$HOME/bin" /usr/local/bin /opt/homebrew/bin; do
-        on_path "$d" || continue
-        if [ -d "$d" ] && [ -w "$d" ]; then
-            echo "$d"
-            return
-        fi
-        if [ "$d" = "$HOME/.local/bin" ] && [ ! -e "$d" ]; then
-            echo "$d"
-            return
-        fi
-    done
     old_ifs=$IFS
     IFS=:
     for d in $PATH; do
         case "$d" in
+            "$HOME/.local/bin" | "$HOME/bin" | /usr/local/bin | /opt/homebrew/bin) ;;
+            *node_modules* | *.venv* | *venv/bin* | "$HOME/.cargo/"* | "$HOME/.rustup/"*) continue ;;
             "$HOME"/*) ;;
             *) continue ;;
         esac
-        case "$d" in
-            *node_modules* | *.venv* | *venv/bin*) continue ;;
-        esac
         if [ -d "$d" ] && [ -w "$d" ]; then
+            IFS=$old_ifs
+            echo "$d"
+            return
+        fi
+        if [ "$d" = "$HOME/.local/bin" ] && [ ! -e "$d" ]; then
             IFS=$old_ifs
             echo "$d"
             return
@@ -93,9 +91,18 @@ pick_dir() {
 }
 
 join="${1:-}"
+# A join line is kxj1. and base64url (the server, the project and a one-time
+# code); checked here, before anything is downloaded.
 case "$join" in
-    "" | kxj1.*) ;;
-    *) fail "the argument is a join string (kxj1.…, from \`kontext invite\`), not \"$join\"" ;;
+    "") ;;
+    kxj1.*)
+        rest=${join#kxj1.}
+        case "$rest" in
+            *[!A-Za-z0-9_-]*) fail "that is not a whole join line: after kxj1. it has only letters, digits, - and _ (was it cut, or did a space or quote get in?). Copy the line \`kontext invite\` printed again" ;;
+        esac
+        [ "${#rest}" -ge 40 ] || fail "that join line is too short to be whole (was it cut?). Copy the line \`kontext invite\` printed again"
+        ;;
+    *) fail "the argument is a join line (kxj1.…, from \`kontext invite\`), not \"$join\"" ;;
 esac
 
 command -v curl >/dev/null 2>&1 || fail "curl is needed"
@@ -133,12 +140,17 @@ chmod 755 "$dir/.kontext.new.$$"
 mv -f "$dir/.kontext.new.$$" "$dir/kontext"
 
 say "installed $("$dir/kontext" --version 2>/dev/null || echo kontext) in $dir/kontext"
-if on_path "$dir"; then
+# `kontext` as printed must run this binary: the one the shell finds first.
+found=$(command -v kontext 2>/dev/null || true)
+if [ -n "$found" ] && [ "$(cd "$(dirname "$found")" 2>/dev/null && pwd -P)/$(basename "$found")" = "$(cd "$dir" && pwd -P)/kontext" ]; then
     kx=kontext
 else
     kx="$dir/kontext"
-    say "$dir is not in your PATH; until it is, run it as $kx. To add it:
-    echo 'export PATH=\"$dir:\$PATH\"' >> ~/.profile"
+    if [ -n "$found" ]; then
+        say "another kontext comes first on your PATH ($found), so the commands here use the full path $kx"
+    else
+        say "$dir is not on your PATH, so the commands here use the full path $kx (no shell file was changed)"
+    fi
 fi
 if [ -n "$join" ]; then
     say "joining with the line from \`kontext invite\` (it works once)"
