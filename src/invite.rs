@@ -572,9 +572,14 @@ fn trade(j: &JoinString, timeout: Duration) -> Result<Token> {
     }
     let msg = v.get("message").and_then(Value::as_str).unwrap_or("");
     match v.get("error").and_then(Value::as_str) {
-        Some("invite_used" | "invite_expired" | "invite_unknown" | "invite_revoked") => {
+        Some(e @ ("invite_used" | "invite_expired" | "invite_unknown" | "invite_revoked")) => {
             Err(Refused(format!(
-                "{msg}. On a machine that has project {}, `kontext invite` makes a new one",
+                "{msg}{}. On a machine that has project {}, `kontext invite` makes a new one",
+                if e == "invite_unknown" {
+                    " (or it was cancelled: revoking the token that made a line cancels it)"
+                } else {
+                    ""
+                },
                 j.project
             ))
             .into())
