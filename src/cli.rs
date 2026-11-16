@@ -527,10 +527,14 @@ pub enum Cmd {
     /// comes from the ledger through the ids in `where`. Doesn't write anything, except with
     /// `--mark-audited`
     Ideas {
-        /// Before a coverage audit: write `.pm/audited.json` with the time and how many messages
-        /// each dump has, so the messages after it count as not audited
+        /// After a coverage audit, with the kontext-pm-reader's result (`--from`): check it and
+        /// mark in `.pm/audited.json` the messages it read, so the messages after them count as
+        /// not audited. Refused without `--from`
         #[arg(long)]
         mark_audited: bool,
+        /// The kontext-pm-reader's JSON reply to the Audit task, saved as it came (`-`: stdin)
+        #[arg(long, value_name = "FILE", requires = "mark_audited")]
+        from: Option<PathBuf>,
     },
     /// Which conversations the capture hook writes from, on this machine: `here`, `list`, `forget`.
     /// Works with the capture off
@@ -1582,7 +1586,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             output,
             reader,
         } => cx.report(html, output, reader),
-        Cmd::Ideas { mark_audited } => cx.ideas(mark_audited),
+        Cmd::Ideas { mark_audited, from } => cx.ideas(mark_audited, from),
         Cmd::Capture { cmd } => capture_cmd(project, cx.json, cmd),
         Cmd::Standup { peek, reader } => cx.standup(peek, reader),
         Cmd::Resume {
@@ -2608,14 +2612,24 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn ideas(&self, mark_audited: bool) -> Result<ExitCode> {
+    fn ideas(&self, mark_audited: bool, from: Option<PathBuf>) -> Result<ExitCode> {
+        if mark_audited && from.is_none() {
+            return Err(Refused(
+                "--mark-audited needs the reader's result: launch kontext-pm-reader with the Audit \
+                 task (the kontext-pm skill, section 5), save its JSON reply to a file as it \
+                 comes, then run `kontext ideas --mark-audited --from <file>` (`--from -` reads \
+                 stdin). Nothing was marked."
+                    .into(),
+            )
+            .into());
+        }
         let (mut store, project) = self.open()?;
+        if let Some(from) = from {
+            return self.mark_audited(&project, &from);
+        }
         let cwd = std::env::current_dir()?;
         let repos = Repos::load(&project, &cwd)?;
         let own = crate::capture::Settings::of(&project).worktrees;
-        if mark_audited {
-            return self.mark_audited(&repos, own);
-        }
         let Some(pm) = crate::ideas::locate(&repos, own) else {
             if self.json {
                 let unaudited = crate::ideas::pm_dir(&cwd, own)
@@ -2756,35 +2770,73 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// `kontext ideas --mark-audited`: in the `.pm/` that `kontext ideas` and
-    /// `kontext tree` read ([`crate::ideas::locate`]).
-    fn mark_audited(&self, repos: &Repos, own: bool) -> Result<ExitCode> {
-        let Some(pm) = crate::ideas::locate(repos, own) else {
-            let looked: Vec<String> = crate::ideas::candidates(repos, own)
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect();
-            let looked = if looked.is_empty() {
-                "not in a git repo, and no project repo on this machine".to_string()
-            } else {
-                format!("looked in {}", looked.join(", "))
-            };
-            return Err(Refused(format!(
-                "--mark-audited found no .pm/items.md ({looked}): run it in the code repo that has the PM's memory"
-            ))
-            .into());
+    /// `kontext ideas --mark-audited --from <file>`: checks the reader's
+    /// result and marks the messages it read, in the `.pm/` that `handoff`
+    /// reads ([`Self::ideas_source`]: only a repo of the project).
+    fn mark_audited(&self, project: &Project, from: &Path) -> Result<ExitCode> {
+        let pm = match self.ideas_source(project)? {
+            crate::scope::IdeasSource::Found { pm, .. } => pm,
+            src @ crate::scope::IdeasSource::Foreign { .. } => {
+                return Err(Refused(format!(
+                    "--mark-audited: {} Nothing was marked.",
+                    src.foreign(&project.name).unwrap_or_default()
+                ))
+                .into());
+            }
+            crate::scope::IdeasSource::NotFound(_) => {
+                return Err(Refused(format!(
+                    "--mark-audited: {} Nothing was marked.",
+                    crate::ideas::not_found_text(&project.name)
+                ))
+                .into());
+            }
         };
-        let a = crate::ideas::mark_audited(&pm)?;
-        let path = pm.join(crate::ideas::AUDITED_FILE);
-        let total: usize = a.files.values().sum();
-        if self.json {
-            print_json(&json!({"path": path, "at": a.at, "files": a.files, "messages": total}))?;
+        let text = if from == Path::new("-") {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+                .context("could not read the reader's result from stdin")?;
+            s
         } else {
+            fs::read_to_string(from)
+                .with_context(|| format!("could not read the reader's result {}", from.display()))?
+        };
+        let m = match crate::ideas::mark_audited(&pm, &text)? {
+            Ok(m) => m,
+            Err(why) => return Err(Refused(why).into()),
+        };
+        let path = pm.join(crate::ideas::AUDITED_FILE);
+        let total: usize = m.audited.files.values().sum();
+        if self.json {
+            print_json(
+                &json!({"path": path, "at": m.audited.at, "files": m.audited.files,
+                "messages": total, "marked": m.marked, "left": m.left,
+                "unaudited": m.unaudited}),
+            )?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        let list = |v: &[crate::ideas::Message]| {
+            v.iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let n =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        println!(
+            "Audit marked at {}: {} newly audited ({}); {} audited in {}, {} not yet ({}).",
+            m.audited.at,
+            n(m.marked.len(), "message", "messages"),
+            list(&m.marked),
+            n(total, "message", "messages"),
+            n(m.audited.files.len(), "dump", "dumps"),
+            m.unaudited,
+            path.display()
+        );
+        if !m.left.is_empty() {
             println!(
-                "Audit marked at {}: {total} messages in {} dumps ({}).",
-                a.at,
-                a.files.len(),
-                path.display()
+                "Not marked, because a message before them in the same dump is not in the result: \
+                 {}. Launch kontext-pm-reader again over the dumps as they are now.",
+                list(&m.left)
             );
         }
         Ok(ExitCode::SUCCESS)

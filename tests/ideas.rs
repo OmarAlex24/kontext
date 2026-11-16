@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::{Project, git, implementer, with_epic};
+use common::{Project, git, implementer, reader_result, with_epic};
 use serde_json::Value;
 
 const HEADER: &str =
@@ -358,48 +358,274 @@ fn placed_needs_a_feature_task_or_decision() {
     );
 }
 
-#[test]
-fn mark_audited_counts_the_messages_after_it() {
-    let p = Project::new();
-    let repo = pm_repo(&p, "app", "| P1 | csv | dumps/2026-11-07.md:5 | | | |\n");
-    // Never audited: every entry of every dump.
-    fs::write(
-        repo.join(".pm/dumps/2026-11-08.md"),
-        "## 2026-11-08 09:00\n\n**User:**\n\nA\n\n## 2026-11-08 09:30\n\n**User:**\n\nB\n",
-    )
-    .unwrap();
-    let v = json_in(&p, &repo);
-    assert_eq!(v["unaudited"]["count"], 3);
-    assert!(v["unaudited"]["since"].is_null());
-    let out = ideas_in(&p, &repo, &["ideas"]);
-    assert!(out.contains("3 of your messages never audited."), "{out}");
+/// Ties `repo` to the project (`kontext install` writes this file): only a
+/// `.pm/` of the project's repos is marked.
+fn tie(repo: &Path) {
+    fs::write(repo.join(".kontext.toml"), "project = \"demo\"\n").unwrap();
+}
 
-    let out = p
-        .cmd(&["ideas", "--mark-audited"])
-        .current_dir(&repo)
+/// `kontext [--json] ideas --mark-audited --from <file>` in `dir`, with
+/// `result` saved to that file.
+fn mark(p: &Project, dir: &Path, result: &str, json: bool) -> std::process::Output {
+    let f = p.dir.path().join("reader.json");
+    fs::write(&f, result).unwrap();
+    let mut args = vec!["ideas", "--mark-audited", "--from", f.to_str().unwrap()];
+    if json {
+        args.insert(0, "--json");
+    }
+    p.cmd(&args)
+        .current_dir(dir)
         .env("KONTEXT_NOW", "2026-11-12T10:00:00Z")
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn mark_ok(p: &Project, dir: &Path, result: &str) -> Value {
+    let out = mark(p, dir, result, true);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let said = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(said.contains("3 messages in 2 dumps"), "{said}");
-    let a: Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".pm/audited.json")).unwrap()).unwrap();
-    assert_eq!(a["at"], "2026-11-12T10:00:00Z");
-    assert_eq!(a["files"]["dumps/2026-11-07.md"], 1);
-    assert_eq!(a["files"]["dumps/2026-11-08.md"], 2);
-    let v = json_in(&p, &repo);
-    assert_eq!(v["unaudited"]["count"], 0);
-    assert_eq!(v["unaudited"]["since"], "2026-11-12T10:00:00Z");
-    assert!(!ideas_in(&p, &repo, &["ideas"]).contains("audited"));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
 
-    // A new entry in a dump it saw, and a dump it did not list.
+/// Refused with exit 2; its stderr.
+fn mark_refused(p: &Project, dir: &Path, result: &str) -> String {
+    let out = mark(p, dir, result, false);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(out.stdout.is_empty());
+    err
+}
+
+fn audited_json(repo: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(repo.join(".pm/audited.json")).unwrap()).unwrap()
+}
+
+fn messages(v: &Value) -> Vec<String> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|m| format!("{}:{}", m["file"].as_str().unwrap(), m["line"]))
+        .collect()
+}
+
+/// A dump with three messages, under a repo of the project: headings at
+/// lines 1, 7 and 14; the second one's text wraps over two lines.
+fn three_messages(p: &Project) -> PathBuf {
+    let repo = pm_repo(p, "app", "| P1 | csv | dumps/2026-11-07.md:5 | | | |\n");
+    tie(&repo);
+    fs::write(
+        repo.join(".pm/dumps/2026-11-08.md"),
+        "## 2026-11-08 09:00\n\n**User:**\n\npay by card\n\n\
+         ## 2026-11-08 09:30\n\n**User:**\n\na dark mode for\n  the  admin\n\n\
+         ## 2026-11-08 18:00\n\n**User:**\n\nexport every report to PDF\n",
+    )
+    .unwrap();
+    repo
+}
+
+#[test]
+fn bare_mark_audited_is_refused_and_says_how_the_audit_runs() {
+    let p = Project::new();
+    let repo = three_messages(&p);
+    let out = p
+        .cmd(&["ideas", "--mark-audited"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    for needed in [
+        "--mark-audited needs the reader's result",
+        "kontext-pm-reader",
+        "Audit task",
+        "--mark-audited --from <file>",
+        "Nothing was marked",
+    ] {
+        assert!(err.contains(needed), "{needed}: {err}");
+    }
+    assert!(!repo.join(".pm/audited.json").exists());
+    assert_eq!(json_in(&p, &repo)["unaudited"]["count"], 4);
+}
+
+/// The messages marked are the ones the result lists, in order per dump: one
+/// listed after one it skips stays unaudited. Quotes may wrap lines and
+/// carry other whitespace.
+#[test]
+fn a_valid_result_marks_exactly_the_messages_it_lists() {
+    let p = Project::new();
+    let repo = three_messages(&p);
+    let v = json_in(&p, &repo);
+    assert_eq!(v["unaudited"]["count"], 4);
+    assert!(v["unaudited"]["since"].is_null());
+    let result = serde_json::json!({
+        "read": [
+            {"file": ".pm/dumps/2026-11-07.md", "line": 1},
+            {"file": ".pm/dumps/2026-11-08.md", "line": 1},
+            {"file": ".pm/dumps/2026-11-08.md", "line": 14},
+        ],
+        "ideas": [
+            {"quote": "let customers export their invoices as CSV", "file": ".pm/dumps/2026-11-07.md",
+             "line": 5, "in_items": true, "discarded": false},
+            {"quote": "a dark mode for the admin", "file": ".pm/dumps/2026-11-08.md", "line": 11,
+             "in_items": false, "discarded": false},
+        ],
+        "missing": [
+            {"quote": "pay by card", "file": "dumps/2026-11-08.md", "line": 6},
+        ],
+    })
+    .to_string();
+    let v = mark_ok(&p, &repo, &result);
+    assert_eq!(
+        messages(&v["marked"]),
+        ["dumps/2026-11-07.md:1", "dumps/2026-11-08.md:1"]
+    );
+    assert_eq!(messages(&v["left"]), ["dumps/2026-11-08.md:14"]);
+    assert_eq!(v["unaudited"], 2);
+    let a = audited_json(&repo);
+    assert_eq!(a["at"], "2026-11-12T10:00:00Z");
+    assert_eq!(
+        a["files"],
+        serde_json::json!({"dumps/2026-11-07.md": 1, "dumps/2026-11-08.md": 1})
+    );
+    let v = json_in(&p, &repo);
+    assert_eq!(v["unaudited"]["count"], 2);
+    assert_eq!(v["unaudited"]["since"], "2026-11-12T10:00:00Z");
+
+    // The text says what it marked and what it left.
+    fs::remove_file(repo.join(".pm/audited.json")).unwrap();
+    let out = mark(&p, &repo, &result, false);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("2 messages newly audited (dumps/2026-11-07.md:1, dumps/2026-11-08.md:1)"),
+        "{said}"
+    );
+    assert!(
+        said.contains("Not marked, because a message before them in the same dump is not in the result: dumps/2026-11-08.md:14"),
+        "{said}"
+    );
+}
+
+/// A quote that is not in its cited file, or not near its line, is refused
+/// and marks nothing: an earlier mark stays as it was, byte for byte.
+#[test]
+fn a_citation_not_in_its_file_is_refused_and_marks_nothing() {
+    let p = Project::new();
+    let repo = three_messages(&p);
+    let before = "{\"at\": \"2026-11-10T00:00:00Z\", \"files\": {\"dumps/2026-11-07.md\": 1}}\n";
+    fs::write(repo.join(".pm/audited.json"), before).unwrap();
+    let read = serde_json::json!([
+        {"file": ".pm/dumps/2026-11-08.md", "line": 1},
+        {"file": ".pm/dumps/2026-11-08.md", "line": 7},
+        {"file": ".pm/dumps/2026-11-08.md", "line": 14},
+    ]);
+    let made_up = serde_json::json!({"read": read, "ideas": [], "missing": [
+        {"quote": "pay in bitcoin", "file": ".pm/dumps/2026-11-08.md", "line": 5},
+    ]});
+    let err = mark_refused(&p, &repo, &made_up.to_string());
+    for needed in [
+        "did not pass the checks, so nothing was marked",
+        "citations: missing[0]: .pm/dumps/2026-11-08.md:5: the quote \"pay in bitcoin\" is not in that file",
+        "never edit it",
+    ] {
+        assert!(err.contains(needed), "{needed}: {err}");
+    }
+    // Real, but cited far from where it is; a case change is not the same text.
+    let far = serde_json::json!({"read": read, "ideas": [
+        {"quote": "export every report to PDF", "file": ".pm/dumps/2026-11-08.md", "line": 5},
+        {"quote": "Pay by card", "file": ".pm/dumps/2026-11-08.md", "line": 5},
+    ], "missing": []});
+    let err = mark_refused(&p, &repo, &far.to_string());
+    assert!(
+        err.contains("ideas[0]: .pm/dumps/2026-11-08.md:5: the quote \"export every report to PDF\" is not in that file within 2 lines of line 5 (it is at line 18)"),
+        "{err}"
+    );
+    assert!(err.contains("ideas[1]"), "{err}");
+    // A file outside .pm/.
+    let outside = serde_json::json!({"read": read, "ideas": [
+        {"quote": "pay by card", "file": "src/main.rs", "line": 5},
+    ], "missing": []});
+    let err = mark_refused(&p, &repo, &outside.to_string());
+    assert!(err.contains("src/main.rs:5 is not a file in .pm/"), "{err}");
+    assert_eq!(
+        fs::read_to_string(repo.join(".pm/audited.json")).unwrap(),
+        before
+    );
+}
+
+/// `read` must name real messages; the reply must be an audit answer.
+#[test]
+fn a_result_that_lists_a_message_that_does_not_exist_is_refused() {
+    let p = Project::new();
+    let repo = three_messages(&p);
+    let with_read =
+        |read: Value| serde_json::json!({"read": read, "ideas": [], "missing": []}).to_string();
+    let err = mark_refused(
+        &p,
+        &repo,
+        &with_read(serde_json::json!([
+            {"file": ".pm/dumps/2026-11-07.md", "line": 1},
+            {"file": ".pm/dumps/2026-11-07.md", "line": 3},
+        ])),
+    );
+    assert!(
+        err.contains("read: read[1]: .pm/dumps/2026-11-07.md:3 is not the heading of a message"),
+        "{err}"
+    );
+    let err = mark_refused(
+        &p,
+        &repo,
+        &with_read(serde_json::json!([{"file": ".pm/dumps/2026-12-01.md", "line": 1}])),
+    );
+    assert!(
+        err.contains("read: read[0]: .pm/dumps/2026-12-01.md:1: there is no such dump"),
+        "{err}"
+    );
+    let err = mark_refused(
+        &p,
+        &repo,
+        &with_read(serde_json::json!([{"file": ".pm/dumps/2026-11-07.md", "line": 99}])),
+    );
+    assert!(err.contains("2026-11-07.md:99 is not the heading"), "{err}");
+    // A Value task answer, a reply without `read`, and one in a code fence.
+    let err = mark_refused(
+        &p,
+        &repo,
+        r#"{"read": [], "answers": [{"id": "q1", "value": "x", "quote": "pay by card", "file": ".pm/dumps/2026-11-08.md", "line": 5}]}"#,
+    );
+    assert!(err.contains("this is a Value task answer"), "{err}");
+    let err = mark_refused(&p, &repo, r#"{"ideas": [], "missing": []}"#);
+    assert!(err.contains("format: no `read` list"), "{err}");
+    let err = mark_refused(&p, &repo, "```json\n{\"read\": []}\n```");
+    assert!(err.contains("format: not JSON"), "{err}");
+    assert!(!repo.join(".pm/audited.json").exists());
+}
+
+/// After a new message, a second audit marks only the new one; the same
+/// result again (stale) is refused. A mark the old command wrote stays valid.
+#[test]
+fn a_second_audit_after_a_new_message_marks_only_the_new_one() {
+    let p = Project::new();
+    let repo = three_messages(&p);
+    // The shape v0.2.0's bare --mark-audited wrote: every message then.
+    fs::write(
+        repo.join(".pm/audited.json"),
+        "{\"at\": \"2026-11-10T00:00:00Z\", \"files\": {\"dumps/2026-11-07.md\": 1, \"dumps/2026-11-08.md\": 3}}\n",
+    )
+    .unwrap();
+    assert_eq!(json_in(&p, &repo)["unaudited"]["count"], 0);
+    let old = reader_result(&repo.join(".pm"));
+    let err = mark_refused(&p, &repo, &old);
+    assert!(
+        err.contains("covers no message that is not audited yet, so nothing was marked: every message it lists (4) was audited already. Every message in the dumps is audited already: there is nothing to mark."),
+        "{err}"
+    );
+
     let mut d = fs::read_to_string(repo.join(".pm/dumps/2026-11-08.md")).unwrap();
-    d.push_str("\n## 2026-11-08 18:00\n\n**User:**\n\nC\n");
+    d.push_str("\n## 2026-11-08 20:00\n\n**User:**\n\nand invoices in PDF\n");
     fs::write(repo.join(".pm/dumps/2026-11-08.md"), d).unwrap();
     fs::write(
         repo.join(".pm/dumps/2026-11-13.md"),
@@ -408,17 +634,56 @@ fn mark_audited_counts_the_messages_after_it() {
     .unwrap();
     let v = json_in(&p, &repo);
     assert_eq!(v["unaudited"]["count"], 2);
-    let out = ideas_in(&p, &repo, &["ideas"]);
+    assert_eq!(v["unaudited"]["since"], "2026-11-10T00:00:00Z");
     assert!(
-        out.contains("2 of your messages not audited since Nov 12."),
-        "{out}"
+        ideas_in(&p, &repo, &["ideas"]).contains("2 of your messages not audited since Nov 10."),
+    );
+    // The stale result still covers nothing new, and now there is something to audit.
+    let err = mark_refused(&p, &repo, &old);
+    assert!(
+        err.contains("covers no message that is not audited yet"),
+        "{err}"
+    );
+    assert!(
+        err.contains("2 not audited yet: launch kontext-pm-reader again"),
+        "{err}"
     );
 
-    // Without items.md the JSON still says it; the text is as before.
-    fs::remove_file(repo.join(".pm/items.md")).unwrap();
-    let v = json_in(&p, &repo);
-    assert_eq!(v["unaudited"]["count"], 2);
-    assert_eq!(v["not_placed"].as_array().unwrap().len(), 0);
+    // Through stdin: every message listed, only the two new ones marked.
+    let mut child = p
+        .cmd(&["--json", "ideas", "--mark-audited", "--from", "-"])
+        .current_dir(&repo)
+        .env("KONTEXT_NOW", "2026-11-13T10:00:00Z")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(reader_result(&repo.join(".pm")).as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        messages(&v["marked"]),
+        ["dumps/2026-11-08.md:20", "dumps/2026-11-13.md:1"]
+    );
+    assert_eq!(v["unaudited"], 0);
+    assert_eq!(v["messages"], 6);
+    assert_eq!(
+        audited_json(&repo)["files"],
+        serde_json::json!({"dumps/2026-11-07.md": 1, "dumps/2026-11-08.md": 4, "dumps/2026-11-13.md": 1})
+    );
+    assert_eq!(json_in(&p, &repo)["unaudited"]["count"], 0);
 }
 
 #[test]
@@ -426,22 +691,18 @@ fn mark_audited_outside_a_repo_is_refused() {
     let p = Project::new();
     let dir = p.dir.path().join("nogit");
     fs::create_dir_all(&dir).unwrap();
-    let out = p
-        .cmd(&["ideas", "--mark-audited"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    let err = mark_refused(&p, &dir, r#"{"read": [], "ideas": [], "missing": []}"#);
+    assert!(
+        err.contains("No .pm/items.md found in a repo of demo"),
+        "{err}"
     );
     assert!(!dir.join(".pm").exists());
 }
 
+/// It marks the `.pm/` that `handoff` reads: the project's repo, also from
+/// another folder; never one in a repo that is not the project's.
 #[test]
-fn mark_audited_writes_where_ideas_reads() {
+fn mark_audited_writes_in_the_projects_pm() {
     let p = Project::new();
     let app = pm_repo(&p, "app", "| P1 | csv | dumps/2026-11-07.md:5 | | | |\n");
     p.add_repo_toml("[[repos]]\nname = \"app\"\n");
@@ -451,33 +712,28 @@ fn mark_audited_writes_where_ideas_reads() {
     fs::create_dir_all(&other).unwrap();
     git(&other, &["init", "-q"]);
     assert_eq!(json_in(&p, &other)["unaudited"]["count"], 1);
-    let out = ideas_in(&p, &other, &["ideas", "--mark-audited"]);
-    assert!(out.contains("1 messages in 1 dumps"), "{out}");
+    let v = mark_ok(&p, &other, &reader_result(&app.join(".pm")));
+    assert_eq!(messages(&v["marked"]), ["dumps/2026-11-07.md:1"]);
     assert!(app.join(".pm/audited.json").is_file());
     assert!(!other.join(".pm").exists());
     assert_eq!(json_in(&p, &other)["unaudited"]["count"], 0);
 
-    // No items.md anywhere: refused, saying where it looked.
+    // No items.md in a repo of the project: refused, saying where one counts.
     fs::remove_file(app.join(".pm/items.md")).unwrap();
     fs::remove_file(app.join(".pm/audited.json")).unwrap();
-    let out = p
-        .cmd(&["ideas", "--mark-audited"])
-        .current_dir(&other)
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    let err = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(err.contains("no .pm/items.md"), "{err}");
-    for dir in [&other, &app] {
-        let looked = dir
-            .canonicalize()
-            .unwrap()
-            .join(".pm")
-            .display()
-            .to_string();
-        assert!(err.contains(&looked), "{looked} not in {err}");
-    }
+    let err = mark_refused(&p, &other, &reader_result(&app.join(".pm")));
+    assert!(
+        err.contains("No .pm/items.md found in a repo of demo"),
+        "{err}"
+    );
+    assert!(err.contains("kontext install --link-only"), "{err}");
     assert!(!app.join(".pm/audited.json").exists());
+
+    // A repo that is not the project's, with its own .pm/items.md: refused.
+    let stray = pm_repo(&p, "stray", "");
+    let err = mark_refused(&p, &stray, &reader_result(&stray.join(".pm")));
+    assert!(err.contains("is in a repo that is not demo's"), "{err}");
+    assert!(!stray.join(".pm/audited.json").exists());
 }
 
 #[test]

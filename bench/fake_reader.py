@@ -13,7 +13,7 @@ It uses no model and never reads the ground truth. It reads the spec
 the working folder: it looks for the spec's idea sentences in `.pm/dumps/` and
 answers from what it finds. For the audit, an idea is missing if its sentence is
 in a dump, it has no discard sentence there, and none of the spec's paraphrases
-of it is in `.pm/items.md`. When the prompt asks for the v2 answer (`{"ideas"`),
+of it is in `.pm/items.md`. When the prompt asks for the v2 answer (`"ideas": [`),
 it also lists every idea sentence it found, with `in_items` and `discarded`. For
 the values, the last of an idea's sentences found in the dumps (its own, then
 each change) gives the value in force, from the idea's `values`.
@@ -218,11 +218,13 @@ def main():
         sub_model = sub.get("model") or main_model
         sub_effort = forced or sub.get("effort") or main_effort
 
-    if '{"ideas"' in prompt:
+    # By the keys of the JSON the prompt asks for (the shipped templates start
+    # it with `{"read": […], ` before `"ideas"` or `"answers"`).
+    if '"ideas": [' in prompt:
         answer = audit(spec, folder, v2=True)
     elif '{"missing"' in prompt:
         answer = audit(spec, folder)
-    elif '{"answers"' in prompt:
+    elif '"answers": [' in prompt:
         answer = values(spec, folder)
     else:
         answer = {}
