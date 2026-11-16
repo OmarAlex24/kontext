@@ -23,7 +23,7 @@ Prices are Anthropic first-party rates as of 2026-11-03, taken from the `claude-
 - **Tasks (3):**
   - S1, a 3-line bug, and S2, a bug in shared logic. Both measure overhead.
   - L, a 4-day project. Requirements are said once or in passing, some change, and a pasted email plants distractors. One `/compact`, a new chat on day 3, and a new chat on a second machine on day 4. Fourteen hidden checks, one per requirement. No requirement's code is asked for until after its context is lost, and the checks run at the end of every day.
-- **Friction axis, no model:** from a clean machine to "machine B sees what A saved", for 9 setups. kontext is worse than mem0, Beads, OpenSpec and Engram-over-git on accounts, secrets and steps. It is better on what happens after setup: every command syncs on its own and it needs no third-party host (§3).
+- **Friction axis, no model:** from a clean machine to "machine B sees what A saved", for 9 setups. kontext v0.2.0 (§3.1) was worse than mem0, Beads, OpenSpec and Engram-over-git on accounts, secrets and steps. v0.3.0 (§3.1b) is 6 commands, 3–6 manual steps, 1 account and 2 secrets: still worse than Beads, OpenSpec and Engram-over-git on accounts, secrets and manual steps; against mem0 (§3.2), the same account count, one secret and two commands more, and manual steps in an overlapping range (3–6 against 4–5). It is better on what happens after setup: every command syncs on its own and it needs no third-party host (§3).
 - **Model:** Sonnet 5.5 for every arm, chosen on price. Haiku 5.5 as a second, cheap column, where the arms differ most. Opus 5.5 is an optional confirmation on 3 arms.
 - **Runs and cost:** 5 runs per cell.
   - Full run: about **$145** of API-equivalent cost (at most about $200), 10–12 hours on one machine with 4 containers at once.
@@ -223,6 +223,29 @@ From a clean machine A with Claude Code and git, to "machine B sees what A saved
 **Total:** 8 commands (+1 conditional); 5–7 manual steps; 1 account (Cloudflare); 2 secrets made by hand or carried (the Cloudflare token and the kontext token); runs on infrastructure the user owns, on the free plan. Steps 3–5 are once per Cloudflare account, so a second project costs 7, 8, 9, 11, 12 and 14.
 
 Git path, for comparison: `init --remote <url>` needs a private repo created by hand. After that, `kontext sync` by hand on every machine, every time.
+
+### 3.1b kontext v0.3.0, server path (README "Install", `install.sh`)
+
+Added after v0.3.0 (2026-11-15) replaced the path in §3.1. Doc-derived from the README's "Install" section and the help of `kontext setup`, `server deploy`, `invite` and `join` (`src/cli.rs`). §3.3 was written against §3.1.
+
+| # | Where | Step | Kind |
+|---|---|---|---|
+| 1 | A | `curl -fsSL …/install.sh \| sh` | command |
+| 2 | A | Add `~/.local/bin` to `PATH` if it is not there (the installer edits no shell file; its commands use the full path when `kontext` is not on `PATH`) | manual, conditional |
+| 3 | A | `kontext setup` in the code repo: creates the project and installs the hooks, skills and agent files, then stops (exit 4) with a link for a Cloudflare token | command |
+| 4 | A | Create a Cloudflare account | manual, account |
+| 5 | A | Open the link `setup` printed and create the API token (the permission "Workers Scripts: Edit" comes filled in) | manual, secret 1 |
+| 6 | A | `kontext server deploy`, pasting the token when it asks | command |
+| 6b | A | On an account with no `workers.dev` subdomain, `server deploy` asks for one on a terminal, in the same run (`src/server.rs` L517-541); without a terminal it exits 4 naming `--subdomain` | manual, conditional |
+| 7 | A | `kontext setup` again: puts the project on the server with its history and syncs | command |
+| 8 | A | `kontext invite`: prints a line (`kontext join kxj1.…`, or `curl … install.sh \| sh -s -- kxj1.…`) that works once and for 10 minutes. It carries a one-time code, not a token; counted as a secret because it is shown once and carried | command, secret 2 |
+| 9 | B | Carry the line from A to B | manual |
+| 10 | B | `curl … install.sh \| sh -s -- kxj1.…` in the code repo: installs, joins, installs the hooks (+ `PATH` as in step 2) | command (+ manual, conditional) |
+| after | A, B | Every command pulls and pushes on its own | automatic |
+
+No `KONTEXT_ACTOR`: the human's name comes from `git config user.name` (README "Who writes").
+
+**Total:** 6 commands (5 + 1); 3–6 manual steps; 1 account (Cloudflare); 2 secrets made or shown once (the Cloudflare token and the join line). Steps 4–6b are once per Cloudflare account: another project on the same account is `kontext setup` in its repo (README "Install").
 
 ### 3.2 The others
 
@@ -589,7 +612,9 @@ The harness in `bench/compare/` follows the text above, except where building it
 
 17. **`python` exists in every image and is allowed.** The fixtures' READMEs say `python3 -m unittest …`, yet in the smoke and S1 pilot cells (2026-11-15, one run per arm) the model typed `python -m unittest …` in all six S1 cells and in five of the six smoke cells. The base image had no `python` and the allow-list only `Bash(python3:*)`, so those 20 calls were refused and the agents finished without running the tests. The base image now installs `python-is-python3` and `allowed_common.txt` has `Bash(python:*)`, for all arms alike. Neither file is in the frozen paths. The cells run before this change are discarded and S1 was run again.
 
-18. **The kontext arm is v0.3.0 for the full run.** The pilot ran v0.2.0. The full run was held until phase 3 and the setup commands were released (v0.3.0, 2026-11-15), so the arm is the product as it is now: `KONTEXT_VERSION=v0.3.0` in `versions.env`, which rebuilds `bench-kontext` and `bench-sidecar` and nothing else. The arm's commands are unchanged (`kontext init --server`, `kontext install`, `kontext clone`), and they are still in v0.3.0. No pilot cell is carried into the full run: every arm runs again, seed 1 included, in the same window. The friction report (`friction/`) still describes v0.2.0 and says so in its title.
+18. **The kontext arm is v0.3.0 for the full run.** The pilot ran v0.2.0. The full run was held until phase 3 and the setup commands were released (v0.3.0, 2026-11-15), so the arm is the product as it is now: `KONTEXT_VERSION=v0.3.0` in `versions.env`, which rebuilds `bench-kontext` and `bench-sidecar` and nothing else. The arm's commands are unchanged (`kontext init --server`, `kontext install`, `kontext clone`), and they are still in v0.3.0. No pilot cell is carried into the full run: every arm runs again, seed 1 included, in the same window. The friction report (`friction/`) describes v0.3.0 since 2026-11-16 (note 19).
+
+19. **The friction report describes kontext v0.3.0.** Re-executed 2026-11-16 with the path in §3.1b (`friction/REPORT.md`): 5 + 1 commands, 3–6 manual steps (3 here: the two PATH steps were not needed on Debian, and the subdomain prompt needs an account), 1 account, 2 secrets, the same as §3.1b; B saw what A saved. The v0.2.0 path of §3.1 had given 5 + 3 (+1 conditional), 5–7, 1 and 2. No counted command set `KONTEXT_ACTOR`. The first `kontext setup` created the project and installed, then exited 4 for the Cloudflare token. `server deploy` and the subdomain prompt need an account and were not run: the second `setup` ran against the sidecar with its admin secret (`--server`, `KONTEXT_ADMIN_SECRET`), standing in for the one after a real deploy. `kontext join` refuses a server on plain http that is not the same machine (`src/invite.rs`), and the sidecar has no TLS, so the friction run forwards `localhost:8787` to the sidecar on A and on B (uncounted harness rows). The other setups gave the same counts as on 2026-11-15.
 
 ## §8, settled now or still open
 
