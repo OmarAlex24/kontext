@@ -604,7 +604,32 @@ python3 -m unittest discover bench/tests      # the harness tests
 
 **A real run spends tokens** (`run.py` asks for `--yes`). How to run it, what each column measures, and the drift formula, fixed before running: [bench/README.md](./bench/README.md).
 
-`bench/compare/` compares kontext with plain Claude Code, gentle-ai + Engram, the mem0 plugin, Beads and OpenSpec. Each machine runs in its own container, and a second machine joins on day 4. Not run yet: [bench/compare/README.md](./bench/compare/README.md).
+`bench/compare/` compares kontext with plain Claude Code, gentle-ai + Engram, the mem0 plugin, Beads and OpenSpec. Each run is a scripted conversation with a real model, and each machine is its own container. It measures:
+
+- **Requirements kept over a 4-day project (task L).** The user states 14 requirements on days 1 and 2, some in passing, some changed or dropped later, next to near-identical values that belong to someone else. Day 3 is a new chat and day 4 is a new chat on a second machine, each with only what the setup carried over by itself, and nothing is repeated there. One hidden check per requirement runs the code in a container the agent never reaches.
+- **Overhead on small tasks (S1, S2).** Two small bug fixes, where memory is of no use: only cost and time are compared.
+- **Cost and time** of every run, as `claude -p` reports them, with kontext's distill calls counted.
+- **Install-and-sync friction, with no model.** The commands, manual steps, accounts and secrets from a clean machine until a second machine sees what the first saved, re-executed in containers: [bench/compare/friction/REPORT.md](./bench/compare/friction/REPORT.md).
+
+The fixtures, the scripted turns, the hidden checks and the analysis rules were frozen before the first paid run ([ANALYSIS.md](./bench/compare/ANALYSIS.md), `FREEZE.json`). The design, with what each setup installs and why the second machine is fair to all of them: [bench/compare/DESIGN.md](./bench/compare/DESIGN.md). How to run it (a real run spends tokens): [bench/compare/README.md](./bench/compare/README.md).
+
+**Full run, 2026-11-16, kontext v0.3.0:** 180 runs (3 tasks × 6 setups × 2 models × 5 seeds), 38.73 USD. Requirements kept in L, of 14, mean ± SD of 5 runs:
+
+| Setup | Sonnet 5.5 | Haiku 5.5 |
+|---|---|---|
+| kontext | 12.8 ± 0.4 | 12.6 ± 0.9 |
+| gentle-ai + Engram | 6.4 ± 1.3 | 6.6 ± 0.9 |
+| mem0 plugin | 2.6 ± 1.1 | 6.8 ± 2.6 |
+| Beads | 1.4 ± 2.6 | 6.0 ± 3.9 |
+| OpenSpec | 0.2 ± 0.4 | 5.2 ± 2.8 |
+| plain Claude Code | 0.2 ± 0.4 | 3.8 ± 3.0 |
+
+- **Sonnet:** kontext differs from every other setup (p = 0.008 each). Against plain it costs 12 % more and takes 7 % longer, both under the 20 % the rules ask for a claim.
+- **Haiku:** kontext differs from every other setup too, at 46 % more cost and 29 % more time than plain. But 5.0 of its 12.6 were already coded before the chat was lost, so this number is not a memory result on a par with Sonnet's.
+- **Small tasks:** every setup passed every hidden check. On Sonnet kontext's median cost is 0.035 and 0.044 USD against plain's 0.031 and 0.037.
+- **Limits:** one fictional project, one harness (Claude Code with `claude -p`), two models, five runs per cell, and kontext's server ran in a local container, not on Cloudflare.
+
+The full tables and what to read next to them: [bench/compare/reports/2026-11-16-full-v0.3.0/](./bench/compare/reports/2026-11-16-full-v0.3.0/README.md).
 
 ## Working with other people
 
