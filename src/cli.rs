@@ -953,6 +953,14 @@ pub enum DispatchCmd {
         /// The epic: E-…, epic:<name> or <name>
         epic: String,
     },
+    /// Holds one turn of an epic's coordinator open until it ends (started by dispatch itself)
+    #[command(hide = true)]
+    Turn {
+        /// The epic's id
+        epic: String,
+        /// The turn's number
+        n: u32,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1390,6 +1398,11 @@ fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
         | Cmd::Ui { .. } => return None,
         Cmd::Install {
             skills_only: true, ..
+        } => return None,
+        // The turn's process only talks to the sandbox service.
+        Cmd::Dispatch {
+            cmd: Some(DispatchCmd::Turn { .. }),
+            ..
         } => return None,
         _ => {}
     }
@@ -2387,6 +2400,9 @@ impl Ctx<'_> {
     fn dispatch(&self, cmd: Option<DispatchCmd>, epic: Option<String>) -> Result<ExitCode> {
         let p = config::resolve_project(self.project)?;
         match (cmd, epic) {
+            (Some(DispatchCmd::Turn { epic, n }), _) => {
+                crate::dispatch::turn::hold(&p.name, &epic, n)?;
+            }
             (Some(DispatchCmd::Status), _) => {
                 let r = crate::dispatch::status(&p.name)?;
                 if self.json {

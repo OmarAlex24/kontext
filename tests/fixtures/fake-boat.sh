@@ -9,6 +9,9 @@
 #   fail-stop         `stop` fails
 #   <id>.setup        `info` says this setupStatus (default: done)
 #   <id>.setup-error  and this setupError
+#   end-<id>-<k>      ends the k-th prompt's turn on that sandbox, with the
+#                     exit code inside (empty: 0)
+#   end-all           ends every turn (the tests' clean-up)
 #
 # What it keeps: files/<name> for each --file (the file's base name),
 # <id>.setup-file for --setup-file, <id>.env with the -e values, and
@@ -79,6 +82,34 @@ stop)
     fi
     : >"$D/$id.stopped"
     echo "{\"id\":\"$id\",\"state\":\"stopping\"}"
+    ;;
+prompt)
+    id=$1
+    shift
+    conv=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --resume) conv=$2; shift 2 ;;
+        --provider | --model) shift 2 ;;
+        *) shift ;;
+        esac
+    done
+    k=$(cat "$D/$id.prompts" 2>/dev/null || echo 0)
+    k=$((k + 1))
+    echo "$k" >"$D/$id.prompts"
+    [ -n "$conv" ] || conv="cv_$id"
+    echo "{\"event\":\"queued\",\"conversationId\":\"$conv\"}"
+    # The turn lasts until the test ends it (10 minutes at most).
+    i=0
+    while [ ! -e "$D/end-$id-$k" ] && [ ! -e "$D/end-all" ]; do
+        i=$((i + 1))
+        # Gone with the test's folder, or 10 minutes: give up.
+        [ -d "$D" ] && [ "$i" -lt 6000 ] || exit 3
+        sleep 0.1
+    done
+    code=$(cat "$D/end-$id-$k" 2>/dev/null || true)
+    echo '{"event":"prompt","data":{"status":"finished"}}'
+    exit "${code:-0}"
     ;;
 *)
     echo "fake boat: $cmd is not faked" >&2

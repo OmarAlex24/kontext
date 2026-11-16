@@ -4,16 +4,19 @@
 //! when a sandbox stops all come from the ledger and this machine's state.
 //!
 //! - [`dispatch`] checks (each refusal is exit 2 and one line), reserves the
-//!   epic under the state lock, makes the token, and makes the sandbox with
-//!   the token as a file. Anything that fails after the token stops the
-//!   sandbox and revokes the token.
+//!   epic under the state lock, makes the token, makes the sandbox with the
+//!   token as a file and its start script ([`script`]), waits for the script,
+//!   and prompts the coordinator in a process of its own ([`turn`]). Anything
+//!   that fails after the token stops the sandbox and revokes the token.
 //! - [`status`] and [`stop`].
 //! - The ledger gets a journal entry when an epic is dispatched and when its
 //!   sandbox stops (`fields.dispatch`: `start` or `end`), so `kontext tree`,
 //!   the epic's brief and the pm see them.
 
 pub mod provider;
+pub mod script;
 pub mod state;
+pub mod turn;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -90,6 +93,26 @@ impl Settings {
     pub fn limit_ms(&self) -> i64 {
         self.hours as i64 * 3_600_000
     }
+}
+
+/// The project's `[dispatch]` and where it is on this machine.
+pub fn config_of(project: &str) -> Result<(Settings, config::Resolved)> {
+    let resolved = config::resolve_project(Some(project))?;
+    let proj = Project::load(&resolved.home)?;
+    Ok((Settings::of(&proj), resolved))
+}
+
+/// How long the start script may take.
+const SETUP_LIMIT_MS: i64 = 20 * 60_000;
+
+/// How often the dispatcher asks the service (5 s; `KONTEXT_DISPATCH_POLL_MS`
+/// in the tests).
+pub fn poll() -> std::time::Duration {
+    let ms = std::env::var("KONTEXT_DISPATCH_POLL_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(5000);
+    std::time::Duration::from_millis(ms)
 }
 
 fn refused<T>(msg: impl Into<String>) -> Result<T> {
@@ -325,6 +348,12 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
     let proj = Project::load(&home)?;
     let settings = Settings::of(&proj);
     let prov = provider::of(&settings.service).map_err(|e| Refused(format!("{e:#}")))?;
+    if settings.repo_dir.is_none() {
+        return refused(
+            "project.toml has no [[repos]]: say where the code repo's clone is in the sandbox with \
+             [dispatch] repo_dir",
+        );
+    }
     let ready = {
         let mut store = Store::open(&home, &resolved.writer)?;
         let st = store.state()?;
@@ -441,6 +470,19 @@ fn start(
     let dir = state::dir(project)?;
     let token_file = TokenFile::write(&dir, &minted.token)?;
     drop(minted);
+    let script = dir
+        .join("tmp")
+        .join(format!("start-{}.sh", config::random_hex(4)?));
+    fs::write(
+        &script,
+        script::start_script(&script::ScriptArgs {
+            server: remote.url.clone(),
+            project: project.into(),
+            epic: run.name.clone(),
+            version: s.kontext_version.clone(),
+            repo_dir: s.repo_dir.clone().unwrap_or_default(),
+        }),
+    )?;
     let spec = NewSandbox {
         name: run.sandbox_name.clone(),
         environment: s.environment.clone(),
@@ -449,9 +491,11 @@ fn start(
         ttl_secs: (s.hours + 1) * 3600,
         env: sandbox_env(&remote.url, project, &run.name),
         files: vec![(TOKEN_PATH.into(), token_file.0.clone())],
+        setup: Some(script.clone()),
     };
     let created = prov.create(&spec);
     drop(token_file);
+    let _ = fs::remove_file(&script);
     let id = match created {
         Ok(id) => id,
         Err(f) => {
@@ -462,12 +506,39 @@ fn start(
         }
     };
     run.sandbox = Some(id.clone());
-    run.state = RunState::Running;
     let snapshot = run.clone();
     state::update(project, &run.epic, |r| *r = snapshot)?;
     say(&format!(
-        "sandbox {id} ({}) made with {}",
+        "sandbox {id} ({}) made with {}; waiting for its start script",
         run.sandbox_name, s.service
+    ));
+
+    // The start script runs in the background: wait for it.
+    let until = now_ms() + SETUP_LIMIT_MS;
+    loop {
+        match prov.setup(&id)? {
+            provider::Setup::Done => break,
+            provider::Setup::Failed(why) => {
+                anyhow::bail!("the sandbox's start script failed: {why}")
+            }
+            provider::Setup::Pending if now_ms() > until => anyhow::bail!(
+                "the sandbox's start script did not finish in {} minutes",
+                SETUP_LIMIT_MS / 60_000
+            ),
+            provider::Setup::Pending => std::thread::sleep(poll()),
+        }
+    }
+    say("start script done: kontext and the project are set up in the sandbox");
+
+    // The coordinator's first turn, held by a process of its own.
+    run.state = RunState::Running;
+    run.turns = 1;
+    let snapshot = run.clone();
+    state::update(project, &run.epic, |r| *r = snapshot)?;
+    turn::launch(project, &run.epic, 1)?;
+    say(&format!(
+        "coordinator prompted: {} {} (`kontext brief {}`)",
+        s.provider, s.model, run.name
     ));
     let w = config::resolve_project(Some(project))?.writer;
     record(home, &w, start_entry(run, s))?;

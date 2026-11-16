@@ -69,8 +69,25 @@ impl World {
         );
         assert!(out.contains("Project demo created"), "{out}");
         w.set_owners();
+        // The code repo's clone "in the sandbox": a folder of the test.
+        let repo = w.dir.path().join("sbx").join("demo");
+        w.configure(&format!(
+            "\n[dispatch]\nrepo_dir = {:?}\n",
+            repo.to_str().unwrap()
+        ));
         w.ok(&["sync", "--include-config"]);
         Some(w)
+    }
+
+    fn repo(&self) -> PathBuf {
+        self.dir.path().join("sbx").join("demo")
+    }
+
+    /// A file of the turns' folder.
+    fn turn_file(&self, epic: &str, n: u32, ext: &str) -> PathBuf {
+        self.config
+            .join("dispatch/demo/turns")
+            .join(format!("{epic}-{n}.{ext}"))
     }
 
     fn set_owners(&self) {
@@ -89,7 +106,7 @@ impl World {
         fs::write(&toml, text).unwrap();
     }
 
-    /// Adds lines at the end of project.toml (a `[dispatch]` section).
+    /// Adds lines at the end of project.toml (its last table is `[dispatch]`).
     fn configure(&self, extra: &str) {
         let toml = self.kx_home.join("project.toml");
         let mut text = fs::read_to_string(&toml).unwrap();
@@ -212,6 +229,43 @@ impl World {
             .into_iter()
             .find(|t| t["id"] == id)
             .unwrap_or_else(|| panic!("no token {id}"))
+    }
+}
+
+impl Drop for World {
+    /// Every turn the fake boat holds ends, and the test waits for the
+    /// turns' processes to say so: none outlives it.
+    fn drop(&mut self) {
+        let _ = fs::write(self.fake.join("end-all"), "");
+        let turns = self.config.join("dispatch/demo/turns");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < until {
+            let open = fs::read_dir(&turns)
+                .map(|rd| {
+                    rd.flatten().any(|e| {
+                        let p = e.path();
+                        p.extension().is_some_and(|x| x == "started")
+                            && !p.with_extension("exit").exists()
+                    })
+                })
+                .unwrap_or(false);
+            if !open {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+/// Waits up to 15 s for `f`.
+fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !f() {
+        assert!(
+            std::time::Instant::now() < until,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -362,7 +416,7 @@ fn dispatch_makes_a_token_and_a_sandbox_and_the_token_travels_only_as_a_file() {
     let o = w.run(&["dispatch", "foundations"]);
     assert_eq!(code(&o), Some(2), "{}", text(&o));
     assert!(text(&o).contains("already has a sandbox"), "{}", text(&o));
-    w.configure("\n[dispatch]\nmax_sandboxes = 1\n");
+    w.configure("max_sandboxes = 1\n");
     let o = w.run(&["dispatch", "small"]);
     assert_eq!(code(&o), Some(2), "{}", text(&o));
     assert!(text(&o).contains("1 sandboxes are running"), "{}", text(&o));
@@ -444,4 +498,195 @@ fn a_failed_dispatch_stops_what_it_made_and_revokes_the_token() {
     let run = w.run_of("small");
     assert!(run["sandbox"].is_null(), "{run}");
     assert_eq!(run["token_revoked"], true);
+}
+
+#[test]
+fn the_coordinator_is_prompted_in_a_process_of_its_own() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    let o = w.run(&["dispatch", "foundations"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("start script done"), "{}", text(&o));
+    // The start script went with the sandbox; Boat was asked how it went.
+    assert!(w.fake.join("bx_fake1.setup-file").exists());
+    let calls = w.calls();
+    assert!(calls.contains("--setup-file "), "{calls}");
+    assert!(calls.contains("info bx_fake1 --json"), "{calls}");
+    let run = w.run_of("foundations");
+    let epic = run["epic"].as_str().unwrap().to_string();
+    assert_eq!(run["turns"], 1);
+    // The prompt, held open: claude with opus-5-5, a new conversation,
+    // pointing at the brief.
+    wait_for("the conversation id", || {
+        w.run_of("foundations")["conversation"] == "cv_bx_fake1"
+    });
+    let prompt = w
+        .calls()
+        .lines()
+        .find(|l| l.starts_with("prompt "))
+        .unwrap()
+        .to_string();
+    assert!(
+        prompt.starts_with("prompt bx_fake1 --json --provider claude --model opus-5-5 --new "),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "kontext --actor agent:epic:foundations --role coordinator brief foundations"
+        ),
+        "{prompt}"
+    );
+    assert!(prompt.contains("kontext-coordinator.md"), "{prompt}");
+    assert!(prompt.contains("one stack of pull requests"), "{prompt}");
+    // The turn runs until Boat says it ended; then its process says so.
+    assert!(!w.turn_file(&epic, 1, "exit").exists());
+    fs::write(w.fake.join("end-bx_fake1-1"), "").unwrap();
+    wait_for("the turn's end", || {
+        fs::read_to_string(w.turn_file(&epic, 1, "exit")).is_ok_and(|s| s.trim() == "ended")
+    });
+}
+
+#[test]
+fn a_turn_that_cannot_be_followed_is_lost_not_ended() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    let epic = w.run_of("foundations")["epic"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(w.fake.join("end-bx_fake1-1"), "1").unwrap();
+    wait_for("the turn's end", || w.turn_file(&epic, 1, "exit").exists());
+    let s = fs::read_to_string(w.turn_file(&epic, 1, "exit")).unwrap();
+    assert!(s.starts_with("lost: boat prompt failed"), "{s}");
+}
+
+#[test]
+fn a_failed_start_script_stops_the_sandbox_and_revokes_the_token() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    fs::write(w.fake.join("bx_fake1.setup"), "failed").unwrap();
+    fs::write(w.fake.join("bx_fake1.setup-error"), "exit code 7").unwrap();
+    let o = w.run(&["dispatch", "foundations"]);
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("start script failed: exit code 7"),
+        "{}",
+        text(&o)
+    );
+    assert!(w.fake.join("bx_fake1.stopped").exists());
+    let run = w.run_of("foundations");
+    assert_eq!(run["state"], "stuck");
+    assert_eq!(run["token_revoked"], true);
+    assert!(!w.calls().contains("prompt "), "{}", w.calls());
+}
+
+/// The start script, run as the sandbox would: a home of its own, the token
+/// file where Boat writes it, the variables of `-e`, a fake `curl` whose
+/// install.sh copies this kontext, and the code repo already cloned.
+#[test]
+fn the_start_script_sets_the_sandbox_up_and_removes_the_token_file() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    let sbx = w.dir.path().join("sbx");
+    fs::create_dir_all(w.repo()).unwrap();
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(args)
+            .current_dir(w.repo())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", w.dir.path().join("gitconfig"))
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", text(&o));
+        String::from_utf8(o.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    fs::write(w.repo().join("README.md"), "demo\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-qm", "first"]);
+    let token_file = sbx.join(".kontext-dispatch-token");
+    fs::copy(w.fake.join("files/.kontext-dispatch-token"), &token_file).unwrap();
+    let bin = w.dir.path().join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("curl"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$FAKE_BOAT_DIR/curl.log\"\ncat <<'EOS'\nset -eu\n\
+         mkdir -p \"$KONTEXT_INSTALL_DIR\"\ncp \"$KONTEXT_TEST_BIN\" \"$KONTEXT_INSTALL_DIR/kontext\"\nEOS\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(bin.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+    let vars: Vec<(String, String)> = fs::read_to_string(w.fake.join("bx_fake1.env"))
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let sandbox = |c: &mut Command| {
+        c.env_clear()
+            .env("HOME", &sbx)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("KONTEXT_TEST_BIN", BIN)
+            .env("FAKE_BOAT_DIR", &w.fake)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", w.dir.path().join("gitconfig"));
+        for (k, v) in &vars {
+            c.env(k, v);
+        }
+    };
+    let mut c = Command::new("sh");
+    c.arg(w.fake.join("bx_fake1.setup-file"));
+    sandbox(&mut c);
+    let o = c.output().unwrap();
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(!out.contains("kxt1."), "{out}");
+    assert!(
+        out.contains("ready: project demo, epic foundations"),
+        "{out}"
+    );
+    assert!(!token_file.exists(), "the token file is still there");
+    // The pinned release.
+    let curl = fs::read_to_string(w.fake.join("curl.log")).unwrap();
+    assert!(
+        curl.contains(&format!(
+            "https://raw.githubusercontent.com/OmarAlex24/kontext/v{}/install.sh",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{curl}"
+    );
+    // The project, its token saved by kontext (0600).
+    let cfg = sbx.join(".config/kontext");
+    let projects = fs::read_to_string(cfg.join("projects.toml")).unwrap();
+    assert!(projects.contains("[projects.demo]"), "{projects}");
+    let mode = fs::metadata(cfg.join("tokens/demo.token"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "{mode:o}");
+    // The hooks, skills and agent files, out of git's way.
+    assert!(w.repo().join(".kontext.toml").exists());
+    assert!(
+        w.repo()
+            .join(".claude/agents/kontext-coordinator.md")
+            .exists()
+    );
+    assert!(w.repo().join(".claude/settings.local.json").exists());
+    assert_eq!(git(&["status", "--porcelain"]), "");
+    // The coordinator's first command works there.
+    let mut c = Command::new(sbx.join(".local/bin/kontext"));
+    c.args(["brief", "foundations"]).current_dir(w.repo());
+    sandbox(&mut c);
+    let o = c.output().unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("Foundations"), "{}", text(&o));
+    // Run again (a sandbox restarted midway), it changes nothing that is right.
+    let mut c = Command::new("sh");
+    c.arg(w.fake.join("bx_fake1.setup-file"));
+    sandbox(&mut c);
+    let o = c.output().unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(git(&["status", "--porcelain"]), "");
 }

@@ -25,6 +25,29 @@ pub struct NewSandbox {
     pub env: Vec<(String, String)>,
     /// Files written in the sandbox before it is ready: (path there, local file).
     pub files: Vec<(String, PathBuf)>,
+    /// A local shell script the sandbox runs once it is ready, in the background.
+    pub setup: Option<PathBuf>,
+}
+
+/// Where the start script is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Setup {
+    /// Not done yet.
+    Pending,
+    Done,
+    Failed(String),
+}
+
+/// A prompt for the coordinator.
+#[derive(Debug, Clone)]
+pub struct Turn<'a> {
+    pub sandbox: &'a str,
+    /// Continue this conversation; `None` starts a new one.
+    pub conversation: Option<&'a str>,
+    /// The agent and the model, as the service names them.
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub text: &'a str,
 }
 
 /// `create` failed. If the service made the sandbox before failing, `id`
@@ -51,6 +74,13 @@ pub trait Provider {
     fn create(&self, s: &NewSandbox) -> std::result::Result<String, CreateFailed>;
     /// Stops it, keeping its data.
     fn stop(&self, id: &str) -> Result<()>;
+    /// How its start script went.
+    fn setup(&self, id: &str) -> Result<Setup>;
+    /// Prompts the coordinator and returns when its turn ends: `Ok` only
+    /// when the service says the turn ended (a turn that cannot be followed
+    /// to its end, for a network failure say, is an error). Calls
+    /// `conversation` with the conversation's id as soon as it is known.
+    fn prompt(&self, t: &Turn, conversation: &mut dyn FnMut(&str)) -> Result<()>;
 }
 
 /// The provider for `[dispatch] service`.
@@ -161,6 +191,9 @@ impl Provider for Boat {
         for (there, here) in &s.files {
             a.extend(["--file".into(), format!("{there}={}", here.display())]);
         }
+        if let Some(f) = &s.setup {
+            a.extend(["--setup-file".into(), f.display().to_string()]);
+        }
         let o = self.run(&a).map_err(|e| CreateFailed {
             id: None,
             why: format!("{e:#}"),
@@ -185,6 +218,111 @@ impl Provider for Boat {
         }
         Ok(())
     }
+
+    fn setup(&self, id: &str) -> Result<Setup> {
+        let o = self.run(&["info".into(), id.into(), "--json".into()])?;
+        if !o.status.success() {
+            bail!("{}", failure(&format!("boat info {id}"), &o));
+        }
+        let v = json_lines(&o.stdout)
+            .into_iter()
+            .last()
+            .context("boat info printed no JSON")?;
+        Ok(setup_of(&v))
+    }
+
+    fn prompt(&self, t: &Turn, conversation: &mut dyn FnMut(&str)) -> Result<()> {
+        use std::io::{BufRead, BufReader};
+        let mut a: Vec<String> = vec![
+            "prompt".into(),
+            t.sandbox.into(),
+            "--json".into(),
+            "--provider".into(),
+            t.provider.into(),
+            "--model".into(),
+            t.model.into(),
+        ];
+        match t.conversation {
+            Some(c) => a.extend(["--resume".into(), c.into()]),
+            None => a.push("--new".into()),
+        }
+        a.push(t.text.into());
+        let mut child = self
+            .command(&a)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("could not run {}", self.bin))?;
+        let stderr = child.stderr.take().unwrap();
+        let errs = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = std::io::Read::read_to_string(&mut BufReader::new(stderr), &mut s);
+            s
+        });
+        let mut seen = false;
+        let mut last_error = None;
+        for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+            let Ok(line) = line else { break };
+            let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            if !seen && let Some(c) = conversation_id(&v) {
+                seen = true;
+                conversation(&c);
+            }
+            if v.get("event").and_then(Value::as_str) == Some("error") {
+                last_error = v.get("error").and_then(Value::as_str).map(str::to_string);
+            }
+        }
+        let status = child.wait()?;
+        let stderr = errs.join().unwrap_or_default();
+        if !status.success() {
+            let why = last_error
+                .or_else(|| {
+                    stderr
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                })
+                .unwrap_or_else(|| format!("exit code {:?}", status.code()));
+            bail!("boat prompt failed: {why}");
+        }
+        Ok(())
+    }
+}
+
+/// `setupStatus` and `setupError` of `boat info --json`: `pending` and
+/// `running` are not done; `done` is; `failed` is, with its error. Any other
+/// value is an error that carries it, so a change in Boat is seen.
+pub(crate) fn setup_of(v: &Value) -> Setup {
+    let s = |k: &str| {
+        v.get(k)
+            .or_else(|| v.get("sandbox").and_then(|x| x.get(k)))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    match s("setupStatus").as_str() {
+        "pending" | "running" => Setup::Pending,
+        "done" => Setup::Done,
+        "failed" => Setup::Failed(match s("setupError") {
+            e if e.is_empty() => "the start script failed".into(),
+            e => e,
+        }),
+        "" => Setup::Failed("boat info has no setupStatus".into()),
+        other => Setup::Failed(format!("unknown setupStatus {other:?}")),
+    }
+}
+
+/// The conversation's id in a line of `boat prompt --json`: `conversationId`,
+/// at the top or under `data`.
+pub(crate) fn conversation_id(v: &Value) -> Option<String> {
+    v.get("conversationId")
+        .or_else(|| v.get("data").and_then(|d| d.get("conversationId")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -204,5 +342,23 @@ mod tests {
         let lines = vec![json!({"event": "created", "id": "bx_b"})];
         assert_eq!(new_sandbox_id(&lines).as_deref(), Some("bx_b"));
         assert_eq!(new_sandbox_id(&[json!({"event": "state"})]), None);
+    }
+
+    #[test]
+    fn setup_status_and_conversation_ids() {
+        assert_eq!(setup_of(&json!({"setupStatus": "running"})), Setup::Pending);
+        assert_eq!(setup_of(&json!({"setupStatus": "done"})), Setup::Done);
+        assert_eq!(
+            setup_of(&json!({"setupStatus": "failed", "setupError": "exit 1"})),
+            Setup::Failed("exit 1".into())
+        );
+        assert!(matches!(
+            setup_of(&json!({"setupStatus": "weird"})),
+            Setup::Failed(w) if w.contains("weird")
+        ));
+        let q = json!({"event": "queued", "conversationId": "cv_1"});
+        assert_eq!(conversation_id(&q).as_deref(), Some("cv_1"));
+        let d = json!({"event": "prompt", "data": {"conversationId": "cv_2"}});
+        assert_eq!(conversation_id(&d).as_deref(), Some("cv_2"));
     }
 }
