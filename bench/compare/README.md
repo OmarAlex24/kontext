@@ -1,6 +1,6 @@
 # kontext against five other setups
 
-The comparison benchmark of `DESIGN.md`. Each run puts plain Claude Code, kontext v0.2.0, gentle-ai + Engram, the mem0 plugin, Beads or OpenSpec on a small task (S1, S2) or the 4-day project L. Each machine is its own container, and day 4 runs on a second container, machine B. The analysis rules were fixed before any model call (`ANALYSIS.md`).
+The comparison benchmark of `DESIGN.md`. Each run puts plain Claude Code, kontext v0.3.0, gentle-ai + Engram, the mem0 plugin, Beads or OpenSpec on a small task (S1, S2) or the 4-day project L. Each machine is its own container, and day 4 runs on a second container, machine B. The analysis rules were fixed before any model call (`ANALYSIS.md`).
 
 > **A real run spends tokens.** `run.py` refuses without `--yes`. It also refuses if the fixtures, turns, hidden checks or analysis rules differ from `FREEZE.json`.
 
