@@ -296,6 +296,35 @@ pub struct Project {
     /// The evidence images: the limit for each one.
     #[serde(default)]
     pub media: Option<MediaCfg>,
+    /// `kontext dispatch`: one sandbox per epic (DESIGN §12.5).
+    #[serde(default)]
+    pub dispatch: Option<DispatchCfg>,
+}
+
+/// `[dispatch]` of `project.toml`. Every key is optional; the defaults are
+/// in [`crate::dispatch::Settings`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DispatchCfg {
+    /// The sandbox service (`boat`, the only one so far).
+    pub service: Option<String>,
+    /// How many sandboxes may run at once (3).
+    pub max_sandboxes: Option<usize>,
+    /// Hours an epic may run in its sandbox before it is marked stuck (8).
+    pub hours: Option<u64>,
+    /// The service's named environment (repos, credentials); the service's
+    /// default if not set.
+    pub environment: Option<String>,
+    /// The coordinator's agent, as the service names it (`claude`).
+    pub provider: Option<String>,
+    /// The coordinator's model, as the service names it (`opus-5-5`).
+    pub model: Option<String>,
+    /// The service's machine type (`default`).
+    pub machine: Option<String>,
+    /// Where the code repo's clone is in the sandbox (`/home/user/<repo>`,
+    /// from the first `[[repos]]`).
+    pub repo_dir: Option<String>,
+    /// The kontext release the sandbox installs (`v<this binary's version>`).
+    pub kontext_version: Option<String>,
 }
 
 /// `[inbox]` of `project.toml`.

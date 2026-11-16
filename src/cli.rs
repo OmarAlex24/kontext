@@ -366,6 +366,21 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: ServerCmd,
     },
+    /// Gives an open epic of a ready wave its own sandbox with a coordinator agent (DESIGN §12.5).
+    ///
+    /// It refuses (exit 2, one line) unless the project syncs through a kontext server, the plan
+    /// is signed, the epic is open and every epic it comes after is closed (as `kontext plan`
+    /// computes it), the epic has no sandbox yet, and fewer than [dispatch] max_sandboxes are
+    /// running. Then it makes a coordinator token for the epic, and a sandbox that gets the token
+    /// as a file. `kontext dispatch status` and `kontext dispatch stop <epic>` follow it. An epic
+    /// named like a subcommand goes by its id or as epic:<name>
+    #[command(args_conflicts_with_subcommands = true)]
+    Dispatch {
+        #[command(subcommand)]
+        cmd: Option<DispatchCmd>,
+        /// The epic: E-…, epic:<name> or <name>
+        epic: Option<String>,
+    },
     /// Tokens for the project's kontext server (an owner's): one per machine, person or sandbox,
     /// each bound to a role and its own writer
     Token {
@@ -925,6 +940,18 @@ pub enum Cmd {
     Debug {
         #[command(subcommand)]
         cmd: DebugCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DispatchCmd {
+    /// Which epic runs in which sandbox on this machine, since when, its progress and its state
+    /// (starting, running, resumed, stuck, closed, stopped)
+    Status,
+    /// Stops the epic's sandbox (its data is kept) and revokes its token
+    Stop {
+        /// The epic: E-…, epic:<name> or <name>
+        epic: String,
     },
 }
 
@@ -2212,6 +2239,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Dispatch { cmd, epic } => cx.dispatch(cmd, epic),
         Cmd::Token { cmd } => {
             let p = config::resolve_project(project)?;
             match cmd {
@@ -2355,6 +2383,67 @@ pub(crate) fn print_json(v: &impl serde::Serialize) -> Result<()> {
 }
 
 impl Ctx<'_> {
+    /// `kontext dispatch`.
+    fn dispatch(&self, cmd: Option<DispatchCmd>, epic: Option<String>) -> Result<ExitCode> {
+        let p = config::resolve_project(self.project)?;
+        match (cmd, epic) {
+            (Some(DispatchCmd::Status), _) => {
+                let r = crate::dispatch::status(&p.name)?;
+                if self.json {
+                    print_json(&r)?;
+                } else {
+                    print!("{}", r.text());
+                }
+            }
+            (Some(DispatchCmd::Stop { epic }), _) => {
+                let (run, failed) = crate::dispatch::stop(&p.name, &epic)?;
+                for f in &failed {
+                    eprintln!("kontext: warning: {f}");
+                }
+                if self.json {
+                    print_json(&run)?;
+                } else {
+                    println!(
+                        "Epic {}: sandbox {} stopped and its token revoked{}",
+                        run.name,
+                        run.sandbox.as_deref().unwrap_or("(none)"),
+                        if failed.is_empty() {
+                            ""
+                        } else {
+                            ", except for what is above"
+                        }
+                    );
+                }
+                if !failed.is_empty() {
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            (None, Some(epic)) => {
+                let json = self.json;
+                let mut say = |l: &str| {
+                    if json {
+                        eprintln!("kontext: {l}");
+                    } else {
+                        println!("{l}");
+                    }
+                };
+                let run = crate::dispatch::dispatch(&p.name, &epic, &mut say)?;
+                if json {
+                    print_json(&run)?;
+                } else {
+                    println!(
+                        "Epic {} runs in sandbox {} ({}); `kontext dispatch status` follows it",
+                        run.name,
+                        run.sandbox.as_deref().unwrap_or("?"),
+                        run.state.label()
+                    );
+                }
+            }
+            (None, None) => bail!("name the epic: kontext dispatch <epic> (or status, stop)"),
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
     /// Who writes: `--actor`, `--role` and `--model`, or the variables.
     fn who(&self) -> Result<Actor> {
         Actor::resolve_with(self.actor, self.role, self.model)
