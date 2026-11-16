@@ -5,7 +5,7 @@ description: Sets up and coordinates a team of agents on kontext when the work i
 
 # Orchestrating with kontext
 
-`kontext` does not orchestrate: it keeps the memory and the contract that everyone shares. You decide how much structure is needed and set it up with what the harness offers. To read and write in `kontext`, follow the `kontext` skill.
+`kontext` keeps the memory and the contract that everyone shares; it does not decide what runs. You decide how much structure is needed and set it up with what the harness offers. The one thing `kontext` launches is a sandbox per epic, when you ask for it (`kontext dispatch`, section 4). To read and write in `kontext`, follow the `kontext` skill.
 
 ## 1. Measure the size before starting
 
@@ -25,7 +25,7 @@ Check four criteria. The highest one wins:
 | **XL** (several epics) | PM (this session, the only one that talks to the user) → one coordinator per epic, each in its own worktree → their workers. In waves, following `kontext plan` |
 | **XXL** (greenfield) | Like XL, with phase 0 before any code |
 
-**Size by understanding, risk and parallelism, never by file count.** A task that is understood, low risk and has nothing to run in parallel is done by one agent, however many files it touches. A team (or, later, a sandbox) is used only for a named reason, and you name it when you propose it: independent work that really runs in parallel, bulk reading that would fill the caller's context, or an independent check of a risky change. Without one of those reasons it is S–M, also inside a signed plan and inside an epic. "One coordinator per epic" (below) is for the epics a wave runs with a team: an S–M task has none; the pm assigns it to one worker (`kontext assign <T> --to agent:<x>-impl-1`), and that worker's `kontext ask --task` goes to the pm.
+**Size by understanding, risk and parallelism, never by file count.** A task that is understood, low risk and has nothing to run in parallel is done by one agent, however many files it touches. A team (or a sandbox) is used only for a named reason, and you name it when you propose it: independent work that really runs in parallel, bulk reading that would fill the caller's context, or an independent check of a risky change. Without one of those reasons it is S–M, also inside a signed plan and inside an epic. "One coordinator per epic" (below) is for the epics a wave runs with a team: an S–M task has none; the pm assigns it to one worker (`kontext assign <T> --to agent:<x>-impl-1`), and that worker's `kontext ask --task` goes to the pm.
 
 ## 2. Before launching anything XL or XXL: confirm
 
@@ -94,11 +94,14 @@ Check which tools you have in this session (including the deferred ones) and use
 
 | If you have | Coordinators | Workers |
 |---|---|---|
+| `kontext dispatch` works (the project syncs through a kontext server and the user set up `[dispatch]`): XL only, with the plan signed | One sandbox per epic of the ready wave: `kontext dispatch <epic>`, each with its coordinator in it. Follow them with `kontext dispatch status` and `kontext resume --as pm`; a stuck one comes to you as a question | The coordinator launches its own, in its sandbox |
 | T3 Code: `delegate_task`, `t3_thread_launch`, and the other `t3_thread_*` | One thread (`t3_thread_launch` with `workspaceStrategy` `worktree`) or one delegated task (`delegate_task` with `isolation: "worktree"`) per epic. Follow them with `t3_thread_wait` or `task_status`, and with `kontext resume --as pm` | Each coordinator launches its own (`Agent` or `delegate_task`) |
 | Claude Code with the `Workflow` tool, **and the user asked for multi-agent orchestration** | One script per wave: one step per epic in the wave | Steps in the script, with the `kontext-*` roles |
 | Claude Code with `Agent` | This session acts as PM and coordinator, one epic at a time, in the order of `kontext plan` | `Agent` with `subagent_type` `kontext-implementer`, `kontext-tester`, or `kontext-scout` (installed by `kontext install`); several in the same message to run in parallel |
 | Codex or another agent CLI | Only if the user names it | Same |
 | No way to launch agents | In series: you play each role in turn, with the same structure of epics and tasks in `kontext` | You, one task at a time |
+
+**`kontext dispatch <epic>`** refuses (exit 2, one line why) unless the plan is signed, the epic is open, everything it comes after is closed, it has no sandbox yet and fewer than `[dispatch] max_sandboxes` run. It makes the epic's coordinator token, the sandbox (the token goes as a file, never in the prompt), sets kontext up there, prompts the coordinator, and leaves a watcher on this machine that stops the sandbox when the epic closes in the ledger, resumes the coordinator once if it stops with the epic open, and marks it stuck (a question to you) if it stops again or runs out of time. Dispatch only the epics a wave runs with a team: an epic that is one small task gets no sandbox: do not dispatch it (dispatch only warns and goes on; the call is yours). At each boundary, `kontext dispatch status`; if it says the watcher is not running, run the command it gives.
 
 A coordinator in a worktree of this machine shares the kontext-home and needs nothing more. One that runs elsewhere (a cloud thread, a sandbox, another machine) needs the project on a kontext server: make it a token with `kontext token create --role coordinator --epic <name> --ttl 8h` and give it the printed variables through the harness's environment or secrets, never in the repo (and in the prompt only if there is no other way: prompts are kept). With them, its first kontext command sets the project up, and everything it writes reaches you on your next command; its workers write through the same token.
 
