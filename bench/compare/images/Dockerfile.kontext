@@ -1,4 +1,4 @@
-# Arm `kontext`: the released v0.2.0 binary from its own install.sh, at the tag.
+# Arm `kontext`: the released binary (KONTEXT_VERSION in versions.env) from its own install.sh, at the tag.
 # `kontext init --server` and `kontext install` run per run (arms/kontext/setup.sh).
 ARG BASE
 FROM ${BASE}

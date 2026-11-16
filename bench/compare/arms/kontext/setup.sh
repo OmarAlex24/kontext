@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kontext v0.2.0, server path (design §1.2). Needs KONTEXT_SERVER_URL (the
+# kontext (the version in images/versions.env), server path (design §1.2). Needs KONTEXT_SERVER_URL (the
 # sidecar) and KONTEXT_ADMIN_SECRET (the sidecar's, for init --server only).
 set -euo pipefail
 cd "$REPO"

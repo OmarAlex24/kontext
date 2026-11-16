@@ -589,6 +589,8 @@ The harness in `bench/compare/` follows the text above, except where building it
 
 17. **`python` exists in every image and is allowed.** The fixtures' READMEs say `python3 -m unittest …`, yet in the smoke and S1 pilot cells (2026-11-15, one run per arm) the model typed `python -m unittest …` in all six S1 cells and in five of the six smoke cells. The base image had no `python` and the allow-list only `Bash(python3:*)`, so those 20 calls were refused and the agents finished without running the tests. The base image now installs `python-is-python3` and `allowed_common.txt` has `Bash(python:*)`, for all arms alike. Neither file is in the frozen paths. The cells run before this change are discarded and S1 was run again.
 
+18. **The kontext arm is v0.3.0 for the full run.** The pilot ran v0.2.0. The full run was held until phase 3 and the setup commands were released (v0.3.0, 2026-11-15), so the arm is the product as it is now: `KONTEXT_VERSION=v0.3.0` in `versions.env`, which rebuilds `bench-kontext` and `bench-sidecar` and nothing else. The arm's commands are unchanged (`kontext init --server`, `kontext install`, `kontext clone`), and they are still in v0.3.0. No pilot cell is carried into the full run: every arm runs again, seed 1 included, in the same window. The friction report (`friction/`) still describes v0.2.0 and says so in its title.
+
 ## §8, settled now or still open
 
 Settled means it was checked here without a model call. Open means only the pilot can settle it.
