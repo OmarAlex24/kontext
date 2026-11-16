@@ -7,7 +7,7 @@ The comparison benchmark of `DESIGN.md`. Each run puts plain Claude Code, kontex
 ## What runs where
 
 - **Host:** `python3` (3.11+, standard library only) and `docker`. Nothing else is installed on the host, and no container mounts a host folder: files move as tar streams over `docker exec`.
-- **Images** (`images/`, versions in `versions.env`): `bench-base` (Debian slim + Node 22 + Claude Code 2.1.325, user `bench`), one image per arm, `bench-sidecar` (kontext's `server/` at v0.2.0 under Miniflare) and `bench-verify` (Python only).
+- **Images** (`images/`, versions in `versions.env`): `bench-base` (Debian slim + Node 22 + Claude Code 2.1.325, user `bench`), one image per arm, `bench-sidecar` (kontext's `server/` at `KONTEXT_VERSION` under Miniflare) and `bench-verify` (Python only).
 - **Containers per run:**
   - a private network;
   - a named volume holding the bare git remote;

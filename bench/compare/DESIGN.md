@@ -261,6 +261,12 @@ No `KONTEXT_ACTOR`: the human's name comes from `git config user.name` (README "
 
 ### 3.3 Where kontext stands, plainly
 
+> **With v0.3.0** (§3.1b, executed 2026-11-16 in `friction/REPORT.md`). The list below was written against v0.2.0 (§3.1) and stays as it was. What changed:
+> - **Against mem0:** 6 commands, not 8, to mem0's 4. The Cloudflare account stays. The API token's permission now comes filled in by the link `kontext setup` prints, so nobody picks it by hand.
+> - **Accounts and secrets:** the same count, 1 account and 2 secrets. The second secret is now a join line that works once and for 10 minutes, not a token carried to every machine.
+> - **The two extra manual steps per machine are gone:** no command sets `KONTEXT_ACTOR`, and machine B's one command also installs the hooks (README "Install").
+> - **Of the gap in the last point,** handing B its token is done (`kontext invite` and `kontext join`). The deploy still needs a token made in the dashboard.
+
 - **Worse than mem0** on getting started. mem0 is 4 commands and one sign-up, with no infrastructure. kontext is 8 commands, a Cloudflare account, and an API token whose permission you pick by hand in a dashboard: the heaviest single step in the table.
 - **Worse than Beads, OpenSpec and Engram-over-git on accounts and secrets.** They reuse the git host the user already has, with no new account and no secret. kontext needs Cloudflare plus a token carried to every new machine.
 - **Two extra manual steps per machine that the others do not have:** `export KONTEXT_ACTOR`, and `kontext install` again on every machine because the hooks record an absolute binary path.
@@ -572,7 +578,7 @@ The harness in `bench/compare/` follows the text above, except where building it
 1. **`CLAUDE_CONFIG_DIR` is left unset.** gentle-ai writes its MCP servers to `~/.claude.json`. With `CLAUDE_CONFIG_DIR` set, Claude Code reads `$CLAUDE_CONFIG_DIR/.claude.json` instead, so gentle-ai's `engram` and `context7` servers were invisible. Unset is Claude Code's default, and every tool then writes to the one folder Claude Code reads (`~/.claude`, `~/.claude.json`); `claude mcp list` shows both servers connected. `KONTEXT_CONFIG_DIR` is also unset, which is kontext's default. Dry runs alone set `CLAUDE_CONFIG_DIR=$HOME/.claude`, because `fake_agent.py` writes transcripts only when the variable is set.
 2. **Keys go on each `docker exec`, by name, and never on `docker run`.** The design's `--env-file` stores the value in the container's config, where `docker inspect` shows it and the daemon keeps it on disk for as long as the container exists. A test caught the same thing with `-e NAME` on `docker run`. So the harness passes `-e ANTHROPIC_API_KEY` (and `-e MEM0_API_KEY` for mem0) on every `docker exec` into that machine. The value sits only in the environment of the `docker` CLI process, and the docker process's own environment is stripped of every `ANTHROPIC_*`, `MEM0_*`, `KONTEXT_*`, `CLAUDE_*`, `OPENAI_*` and `CLOUDFLARE_*` variable from the host. Background workers that a hook starts (mem0's flush, kontext's distill) inherit the key from their exec.
 3. **No `/out` bind mount.** Nothing on the host is mounted, not even the results folder. Files move as tar streams over `docker exec … tar`. The bare git remote is a named volume (`bench-<run>-remotes`) shared by A and B.
-4. **The kontext sidecar** runs from an image built off `git archive v0.2.0 server`, through a launcher (`images/sidecar.mjs`) that imports `dev.mjs`'s options and listens on `0.0.0.0:8787`. `dev.mjs` binds to localhost, which the other containers cannot reach. Its admin secret is random per run, and since the server needs it at start, it is the one secret passed at `docker run` (it is local and dies with the run).
+4. **The kontext sidecar** runs from an image built off `git archive $KONTEXT_VERSION server` (v0.2.0 in the pilot, v0.3.0 in the full run), through a launcher (`images/sidecar.mjs`) that imports `dev.mjs`'s options and listens on `0.0.0.0:8787`. `dev.mjs` binds to localhost, which the other containers cannot reach. Its admin secret is random per run, and since the server needs it at start, it is the one secret passed at `docker run` (it is local and dies with the run).
 
 **Arms (§1.2)**
 
