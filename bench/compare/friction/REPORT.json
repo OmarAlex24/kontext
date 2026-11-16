@@ -1,31 +1,31 @@
 {
-  "date": "2026-11-15",
-  "base_image": "sha256:2bd647f8d29f376acebb61741247767b8cb81b10cbf9ecfec7594b51844e8b13",
+  "date": "2026-11-16",
+  "base_image": "sha256:4334e8d94d3cf0bd9a862fe3605fc282029cfd8abd40a6e380cbd5fbcb259275",
   "setups": [
     {
       "name": "kontext",
-      "title": "kontext v0.2.0, server path (README \"With a kontext server\", install.sh)",
+      "title": "kontext v0.3.0, server path (README \"Install\", install.sh)",
       "after": "Every command pulls and pushes on its own",
       "design": {
-        "commands": "8 (+1)",
-        "manual": "5–7",
+        "commands": "5 + 1",
+        "manual": "3–6",
         "accounts": "1",
         "secrets": "2"
       },
       "counts": {
-        "commands": "5 + 3 (+1 conditional)",
-        "manual": "5–7",
-        "manual_needed_here": 5,
+        "commands": "5 + 1",
+        "manual": "3–6",
+        "manual_needed_here": 3,
         "accounts": 1,
         "secrets": 2,
-        "executed": 16,
+        "executed": 15,
         "failed": 0,
         "doc_only": 4,
         "b_sees_a": "executed"
       },
       "differences": [
         "step 2 (Add ~/.local/bin to PATH if it is not there) was not needed on Debian (its ~/.profile puts ~/.local/bin on PATH in a new login shell)",
-        "step 14 (PATH as in step 2) was not needed on Debian (its ~/.profile puts ~/.local/bin on PATH in a new login shell)"
+        "step 18 (PATH as in step 2) was not needed on Debian (its ~/.profile puts ~/.local/bin on PATH in a new login shell)"
       ],
       "steps": [
         {
@@ -38,8 +38,8 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 1.4,
-          "output_tail": "kontext-install: downloading kontext-aarch64-unknown-linux-musl.tar.gz from https://github.com/OmarAlex24/kontext/releases/download/v0.2.0\nkontext-install: installed kontext 0.2.0 in /home/bench/.local/bin/kontext\nkontext-install: /home/bench/.local/bin is not in your PATH: add it, for example with\n    echo 'export PATH=\"/home/bench/.local/bin:$PATH\"' >> ~/.profile\nkontext-install: next: `kontext install` in a code repo (it records this binary's path in the hooks)\n"
+          "seconds": 1.8,
+          "output_tail": "kontext-install: downloading kontext-aarch64-unknown-linux-musl.tar.gz from https://github.com/OmarAlex24/kontext/releases/download/v0.3.0\nkontext-install: installed kontext 0.3.0 in /home/bench/.local/bin/kontext\nkontext-install: /home/bench/.local/bin is not on your PATH, so the commands here use the full path /home/bench/.local/bin/kontext (no shell file was changed)\nkontext-install: next: in your code repo, run `/home/bench/.local/bin/kontext setup` (or have your agent run it: it says if it needs you)\n"
         },
         {
           "n": 2,
@@ -57,63 +57,6 @@
         {
           "n": 3,
           "where": "A",
-          "kind": "manual",
-          "text": "Create a Cloudflare account",
-          "conditional": false,
-          "account": true,
-          "secret": false,
-          "status": "doc-only",
-          "why": "needs an account"
-        },
-        {
-          "n": 4,
-          "where": "A",
-          "kind": "manual",
-          "text": "In the Cloudflare dashboard, create an API token (Workers Scripts: Edit)",
-          "conditional": false,
-          "account": false,
-          "secret": true,
-          "status": "doc-only",
-          "why": "needs an account"
-        },
-        {
-          "n": 5,
-          "where": "A",
-          "kind": "command",
-          "text": "CLOUDFLARE_API_TOKEN=… kontext server deploy",
-          "conditional": false,
-          "account": false,
-          "secret": false,
-          "status": "doc-only",
-          "why": "needs a Cloudflare account; the runs use the local sidecar instead"
-        },
-        {
-          "n": 6,
-          "where": "A",
-          "kind": "command",
-          "text": "kontext server deploy --subdomain <name> (account without a workers.dev subdomain)",
-          "conditional": true,
-          "account": false,
-          "secret": false,
-          "status": "doc-only",
-          "why": "needs a Cloudflare account"
-        },
-        {
-          "n": 7,
-          "where": "A",
-          "kind": "manual",
-          "text": "Put export KONTEXT_ACTOR=human:<name> in the shell rc",
-          "conditional": false,
-          "account": false,
-          "secret": false,
-          "status": "executed",
-          "exit_code": 0,
-          "seconds": 0.0,
-          "output_tail": ""
-        },
-        {
-          "n": 8,
-          "where": "A",
           "kind": "harness",
           "text": "the code repo and its remote (not counted)",
           "conditional": false,
@@ -125,43 +68,100 @@
           "output_tail": ""
         },
         {
-          "n": 9,
+          "n": 4,
           "where": "A",
           "kind": "command",
-          "text": "kontext init <project> --server <url>",
+          "text": "kontext setup in the code repo (first run: the project and the install; stops, exit 4, with the link for a Cloudflare token)",
           "conditional": false,
           "account": false,
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.1,
-          "output_tail": "Project demo created in /home/bench/kontext-home/demo\nWriter of this machine: user@machine-a\nServer: http://kontext-sidecar:8787 (the token is in /home/bench/.config/kontext/tokens/demo.token, mode 0600; keep it out of every repo). Every command syncs with it.\n"
+          "seconds": 0.2,
+          "output_tail": "%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=%2A&zoneId=all&name=kontext , click \"Continue to summary\" and \"Create Token\". 2) In a terminal (not here), run `kontext server deploy` and paste the token there. 3) Tell me when it is done and I will run `kontext setup`.)\nexit 4\n  project         done     created repo in /home/bench/kontext-home/repo\n  install         done     wrote 14 files in /home/bench/work/repo (.kontext.toml, hooks, skills, agent files)\n  server          needed   this machine has deployed no kontext server yet; it needs a Cloudflare API token from the human\n"
+        },
+        {
+          "n": 5,
+          "where": "A",
+          "kind": "manual",
+          "text": "Create a Cloudflare account",
+          "conditional": false,
+          "account": true,
+          "secret": false,
+          "status": "doc-only",
+          "why": "needs an account"
+        },
+        {
+          "n": 6,
+          "where": "A",
+          "kind": "manual",
+          "text": "Open the link setup printed and create the API token (the permission comes filled in)",
+          "conditional": false,
+          "account": false,
+          "secret": true,
+          "status": "doc-only",
+          "why": "needs an account"
+        },
+        {
+          "n": 7,
+          "where": "A",
+          "kind": "command",
+          "text": "kontext server deploy, pasting the token when it asks",
+          "conditional": false,
+          "account": false,
+          "secret": false,
+          "status": "doc-only",
+          "why": "needs a Cloudflare account; the run uses the local sidecar instead"
+        },
+        {
+          "n": 8,
+          "where": "A",
+          "kind": "manual",
+          "text": "Account with no workers.dev subdomain: server deploy asks for one on a terminal, in the same run (src/server.rs); without a terminal it exits 4 and needs a second run with --subdomain",
+          "conditional": true,
+          "account": false,
+          "secret": false,
+          "status": "doc-only",
+          "why": "needs a Cloudflare account"
+        },
+        {
+          "n": 9,
+          "where": "A",
+          "kind": "harness",
+          "text": "forward localhost:8787 to the sidecar, standing in for https (not counted)",
+          "conditional": false,
+          "account": false,
+          "secret": false,
+          "status": "executed",
+          "exit_code": 0,
+          "seconds": 0.2,
+          "output_tail": ""
         },
         {
           "n": 10,
           "where": "A",
           "kind": "command",
-          "text": "kontext install in the code repo",
+          "text": "kontext setup again (here a stand-in: kontext setup --server <the local sidecar> with its admin secret, for the second setup after a real deploy)",
           "conditional": false,
           "account": false,
           "secret": false,
           "status": "executed",
           "exit_code": 0,
           "seconds": 0.1,
-          "output_tail": "e/skills/kontext-orchestrate/SKILL.md\nWrote /home/bench/work/repo/.claude/skills/kontext-show/SKILL.md\nWrote /home/bench/work/repo/.claude/skills/kontext-migrate/SKILL.md\nWrote /home/bench/work/repo/.claude/skills/kontext-pm/SKILL.md\nWrote /home/bench/work/repo/.claude/agents/kontext-coordinator.md\nWrote /home/bench/work/repo/.claude/agents/kontext-implementer.md\nWrote /home/bench/work/repo/.claude/agents/kontext-tester.md\nWrote /home/bench/work/repo/.claude/agents/kontext-scout.md\nWrote /home/bench/work/repo/.claude/agents/kontext-pm-reader.md\nWrote /home/bench/kontext-home/demo/project.toml\n"
+          "output_tail": "kontext setup in /home/bench/work/repo (project repo):\n  project         already  repo in /home/bench/kontext-home/repo\n  install         already  hooks, skills and agent files are up to date in /home/bench/work/repo\n  server          already  http://localhost:8787\n  server project  done     repo is on http://localhost:8787 with its history (writer user@machine-a)\n  sync            done     config sent: project.toml\nDone: project repo is installed in this repo and syncs with http://localhost:8787. Another machine joins with `kontext invite` here (it prints the line to run there).\n"
         },
         {
           "n": 11,
           "where": "A",
-          "kind": "command",
-          "text": "kontext token create --role owner --person <name> (shown once)",
+          "kind": "harness",
+          "text": "commit and push .kontext.toml and the files setup wrote (not counted)",
           "conditional": false,
           "account": false,
-          "secret": true,
+          "secret": false,
           "status": "executed",
           "exit_code": 0,
           "seconds": 0.1,
-          "output_tail": "\n(the secret line is kept in memory only)"
+          "output_tail": ""
         },
         {
           "n": 12,
@@ -173,50 +173,37 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.1,
-          "output_tail": "J-4ccc4b: saved the log entry\n"
+          "seconds": 1.2,
+          "output_tail": "J-02351e: saved the log entry\n"
         },
         {
           "n": 13,
-          "where": "B",
+          "where": "A",
           "kind": "command",
-          "text": "curl … install.sh | sh",
+          "text": "kontext invite (prints a join line: a one-time code valid for 10 minutes, not a token)",
           "conditional": false,
           "account": false,
-          "secret": false,
+          "secret": true,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 2.5,
-          "output_tail": "kontext-install: downloading kontext-aarch64-unknown-linux-musl.tar.gz from https://github.com/OmarAlex24/kontext/releases/download/v0.2.0\nkontext-install: installed kontext 0.2.0 in /home/bench/.local/bin/kontext\nkontext-install: /home/bench/.local/bin is not in your PATH: add it, for example with\n    echo 'export PATH=\"/home/bench/.local/bin:$PATH\"' >> ~/.profile\nkontext-install: next: `kontext install` in a code repo (it records this binary's path in the hooks)\n"
+          "seconds": 0.0,
+          "output_tail": "h as owner (writer bench.owner.737636@kontext).\nOn the other machine, in its code repo (so the hooks are installed too), run:\n  kontext join <redacted>\nIf kontext is not installed there, this installs it and joins in one line:\n  curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh -s -- <redacted>\nThe line works once and until 2026-11-16T20:09:17.96Z (10m); it carries a one-time code, not a token: the token is made for that machine when it joins and never leaves it. Use it right away; a new `kontext invite` makes another.\n(the secret line is kept in memory only)"
         },
         {
           "n": 14,
           "where": "B",
           "kind": "manual",
-          "text": "PATH as in step 2",
-          "conditional": true,
-          "account": false,
-          "secret": false,
-          "status": "executed",
-          "needed": false,
-          "seconds": 0.0,
-          "output_tail": ""
-        },
-        {
-          "n": 15,
-          "where": "B",
-          "kind": "manual",
-          "text": "Carry the token from A to B",
+          "text": "Carry the line from A to B",
           "conditional": false,
           "account": false,
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.1,
+          "seconds": 0.0,
           "output_tail": ""
         },
         {
-          "n": 16,
+          "n": 15,
           "where": "B",
           "kind": "harness",
           "text": "clone the code (not counted)",
@@ -229,46 +216,46 @@
           "output_tail": ""
         },
         {
-          "n": 17,
+          "n": 16,
           "where": "B",
-          "kind": "command",
-          "text": "KONTEXT_TOKEN=… kontext clone --server <url> <project>",
+          "kind": "harness",
+          "text": "forward localhost:8787 to the sidecar, as on A (not counted)",
           "conditional": false,
           "account": false,
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.1,
-          "output_tail": "Project demo cloned into /home/bench/kontext-home/demo\nWriter of this machine: owner.owner.921aeb@kontext\nCharter: none yet\nOwners: bench\nEntries: 1\nServer http://kontext-sidecar:8787 (project demo, writer owner.owner.921aeb@kontext).\nNothing to push.\nReceived 1 entry (user@machine-a: 1).\n"
+          "seconds": 0.2,
+          "output_tail": ""
+        },
+        {
+          "n": 17,
+          "where": "B",
+          "kind": "command",
+          "text": "curl … install.sh | sh -s -- kxj1.… in the code repo (installs, joins, installs the hooks)",
+          "conditional": false,
+          "account": false,
+          "secret": false,
+          "status": "executed",
+          "exit_code": 0,
+          "seconds": 1.9,
+          "output_tail": "p://localhost:8787. Agents read and write it with `/home/bench/.local/bin/kontext …`.\nkontext-install: downloading kontext-aarch64-unknown-linux-musl.tar.gz from https://github.com/OmarAlex24/kontext/releases/download/v0.3.0\nkontext-install: installed kontext 0.3.0 in /home/bench/.local/bin/kontext\nkontext-install: /home/bench/.local/bin is not on your PATH, so the commands here use the full path /home/bench/.local/bin/kontext (no shell file was changed)\nkontext-install: joining with the line from `kontext invite` (it works once)\nkontext join: project repo on localhost (http://localhost:8787)\n"
         },
         {
           "n": 18,
           "where": "B",
           "kind": "manual",
-          "text": "export KONTEXT_ACTOR=… in the rc",
-          "conditional": false,
+          "text": "PATH as in step 2",
+          "conditional": true,
           "account": false,
           "secret": false,
           "status": "executed",
-          "exit_code": 0,
+          "needed": false,
           "seconds": 0.0,
           "output_tail": ""
         },
         {
           "n": 19,
-          "where": "B",
-          "kind": "command",
-          "text": "kontext install in the code repo",
-          "conditional": false,
-          "account": false,
-          "secret": false,
-          "status": "executed",
-          "exit_code": 0,
-          "seconds": 0.1,
-          "output_tail": "--- /home/bench/kontext-home/demo/project.toml (before)\n+++ /home/bench/kontext-home/demo/project.toml (after)\n@@ -44,3 +44,7 @@\n # Limit for each screenshot of evidence.\n # [media]\n # max_size = \"2MB\"\n+\n+[[repos]]\n+name = \"repo\"\n+remote = \"file:///remotes/friction-kontext-6b1946\"\nWrote /home/bench/kontext-home/demo/project.toml\n"
-        },
-        {
-          "n": 20,
           "where": "B",
           "kind": "check",
           "text": "B sees what A saved",
@@ -339,7 +326,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 7.8,
+          "seconds": 5.1,
           "output_tail": "Adding marketplace…SSH not configured, cloning via HTTPS: https://github.com/mem0ai/mem0.git\nRefreshing marketplace cache (timeout: 120s)…\nCloning repository (timeout: 120s): https://github.com/mem0ai/mem0.git\nClone complete, validating marketplace…\nCleaning up old marketplace cache…\n✔ Successfully added marketplace: mem0-plugins (declared in user settings)\n"
         },
         {
@@ -352,7 +339,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 1.0,
+          "seconds": 0.9,
           "output_tail": "Installing plugin \"mem0@mem0-plugins\"...✔ Successfully installed plugin: mem0@mem0-plugins (scope: user)\n5 userConfig options not yet set (1 required) — run /plugin configure mem0@mem0-plugins in Claude Code, or pass --config KEY=VALUE.\n"
         },
         {
@@ -387,7 +374,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 31.8,
+          "seconds": 15.4,
           "output_tail": "Adding marketplace…SSH not configured, cloning via HTTPS: https://github.com/mem0ai/mem0.git\nRefreshing marketplace cache (timeout: 120s)…\nCloning repository (timeout: 120s): https://github.com/mem0ai/mem0.git\nClone complete, validating marketplace…\nCleaning up old marketplace cache…\n✔ Successfully added marketplace: mem0-plugins (declared in user settings)\n"
         },
         {
@@ -400,7 +387,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 1.0,
+          "seconds": 0.8,
           "output_tail": "Installing plugin \"mem0@mem0-plugins\"...✔ Successfully installed plugin: mem0@mem0-plugins (scope: user)\n5 userConfig options not yet set (1 required) — run /plugin configure mem0@mem0-plugins in Claude Code, or pass --config KEY=VALUE.\n"
         },
         {
@@ -444,6 +431,7 @@
       "after": "Manual on every update: export, commit, push / pull, import",
       "design": {
         "commands": "2 + 2 install, + 2 + 2 per sync",
+        "count": "4 + 4",
         "manual": "1–2",
         "accounts": "0",
         "secrets": "0"
@@ -460,7 +448,6 @@
         "b_sees_a": "executed"
       },
       "differences": [
-        "commands 4 + 4 against the design's 2 + 2 install, + 2 + 2 per sync",
         "manual steps 0–1 against 1–2",
         "step 2 (Open a new terminal after the rc edit) was not needed on Debian (its ~/.profile puts ~/.local/bin on PATH in a new login shell)"
       ],
@@ -475,7 +462,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 1.9,
+          "seconds": 2.5,
           "output_tail": "alling to /home/bench/.local/bin/gentle-ai...\n[ok]      Installed gentle-ai to /home/bench/.local/bin/gentle-ai\n\nCurrent terminal: export PATH=\"/home/bench/.local/bin:$PATH\"\nFuture terminals: open a new terminal\n[ok]      PATH was added to /home/bench/.bashrc\n\n\n==> Verifying installation\n[ok]      gentle-ai is installed: gentle-ai 4.5.0\n\nInstallation complete!\n\nNext steps:\n  1. Run gentle-ai to start the TUI installer\n  2. Select your AI agent(s) and tools to configure\n  3. Follow the interactive prompts\n\nFor help: gentle-ai --help\nDocs:     https://github.com/Gentleman-Programming/gentle-ai\n\n"
         },
         {
@@ -501,7 +488,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 8.1,
+          "seconds": 21.7,
           "output_tail": "ater) by using -c with the switch command. Example:\n\n  git switch -c <new-branch-name>\n\nOr undo this operation with:\n\n  git switch -\n\nTurn off this advice by setting config variable advice.detachedHead to false\n\nHEAD is now at 1124c36 fix(install): anchor LIB_DIR replacement\nGentle AI sends anonymous usage metrics (version, OS, agents, counters) and may send anonymous runtime usage from supported Pi/OpenCode/Codex integrations (public model, effort, agent class, available token usage, timing, error categories); runtime usage is never stored locally; run gentle-ai telemetry disable to opt out.\n"
         },
         {
@@ -527,7 +514,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.4,
+          "seconds": 0.5,
           "output_tail": "Memory saved: #1 \"release codename\" (manual)\n"
         },
         {
@@ -541,7 +528,7 @@
           "status": "executed",
           "exit_code": 0,
           "seconds": 0.3,
-          "output_tail": "Exporting memories for project \"demo\"...\nPrompts excluded from Git sync (use --include-prompts to intentionally share them).\nCreated chunk 6e6ef9d3\n  Sessions:     1\n  Observations: 1\n  Prompts:      0\n\nWarning: sessions, observations, and any included prompts may contain sensitive content.\nReview .engram/ before sharing; committed content can remain permanently in Git history.\nExcluding prompts later does not erase existing chunks or Git history.\nAdd to git:\n  git add .engram/ && git commit -m \"sync engram memories\"\n"
+          "output_tail": "Exporting memories for project \"demo\"...\nPrompts excluded from Git sync (use --include-prompts to intentionally share them).\nCreated chunk 530c5fc5\n  Sessions:     1\n  Observations: 1\n  Prompts:      0\n\nWarning: sessions, observations, and any included prompts may contain sensitive content.\nReview .engram/ before sharing; committed content can remain permanently in Git history.\nExcluding prompts later does not erase existing chunks or Git history.\nAdd to git:\n  git add .engram/ && git commit -m \"sync engram memories\"\n"
         },
         {
           "n": 7,
@@ -553,7 +540,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.1,
+          "seconds": 0.0,
           "output_tail": ""
         },
         {
@@ -566,7 +553,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 1.5,
+          "seconds": 2.4,
           "output_tail": "alling to /home/bench/.local/bin/gentle-ai...\n[ok]      Installed gentle-ai to /home/bench/.local/bin/gentle-ai\n\nCurrent terminal: export PATH=\"/home/bench/.local/bin:$PATH\"\nFuture terminals: open a new terminal\n[ok]      PATH was added to /home/bench/.bashrc\n\n\n==> Verifying installation\n[ok]      gentle-ai is installed: gentle-ai 4.5.0\n\nInstallation complete!\n\nNext steps:\n  1. Run gentle-ai to start the TUI installer\n  2. Select your AI agent(s) and tools to configure\n  3. Follow the interactive prompts\n\nFor help: gentle-ai --help\nDocs:     https://github.com/Gentleman-Programming/gentle-ai\n\n"
         },
         {
@@ -579,7 +566,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 21.5,
+          "seconds": 9.3,
           "output_tail": "ater) by using -c with the switch command. Example:\n\n  git switch -c <new-branch-name>\n\nOr undo this operation with:\n\n  git switch -\n\nTurn off this advice by setting config variable advice.detachedHead to false\n\nHEAD is now at 1124c36 fix(install): anchor LIB_DIR replacement\nGentle AI sends anonymous usage metrics (version, OS, agents, counters) and may send anonymous runtime usage from supported Pi/OpenCode/Codex integrations (public model, effort, agent class, available token usage, timing, error categories); runtime usage is never stored locally; run gentle-ai telemetry disable to opt out.\n"
         },
         {
@@ -605,7 +592,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.4,
+          "seconds": 0.5,
           "output_tail": "Imported 1 new chunk(s) from .engram/\n  Sessions:     1\n  Observations: 1\n  Prompts:      0\n  Relations replayed: 0\n  Relations deferred: 0\n  Relations dead:     0\n"
         },
         {
@@ -618,7 +605,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.4,
+          "seconds": 0.5,
           "output_tail": ""
         }
       ]
@@ -807,7 +794,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 4.3,
+          "seconds": 21.8,
           "output_tail": "\n\u001b[0;34m==>\u001b[0m Fetching latest release...\n\u001b[0;34m==>\u001b[0m Latest version: v1.3.4\n\u001b[0;34m==>\u001b[0m Downloading beads_1.3.4_linux_arm64.tar.gz...\n\u001b[0;34m==>\u001b[0m Verifying release checksum...\n\u001b[0;32m==>\u001b[0m Checksum verified for beads_1.3.4_linux_arm64.tar.gz\n\u001b[0;34m==>\u001b[0m Extracting archive...\n\u001b[0;34m==>\u001b[0m Installing to /home/bench/.local/bin...\n\u001b[0;34m==>\u001b[0m Creating 'beads' alias...\n\u001b[0;32m==>\u001b[0m Created 'beads' alias -> bd\n\u001b[0;32m==>\u001b[0m bd installed to /home/bench/.local/bin/bd\n\u001b[1;33m==>\u001b[0m /home/bench/.local/bin is not in your PATH\n\u001b[0;31mError:\u001b[0m bd was installed but is not in PATH\n"
         },
         {
@@ -833,7 +820,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 1.8,
+          "seconds": 3.9,
           "output_tail": ""
         },
         {
@@ -846,7 +833,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.3,
+          "seconds": 0.1,
           "output_tail": ""
         },
         {
@@ -859,7 +846,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 5.3,
+          "seconds": 4.8,
           "output_tail": "ds agent skill...\n✓ Beads agent skill installed\n  Skill: .agents/skills/beads/SKILL.md\n✓ Cursor integration installed (rules + skill + hooks)\nThanks for using bd! Quick heads-up: bd shares anonymous usage metrics —\n   just which commands get run (plus the bd version and OS platform), never your\n   issues, paths, remotes, identity, or anything you type. Seeing how people use\n   bd is how we decide what to improve next, so it genuinely makes bd better for\n   everyone.\n      Curious what's sent?   bd metrics example\n      Prefer to opt out?     bd metrics off    (one command, no restart needed)\n\n"
         },
         {
@@ -872,8 +859,8 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.6,
-          "output_tail": "✓ Created issue: repo-d3w — Release codename Blue Heron\n  Priority: P2\n  Status: open\n\n"
+          "seconds": 0.3,
+          "output_tail": "✓ Created issue: repo-dky — Release codename Blue Heron\n  Priority: P2\n  Status: open\n\n💡 Tip: Install the beads plugin for automatic workflow context, or run 'bd setup claude' for CLI-only mode\n\n"
         },
         {
           "n": 7,
@@ -885,7 +872,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.5,
+          "seconds": 0.3,
           "output_tail": "Pushing to Dolt remote...\nPush complete.\n"
         },
         {
@@ -898,7 +885,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 3.8,
+          "seconds": 7.8,
           "output_tail": "\n\u001b[0;34m==>\u001b[0m Fetching latest release...\n\u001b[0;34m==>\u001b[0m Latest version: v1.3.4\n\u001b[0;34m==>\u001b[0m Downloading beads_1.3.4_linux_arm64.tar.gz...\n\u001b[0;34m==>\u001b[0m Verifying release checksum...\n\u001b[0;32m==>\u001b[0m Checksum verified for beads_1.3.4_linux_arm64.tar.gz\n\u001b[0;34m==>\u001b[0m Extracting archive...\n\u001b[0;34m==>\u001b[0m Installing to /home/bench/.local/bin...\n\u001b[0;34m==>\u001b[0m Creating 'beads' alias...\n\u001b[0;32m==>\u001b[0m Created 'beads' alias -> bd\n\u001b[0;32m==>\u001b[0m bd installed to /home/bench/.local/bin/bd\n\u001b[1;33m==>\u001b[0m /home/bench/.local/bin is not in your PATH\n\u001b[0;31mError:\u001b[0m bd was installed but is not in PATH\n"
         },
         {
@@ -911,7 +898,7 @@
           "secret": false,
           "status": "executed",
           "needed": false,
-          "seconds": 0.1,
+          "seconds": 0.0,
           "output_tail": ""
         },
         {
@@ -924,7 +911,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 1.6,
+          "seconds": 3.3,
           "output_tail": ""
         },
         {
@@ -937,7 +924,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.6,
+          "seconds": 1.0,
           "output_tail": ""
         },
         {
@@ -950,8 +937,8 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 4.3,
-          "output_tail": "s anonymous usage metrics —\n   just which commands get run (plus the bd version and OS platform), never your\n   issues, paths, remotes, identity, or anything you type. Seeing how people use\n   bd is how we decide what to improve next, so it genuinely makes bd better for\n   everyone.\n      Curious what's sent?   bd metrics example\n      Prefer to opt out?     bd metrics off    (one command, no restart needed)\n\nWarning: /home/bench/work/repo/.beads has permissions 0755 (recommended: 0700). Run: chmod 700 /home/bench/work/repo/.beads\nSynced database from file:///remotes/friction-beads-6ad887.git\n"
+          "seconds": 0.5,
+          "output_tail": "s anonymous usage metrics —\n   just which commands get run (plus the bd version and OS platform), never your\n   issues, paths, remotes, identity, or anything you type. Seeing how people use\n   bd is how we decide what to improve next, so it genuinely makes bd better for\n   everyone.\n      Curious what's sent?   bd metrics example\n      Prefer to opt out?     bd metrics off    (one command, no restart needed)\n\nWarning: /home/bench/work/repo/.beads has permissions 0755 (recommended: 0700). Run: chmod 700 /home/bench/work/repo/.beads\nSynced database from file:///remotes/friction-beads-1c40e5.git\n"
         },
         {
           "n": 13,
@@ -963,8 +950,8 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.5,
-          "output_tail": "○ repo-d3w P2 Release codename Blue Heron\n\n--------------------------------------------------------------------------------\nTotal: 1 issues (1 open, 0 in progress)\n\nStatus: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred\nPriority: P0–P4 (label only; not a status icon)\n\n"
+          "seconds": 0.3,
+          "output_tail": "○ repo-dky P2 Release codename Blue Heron\n\n--------------------------------------------------------------------------------\nTotal: 1 issues (1 open, 0 in progress)\n\nStatus: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred\nPriority: P0–P4 (label only; not a status icon)\n\n"
         }
       ]
     },
@@ -1001,7 +988,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 6.0,
+          "seconds": 6.5,
           "output_tail": "\nadded 57 packages in 6s\n\n22 packages are looking for funding\n  run `npm fund` for details\n"
         },
         {
@@ -1027,7 +1014,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.3,
+          "seconds": 0.2,
           "output_tail": "- Creating OpenSpec structure...\n▌ OpenSpec structure created\n\nOpenSpec Setup Complete\n\nCreated: Claude Code\n6 skills in .agents/skills/ (linked from .claude/skills/)\nConfig: openspec/config.yaml (schema: spec-driven)\n\nGetting started:\n  Start your first change: /openspec-propose \"your idea\"\n\nNote: 6 more workflows are available (new, continue, ff, bulk-archive, verify, onboard).\nAdd them with `openspec config profile`.\n\nLearn more: https://github.com/Fission-AI/OpenSpec\nFeedback:   https://github.com/Fission-AI/OpenSpec/issues\n\n- Setting up Claude Code...\n✔ Setup complete for Claude Code\n"
         },
         {
@@ -1040,7 +1027,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.2,
+          "seconds": 0.1,
           "output_tail": ""
         },
         {
@@ -1053,8 +1040,8 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 6.9,
-          "output_tail": "\nadded 57 packages in 7s\n\n22 packages are looking for funding\n  run `npm fund` for details\n"
+          "seconds": 5.7,
+          "output_tail": "\nadded 57 packages in 6s\n\n22 packages are looking for funding\n  run `npm fund` for details\n"
         },
         {
           "n": 6,
@@ -1066,7 +1053,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.2,
+          "seconds": 0.1,
           "output_tail": ""
         },
         {
@@ -1079,7 +1066,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 0.3,
+          "seconds": 0.1,
           "output_tail": ""
         }
       ]
@@ -1117,7 +1104,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 3.1,
+          "seconds": 2.5,
           "output_tail": "debconf: delaying package configuration, since apt-utils is not installed\n"
         },
         {
@@ -1130,7 +1117,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 78.8,
+          "seconds": 60.7,
           "output_tail": "…\n  Dependencies installed OK\n  Spawning worker on port 37701...\n  Worker ready at http://localhost:37701 OK\n  Installed. Setup is waiting at http://127.0.0.1:37701/?setup=1\n  AGENT: If the user is available, run npx claude-mem install --setup browser. Otherwise leave setup pending for their first visit.\n[SETTINGS] Created settings file with defaults: /home/bench/.claude-mem/settings.json\nnpm notice\nnpm notice New major version of npm available! 10.9.9 -> 12.2.2\nnpm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.2\nnpm notice To update run: npm install -g npm@12.2.2\nnpm notice\n"
         },
         {
@@ -1154,7 +1141,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 2.4,
+          "seconds": 3.2,
           "output_tail": "debconf: delaying package configuration, since apt-utils is not installed\n"
         },
         {
@@ -1167,7 +1154,7 @@
           "secret": false,
           "status": "executed",
           "exit_code": 0,
-          "seconds": 90.9,
+          "seconds": 57.0,
           "output_tail": "…\n  Dependencies installed OK\n  Spawning worker on port 37701...\n  Worker ready at http://localhost:37701 OK\n  Installed. Setup is waiting at http://127.0.0.1:37701/?setup=1\n  AGENT: If the user is available, run npx claude-mem install --setup browser. Otherwise leave setup pending for their first visit.\n[SETTINGS] Created settings file with defaults: /home/bench/.claude-mem/settings.json\nnpm notice\nnpm notice New major version of npm available! 10.9.9 -> 12.2.2\nnpm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.2\nnpm notice To update run: npm install -g npm@12.2.2\nnpm notice\n"
         },
         {

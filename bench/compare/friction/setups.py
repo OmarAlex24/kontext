@@ -6,7 +6,7 @@ Each step is counted as the design counts it: `kind` is `command` (a terminal
 command) or `manual` (done outside a terminal command: a browser, a dashboard,
 an edited shell file, a new terminal, a secret carried between machines);
 `account` marks a new account and `secret` a secret made by hand or shown once
-(a step can be both a command and a secret, like `kontext token create`).
+(a step can be both a command and a secret, like `kontext invite`).
 `conditional` steps are counted apart. Steps with `run` are re-executed by
 friction/run.py in two fresh containers of the base image (Claude Code, git,
 nothing else); steps without it are doc-only, with the reason. `harness` steps
@@ -19,7 +19,26 @@ add up to.
 
 from dataclasses import dataclass, field
 
-KONTEXT_INSTALL = 'curl -fsSL "https://raw.githubusercontent.com/OmarAlex24/kontext/v0.2.0/install.sh" | KONTEXT_VERSION=v0.2.0 sh'
+KONTEXT_INSTALL = 'curl -fsSL "https://raw.githubusercontent.com/OmarAlex24/kontext/v0.3.0/install.sh" | KONTEXT_VERSION=v0.3.0 sh'
+# The join line goes to friction/run.py as KONTEXT_JOIN=… and is held in memory
+# only; the rest of the output is kept, with the line redacted.
+KONTEXT_INVITE = "cd ~/work/repo && out=$(kontext invite) && printf '%s\\n' \"$out\" && join=$(printf '%s' \"$out\" | grep -o 'kxj1\\.[A-Za-z0-9_-]*' | head -n 1) && test -n \"$join\" && printf 'KONTEXT_JOIN=%s\\n' \"$join\""
+# The first `kontext setup` never prompts: with no server and no
+# CLOUDFLARE_API_TOKEN it creates the project and installs, then exits 4 with
+# the link for the token. The step passes only on exit 4 with those three
+# lines (other needs, like a project set up elsewhere, also exit 4); it
+# prints them again last so they are in the kept tail.
+KONTEXT_SETUP_FIRST = "cd ~/work/repo && out=$(kontext setup 2>&1); rc=$?; printf '%s\\n' \"$out\"; echo \"exit $rc\"; printf '%s\\n' \"$out\" | grep -E '^  (project|install|server) '; test $rc -eq 4 && printf '%s\\n' \"$out\" | grep -Eq '^  project +done' && printf '%s\\n' \"$out\" | grep -Eq '^  install +done' && printf '%s\\n' \"$out\" | grep -Eq '^  server +needed'"
+# join refuses a server on plain http unless it is this machine (src/invite.rs:
+# the token would travel in clear); a real deploy is https on workers.dev. The
+# sidecar has no TLS, so each machine forwards localhost:8787 to it and the
+# project lives at http://localhost:8787, which the join line then names.
+LOCAL_SERVER = "http://localhost:8787"
+FORWARD_SIDECAR = (
+    "hp=${KONTEXT_SERVER_URL#http://}; hp=${hp%%/*}; "
+    "setsid nohup node -e \"const n=require('net');n.createServer(c=>{const u=n.connect(+process.argv[2],process.argv[1]);c.pipe(u).pipe(c);c.on('error',()=>u.destroy());u.on('error',()=>c.destroy())}).listen(8787,'127.0.0.1')\" ${hp%:*} ${hp##*:} </dev/null >/dev/null 2>&1 & "
+    "for i in $(seq 50); do (: </dev/tcp/127.0.0.1/8787) 2>/dev/null && curl -fsS -o /dev/null http://localhost:8787/v1/info && exit 0; sleep 0.2; done; exit 1"
+)
 NEW_TERMINAL_HAS = "env -i HOME=$HOME PATH=/usr/local/bin:/usr/bin:/bin bash -lic 'command -v {0}' >/dev/null 2>&1"
 CODE_A = "mkdir -p ~/work/repo && cd ~/work/repo && git init -q -b main && echo demo > README.md && git add -A && git commit -q -m init && git remote add origin $BENCH_REMOTE && git init -q --bare ${BENCH_REMOTE#file://} && git push -q origin main"
 CODE_B = "git clone -q $BENCH_REMOTE ~/work/repo"
@@ -56,31 +75,30 @@ class Setup:
 SETUPS = [
     Setup(
         "kontext",
-        "kontext v0.2.0, server path (README \"With a kontext server\", install.sh)",
+        "kontext v0.3.0, server path (README \"Install\", install.sh)",
         sidecar=True,
         after="Every command pulls and pushes on its own",
-        design={"commands": "8 (+1)", "manual": "5–7", "accounts": "1", "secrets": "2"},
+        design={"commands": "5 + 1", "manual": "3–6", "accounts": "1", "secrets": "2"},
         steps=[
             Step("A", "command", "curl -fsSL …/install.sh | sh", run=KONTEXT_INSTALL),
             Step("A", "manual", "Add ~/.local/bin to PATH if it is not there", run=NEW_TERMINAL_HAS.format("kontext"), conditional=True, probe=True),
-            Step("A", "manual", "Create a Cloudflare account", doc="needs an account", account=True),
-            Step("A", "manual", "In the Cloudflare dashboard, create an API token (Workers Scripts: Edit)", doc="needs an account", secret=True),
-            Step("A", "command", "CLOUDFLARE_API_TOKEN=… kontext server deploy", doc="needs a Cloudflare account; the runs use the local sidecar instead"),
-            Step("A", "command", "kontext server deploy --subdomain <name> (account without a workers.dev subdomain)", doc="needs a Cloudflare account", conditional=True),
-            Step("A", "manual", "Put export KONTEXT_ACTOR=human:<name> in the shell rc", run="echo 'export KONTEXT_ACTOR=human:owner' >> ~/.bashrc"),
             Step("A", "harness", "the code repo and its remote (not counted)", run=CODE_A),
-            Step("A", "command", "kontext init <project> --server <url>", run="cd ~/work/repo && KONTEXT_ACTOR=human:owner kontext init demo --server $KONTEXT_SERVER_URL", secret_in=["KONTEXT_ADMIN_SECRET"]),
-            Step("A", "command", "kontext install in the code repo", run="cd ~/work/repo && KONTEXT_ACTOR=human:owner kontext install && git add -A && git commit -q -m kontext && git push -q origin main"),
-            Step("A", "command", "kontext token create --role owner --person <name> (shown once)", run="cd ~/work/repo && KONTEXT_ACTOR=human:owner kontext token create --role owner --person owner | sed -n 's/^ *KONTEXT_TOKEN=/KONTEXT_TOKEN=/p'", secret_out="KONTEXT_TOKEN", secret=True),
-            Step("A", "harness", "A saves something (stands in for the agent)", run="cd ~/work/repo && KONTEXT_ACTOR=human:owner kontext log 'release codename Blue Heron'"),
-            Step("B", "command", "curl … install.sh | sh", run=KONTEXT_INSTALL),
-            Step("B", "manual", "PATH as in step 2", run=NEW_TERMINAL_HAS.format("kontext"), conditional=True, probe=True),
-            Step("B", "manual", "Carry the token from A to B", run="test -n \"$KONTEXT_TOKEN\"", secret_in=["KONTEXT_TOKEN"]),
+            Step("A", "command", "kontext setup in the code repo (first run: the project and the install; stops, exit 4, with the link for a Cloudflare token)", run=KONTEXT_SETUP_FIRST),
+            Step("A", "manual", "Create a Cloudflare account", doc="needs an account", account=True),
+            Step("A", "manual", "Open the link setup printed and create the API token (the permission comes filled in)", doc="needs an account", secret=True),
+            Step("A", "command", "kontext server deploy, pasting the token when it asks", doc="needs a Cloudflare account; the run uses the local sidecar instead"),
+            Step("A", "manual", "Account with no workers.dev subdomain: server deploy asks for one on a terminal, in the same run (src/server.rs); without a terminal it exits 4 and needs a second run with --subdomain", doc="needs a Cloudflare account", conditional=True),
+            Step("A", "harness", "forward localhost:8787 to the sidecar, standing in for https (not counted)", run=FORWARD_SIDECAR),
+            Step("A", "command", "kontext setup again (here a stand-in: kontext setup --server <the local sidecar> with its admin secret, for the second setup after a real deploy)", run="cd ~/work/repo && kontext setup --server " + LOCAL_SERVER, secret_in=["KONTEXT_ADMIN_SECRET"]),
+            Step("A", "harness", "commit and push .kontext.toml and the files setup wrote (not counted)", run="cd ~/work/repo && git add -A && (git diff --cached --quiet || git commit -q -m kontext) && git push -q origin main"),
+            Step("A", "harness", "A saves something (stands in for the agent)", run="cd ~/work/repo && KONTEXT_ACTOR=agent:bench kontext log 'release codename Blue Heron'"),
+            Step("A", "command", "kontext invite (prints a join line: a one-time code valid for 10 minutes, not a token)", run=KONTEXT_INVITE, secret_out="KONTEXT_JOIN", secret=True),
+            Step("B", "manual", "Carry the line from A to B", run="test -n \"$KONTEXT_JOIN\"", secret_in=["KONTEXT_JOIN"]),
             Step("B", "harness", "clone the code (not counted)", run=CODE_B),
-            Step("B", "command", "KONTEXT_TOKEN=… kontext clone --server <url> <project>", run="KONTEXT_ACTOR=human:owner kontext clone --server $KONTEXT_SERVER_URL demo", secret_in=["KONTEXT_TOKEN"]),
-            Step("B", "manual", "export KONTEXT_ACTOR=… in the rc", run="echo 'export KONTEXT_ACTOR=human:owner' >> ~/.bashrc"),
-            Step("B", "command", "kontext install in the code repo", run="cd ~/work/repo && KONTEXT_ACTOR=human:owner kontext install"),
-            Step("B", "check", "B sees what A saved", run="cd ~/work/repo && KONTEXT_ACTOR=human:owner kontext recall 'Blue Heron' | grep -qi heron"),
+            Step("B", "harness", "forward localhost:8787 to the sidecar, as on A (not counted)", run=FORWARD_SIDECAR),
+            Step("B", "command", "curl … install.sh | sh -s -- kxj1.… in the code repo (installs, joins, installs the hooks)", run="cd ~/work/repo && " + KONTEXT_INSTALL.replace("| KONTEXT_VERSION=v0.3.0 sh", "| KONTEXT_VERSION=v0.3.0 sh -s -- \"$KONTEXT_JOIN\""), secret_in=["KONTEXT_JOIN"]),
+            Step("B", "manual", "PATH as in step 2", run=NEW_TERMINAL_HAS.format("kontext"), conditional=True, probe=True),
+            Step("B", "check", "B sees what A saved", run="cd ~/work/repo && kontext recall 'Blue Heron' | grep -qi heron"),
         ],
     ),
     Setup(
