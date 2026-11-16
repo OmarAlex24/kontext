@@ -83,6 +83,8 @@ env -i HOME="$HOME" PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ANTHROPI
 
 Before `run.py` exits, it scans the whole folder for every key value it read. A file with a hit is deleted, and the run exits 3.
 
+The report of a finished run is kept in `bench/compare/reports/<date>-<name>/`, with a note on how to read it. The full run on kontext v0.3.0: [`reports/2026-11-16-full-v0.3.0/`](reports/2026-11-16-full-v0.3.0/README.md).
+
 ## The freeze
 
 `FREEZE.json` records the commit and a sha256 over the frozen paths (`complib/freeze.py`):
