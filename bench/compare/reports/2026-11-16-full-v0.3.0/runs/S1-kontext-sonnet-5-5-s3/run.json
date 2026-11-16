@@ -1,0 +1,342 @@
+{
+  "scenario": "small-due-date",
+  "task": "S1",
+  "arm": "kontext",
+  "model": "claude-sonnet-5-5",
+  "model_tag": "sonnet-5-5",
+  "seed": 3,
+  "dry_run": false,
+  "run_id": "s1-kontext-sonnet-5-5-s3-c6dbfa",
+  "images": {
+    "bench-base:latest": "sha256:4334e8d94d3cf0bd9a862fe3605fc282029cfd8abd40a6e380cbd5fbcb259275",
+    "bench-verify:latest": "sha256:654fd9dfd4fd3a90985bcc117c755a313838f8279f2a8bc0decba549955f7243",
+    "bench-sidecar:latest": "sha256:d78ab9c4c3bd2ef9723a8b00dbb208e1e44a00ca6cc36a3ac200f9d02024bc19",
+    "bench-kontext:latest": "sha256:da231bb2648c1ae598c04e7b94112a2bfe8cabeb7c510409f1a88fbf43f711f5"
+  },
+  "freeze": {
+    "digest": "727cb77ed114ad70d142f729fe31932fd9629b3772352cec0029585561e5c295",
+    "recorded_digest": "727cb77ed114ad70d142f729fe31932fd9629b3772352cec0029585561e5c295",
+    "commit": "2c30f6fff963628d9fd2a28764e442954b8aa1d3",
+    "frozen": true,
+    "reason": null
+  },
+  "keys_passed": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "setup": {
+    "ok": true,
+    "seconds": 0.58
+  },
+  "steps": [
+    {
+      "script": "setup",
+      "machine": "machine-a",
+      "kind": "command",
+      "step": "kontext init bench --server <sidecar>"
+    },
+    {
+      "script": "setup",
+      "machine": "machine-a",
+      "kind": "command",
+      "step": "kontext install"
+    },
+    {
+      "script": "setup",
+      "machine": "machine-a",
+      "kind": "harness",
+      "step": "distill command wrapped: python3 /opt/bench/distill_cmd.py --out /home/bench/bench-out/distill -- claude -p --model haiku --output-format json"
+    }
+  ],
+  "wall_seconds": 19.4,
+  "session_seconds": 8.0,
+  "settle": {
+    "waits": [
+      {
+        "when": "end",
+        "machine": "machine-a",
+        "seconds": 6.44,
+        "ok": true,
+        "report": {
+          "stale": 0,
+          "waited_ms": 6381
+        }
+      }
+    ],
+    "seconds": 6.4
+  },
+  "turns": {
+    "scripted": 1,
+    "calls": 1,
+    "num_turns": 6,
+    "model_requests": 5
+  },
+  "interventions": {
+    "count": 0,
+    "by_kind": {},
+    "items": []
+  },
+  "permission_denials": {
+    "count": 0,
+    "by_tool": {}
+  },
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 1647,
+    "cache_creation_input_tokens": 16075,
+    "cache_read_input_tokens": 90131,
+    "cost_usd": 0.035071625
+  },
+  "usage_by": {
+    "agent": {
+      "input_tokens": 8,
+      "output_tokens": 567,
+      "cache_creation_input_tokens": 7940,
+      "cache_read_input_tokens": 78636,
+      "cost_usd": 0.0333996
+    },
+    "distill": {
+      "input_tokens": 2,
+      "output_tokens": 1080,
+      "cache_creation_input_tokens": 8135,
+      "cache_read_input_tokens": 11495,
+      "cost_usd": 0.001672025
+    }
+  },
+  "distill": {
+    "calls": 1,
+    "failed": 0
+  },
+  "mem0": null,
+  "cache": {
+    "requests": 5,
+    "breaks": 0,
+    "tokens_rewritten": 0,
+    "idle_breaks": 0,
+    "idle_tokens": 0
+  },
+  "init": [
+    {
+      "apiKeySource": "ANTHROPIC_API_KEY",
+      "model": "claude-sonnet-5-5",
+      "claude_code_version": "2.1.325",
+      "permissionMode": "acceptEdits",
+      "cwd": "/home/bench/work/repo",
+      "output_style": "default",
+      "tools": 26,
+      "mcp_servers": [],
+      "plugins": [
+        {
+          "name": "cc-plugin-agents-md",
+          "path": "builtin",
+          "source": "cc-plugin-agents-md@builtin"
+        },
+        {
+          "name": "cc-plugin-telemetry",
+          "path": "builtin",
+          "source": "cc-plugin-telemetry@builtin"
+        },
+        {
+          "name": "cc-plugin-privacy",
+          "path": "builtin",
+          "source": "cc-plugin-privacy@builtin"
+        },
+        {
+          "name": "cc-plugin-plugin-authoring",
+          "path": "builtin",
+          "source": "cc-plugin-plugin-authoring@builtin"
+        }
+      ],
+      "skills": 23,
+      "slash_commands": 56,
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "kontext-coordinator",
+        "kontext-implementer",
+        "kontext-plan-checker",
+        "kontext-pm-reader",
+        "kontext-scout",
+        "kontext-tester",
+        "Plan",
+        "statusline-setup"
+      ]
+    }
+  ],
+  "hooks": {
+    "SessionStart:SessionStart:startup": {
+      "started": 1,
+      "responses": 1,
+      "nonzero_exit": 0
+    }
+  },
+  "kontext_measure": {
+    "avg_cache_read_per_request": 18026,
+    "compactions": 0,
+    "files": [
+      {
+        "avg_cache_read_per_request": 11495,
+        "lines": 26,
+        "malformed_lines": 0,
+        "path": "claude-a-8239ef66-8de8-4dbb-bfc5-71c2c6ea772b.jsonl",
+        "requests": 1
+      },
+      {
+        "avg_cache_read_per_request": 19659,
+        "lines": 51,
+        "malformed_lines": 0,
+        "path": "claude-a-ab6935a0-6d70-4663-8301-2ee4773c1d37.jsonl",
+        "requests": 4
+      }
+    ],
+    "first_timestamp": "2026-11-16T03:55:49.657Z",
+    "history": {
+      "categories": [
+        {
+          "category": "tool_results",
+          "chars": 3701,
+          "count": 5,
+          "share": 0.3373
+        },
+        {
+          "category": "tool_calls",
+          "chars": 428,
+          "count": 5,
+          "share": 0.039
+        },
+        {
+          "category": "assistant_text",
+          "chars": 759,
+          "count": 2,
+          "share": 0.0692
+        },
+        {
+          "category": "typed_by_human",
+          "chars": 6084,
+          "count": 2,
+          "share": 0.5545
+        },
+        {
+          "category": "delegate_reports",
+          "chars": 0,
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "category": "pr_updates",
+          "chars": 0,
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "category": "compaction_summaries",
+          "chars": 0,
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "category": "other_machine_text",
+          "chars": 0,
+          "count": 0,
+          "share": 0.0
+        }
+      ],
+      "chars": 10972
+    },
+    "kontext": {
+      "bash_calls": 0,
+      "result_chars": 0,
+      "subcommands": []
+    },
+    "last_timestamp": "2026-11-16T03:56:01.952Z",
+    "lines": 77,
+    "lines_outside_window": 0,
+    "malformed_lines": 0,
+    "max_cache_read": 22276,
+    "models": [
+      {
+        "model": "claude-sonnet-5-5",
+        "requests": 4
+      },
+      {
+        "model": "claude-haiku-5-5",
+        "requests": 1
+      }
+    ],
+    "requests": 5,
+    "sidechain_lines": 0,
+    "since": null,
+    "tokens": {
+      "cache_creation": 16075,
+      "cache_read": 90131,
+      "input": 10,
+      "output": 1647
+    },
+    "tools": {
+      "calls": [
+        {
+          "calls": 3,
+          "name": "Bash"
+        },
+        {
+          "calls": 1,
+          "name": "Edit"
+        },
+        {
+          "calls": 1,
+          "name": "Read"
+        }
+      ],
+      "result_non_text_blocks": 0,
+      "results": [
+        {
+          "chars": 2163,
+          "name": "Bash",
+          "results": 3
+        },
+        {
+          "chars": 1465,
+          "name": "Read",
+          "results": 1
+        },
+        {
+          "chars": 73,
+          "name": "Edit",
+          "results": 1
+        }
+      ]
+    },
+    "until": null
+  },
+  "checks": {
+    "1": {
+      "test_hidden": {
+        "tests": {
+          "test_h1_due_date_fixed": "ok",
+          "test_h2_is_business_day_unchanged": "ok",
+          "test_h3_next_business_day_unchanged": "ok",
+          "test_h4_add_business_days_unchanged": "ok",
+          "test_h5_days_overdue_unchanged": "ok",
+          "test_h6_reminders_and_month_end_unchanged": "ok"
+        },
+        "exit_code": 0,
+        "output_tail": "test_h1_due_date_fixed (test_hidden.Hidden.test_h1_due_date_fixed) ... ok\ntest_h2_is_business_day_unchanged (test_hidden.Hidden.test_h2_is_business_day_unchanged) ... ok\ntest_h3_next_business_day_unchanged (test_hidden.Hidden.test_h3_next_business_day_unchanged) ... ok\ntest_h4_add_business_days_unchanged (test_hidden.Hidden.test_h4_add_business_days_unchanged) ... ok\ntest_h5_days_overdue_unchanged (test_hidden.Hidden.test_h5_days_overdue_unchanged) ... ok\ntest_h6_reminders_and_month_end_unchanged (test_hidden.Hidden.test_h6_reminders_and_month_end_unchanged) ... ok\n\n----------------------------------------------------------------------\nRan 6 tests in 0.000s\n\nOK\n"
+      }
+    }
+  },
+  "errors": [],
+  "agent_errors": 0,
+  "hidden": {
+    "passed": 6,
+    "total": 6,
+    "pct": 100.0,
+    "tests": {
+      "test_h1_due_date_fixed": "ok",
+      "test_h2_is_business_day_unchanged": "ok",
+      "test_h3_next_business_day_unchanged": "ok",
+      "test_h4_add_business_days_unchanged": "ok",
+      "test_h5_days_overdue_unchanged": "ok",
+      "test_h6_reminders_and_month_end_unchanged": "ok"
+    }
+  }
+}

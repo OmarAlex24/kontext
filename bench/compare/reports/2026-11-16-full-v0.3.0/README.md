@@ -1,6 +1,6 @@
 # Full run, kontext v0.3.0 against five setups (2026-11-16)
 
-`report.md` and `report.json` are the output of `complib/tables.py` over every run of the full comparison, unchanged. This note says what was run and what to read next to the numbers. Nothing in it replaces the tables.
+`report.md` and `report.json` are the output of `complib/tables.py` over every run of the full comparison, unchanged. `runs/` has each run's `run.json`, the files those tables are built from. This note says what was run and what to read next to the numbers. Nothing in it replaces the tables.
 
 ## What was run
 
@@ -9,7 +9,11 @@
 - **Code:** commit `a36aa45` (merged as PR #50). Frozen paths as in `FREEZE.json`: digest `727cb77e…`, recorded and found the same in all 180 cells.
 - **Versions** (`images/versions.env`): Claude Code 2.1.325, kontext v0.3.0, gentle-ai 4.5.0 with Engram 3.7.2, the mem0 plugin at `f1791da`, Beads 1.3.4 with Dolt 2.2.0, OpenSpec 2.0.0.
 - **Cost:** 38.73 USD, the sum of what each `claude -p` envelope reported (rule 6 of `ANALYSIS.md`).
-- **Not in the repo:** the per-run folders (`run.json`, transcripts, snapshots, arm logs; 125 MB). They are on the machine that ran it. `report.md` can be rebuilt from them with `tables.write(<results folder>)`.
+- **Rebuild the tables:** `runs/<task>-<arm>-<model>-s<seed>/run.json` holds each run's score, checks per day, cost by source, interventions, denials and hooks. From the repo's root, this writes `report.md` and `report.json` again, byte for byte:
+  ```sh
+  python3 -c 'import sys; sys.path.insert(0, "bench/compare"); from complib import tables; tables.write("bench/compare/reports/2026-11-16-full-v0.3.0")'
+  ```
+- **Not in the repo:** the transcripts, the snapshots the hidden checks ran on, and each arm's logs (110 MB packed). They are the file of the release [`bench-full-v0.3.0-2026-11-16`](https://github.com/OmarAlex24/kontext/releases/tag/bench-full-v0.3.0-2026-11-16). In that copy the Anthropic API request ids (`req_…`) are replaced with `req_removed`; nothing else differs from what the harness wrote.
 
 ## L, the 4-day project (requirements kept, of 14)
 

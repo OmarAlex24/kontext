@@ -1,0 +1,858 @@
+{
+  "scenario": "project-workshop",
+  "task": "L",
+  "arm": "plain",
+  "model": "claude-haiku-5-5",
+  "model_tag": "haiku-5-5",
+  "seed": 4,
+  "dry_run": false,
+  "run_id": "l-plain-haiku-5-5-s4-16000b",
+  "images": {
+    "bench-base:latest": "sha256:4334e8d94d3cf0bd9a862fe3605fc282029cfd8abd40a6e380cbd5fbcb259275",
+    "bench-verify:latest": "sha256:654fd9dfd4fd3a90985bcc117c755a313838f8279f2a8bc0decba549955f7243",
+    "bench-sidecar:latest": "sha256:d78ab9c4c3bd2ef9723a8b00dbb208e1e44a00ca6cc36a3ac200f9d02024bc19",
+    "bench-plain:latest": "sha256:7a7e7ffb0ec7b846172de3881341fce856a746b8f462f285b5bf7e9dc5e841fb"
+  },
+  "freeze": {
+    "digest": "727cb77ed114ad70d142f729fe31932fd9629b3772352cec0029585561e5c295",
+    "recorded_digest": "727cb77ed114ad70d142f729fe31932fd9629b3772352cec0029585561e5c295",
+    "commit": "2c30f6fff963628d9fd2a28764e442954b8aa1d3",
+    "frozen": true,
+    "reason": null
+  },
+  "keys_passed": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "setup": {
+    "ok": true,
+    "seconds": 0.0
+  },
+  "steps": [],
+  "wall_seconds": 354.9,
+  "session_seconds": 350.8,
+  "settle": {
+    "waits": [],
+    "seconds": 0
+  },
+  "turns": {
+    "scripted": 19,
+    "calls": 19,
+    "num_turns": 130,
+    "model_requests": 92
+  },
+  "interventions": {
+    "count": 0,
+    "by_kind": {},
+    "items": []
+  },
+  "permission_denials": {
+    "count": 9,
+    "by_tool": {
+      "Bash": 9
+    }
+  },
+  "usage": {
+    "input_tokens": 2344,
+    "output_tokens": 65569,
+    "cache_creation_input_tokens": 190526,
+    "cache_read_input_tokens": 3413166,
+    "cost_usd": 0.12114839
+  },
+  "usage_by": {
+    "agent": {
+      "input_tokens": 2344,
+      "output_tokens": 65569,
+      "cache_creation_input_tokens": 190526,
+      "cache_read_input_tokens": 3413166,
+      "cost_usd": 0.12114839
+    },
+    "distill": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cost_usd": 0.0
+    }
+  },
+  "distill": {
+    "calls": 0,
+    "failed": 0
+  },
+  "mem0": null,
+  "cache": {
+    "requests": 92,
+    "breaks": 0,
+    "tokens_rewritten": 0,
+    "idle_breaks": 0,
+    "idle_tokens": 0
+  },
+  "init": [
+    {
+      "apiKeySource": "ANTHROPIC_API_KEY",
+      "model": "claude-haiku-5-5",
+      "claude_code_version": "2.1.325",
+      "permissionMode": "acceptEdits",
+      "cwd": "/home/bench/work/repo",
+      "output_style": "default",
+      "tools": 26,
+      "mcp_servers": [],
+      "plugins": [
+        {
+          "name": "cc-plugin-agents-md",
+          "path": "builtin",
+          "source": "cc-plugin-agents-md@builtin"
+        },
+        {
+          "name": "cc-plugin-telemetry",
+          "path": "builtin",
+          "source": "cc-plugin-telemetry@builtin"
+        },
+        {
+          "name": "cc-plugin-privacy",
+          "path": "builtin",
+          "source": "cc-plugin-privacy@builtin"
+        },
+        {
+          "name": "cc-plugin-plugin-authoring",
+          "path": "builtin",
+          "source": "cc-plugin-plugin-authoring@builtin"
+        }
+      ],
+      "skills": 18,
+      "slash_commands": 51,
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ]
+    },
+    {
+      "apiKeySource": "ANTHROPIC_API_KEY",
+      "model": "claude-haiku-5-5",
+      "claude_code_version": "2.1.325",
+      "permissionMode": "acceptEdits",
+      "cwd": "/home/bench/work/repo",
+      "output_style": "default",
+      "tools": 26,
+      "mcp_servers": [],
+      "plugins": [
+        {
+          "name": "cc-plugin-agents-md",
+          "path": "builtin",
+          "source": "cc-plugin-agents-md@builtin"
+        },
+        {
+          "name": "cc-plugin-telemetry",
+          "path": "builtin",
+          "source": "cc-plugin-telemetry@builtin"
+        },
+        {
+          "name": "cc-plugin-privacy",
+          "path": "builtin",
+          "source": "cc-plugin-privacy@builtin"
+        },
+        {
+          "name": "cc-plugin-plugin-authoring",
+          "path": "builtin",
+          "source": "cc-plugin-plugin-authoring@builtin"
+        }
+      ],
+      "skills": 18,
+      "slash_commands": 51,
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ]
+    },
+    {
+      "apiKeySource": "ANTHROPIC_API_KEY",
+      "model": "claude-haiku-5-5",
+      "claude_code_version": "2.1.325",
+      "permissionMode": "acceptEdits",
+      "cwd": "/home/bench/work/repo",
+      "output_style": "default",
+      "tools": 26,
+      "mcp_servers": [],
+      "plugins": [
+        {
+          "name": "cc-plugin-agents-md",
+          "path": "builtin",
+          "source": "cc-plugin-agents-md@builtin"
+        },
+        {
+          "name": "cc-plugin-telemetry",
+          "path": "builtin",
+          "source": "cc-plugin-telemetry@builtin"
+        },
+        {
+          "name": "cc-plugin-privacy",
+          "path": "builtin",
+          "source": "cc-plugin-privacy@builtin"
+        },
+        {
+          "name": "cc-plugin-plugin-authoring",
+          "path": "builtin",
+          "source": "cc-plugin-plugin-authoring@builtin"
+        }
+      ],
+      "skills": 18,
+      "slash_commands": 51,
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ]
+    },
+    {
+      "apiKeySource": "ANTHROPIC_API_KEY",
+      "model": "claude-haiku-5-5",
+      "claude_code_version": "2.1.325",
+      "permissionMode": "acceptEdits",
+      "cwd": "/home/bench/work/repo",
+      "output_style": "default",
+      "tools": 26,
+      "mcp_servers": [],
+      "plugins": [
+        {
+          "name": "cc-plugin-agents-md",
+          "path": "builtin",
+          "source": "cc-plugin-agents-md@builtin"
+        },
+        {
+          "name": "cc-plugin-telemetry",
+          "path": "builtin",
+          "source": "cc-plugin-telemetry@builtin"
+        },
+        {
+          "name": "cc-plugin-privacy",
+          "path": "builtin",
+          "source": "cc-plugin-privacy@builtin"
+        },
+        {
+          "name": "cc-plugin-plugin-authoring",
+          "path": "builtin",
+          "source": "cc-plugin-plugin-authoring@builtin"
+        }
+      ],
+      "skills": 18,
+      "slash_commands": 51,
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ]
+    }
+  ],
+  "hooks": {},
+  "kontext_measure": {
+    "avg_cache_read_per_request": 35946,
+    "compactions": 1,
+    "files": [
+      {
+        "avg_cache_read_per_request": 41152,
+        "lines": 453,
+        "malformed_lines": 0,
+        "path": "claude-a-8bbbf85d-5eaf-45d1-8d0e-7e259ead2fce.jsonl",
+        "requests": 37
+      },
+      {
+        "avg_cache_read_per_request": 35011,
+        "lines": 231,
+        "malformed_lines": 0,
+        "path": "claude-a-9ed19a99-3156-4f11-85eb-ce3b7b9001ad.jsonl",
+        "requests": 21
+      },
+      {
+        "avg_cache_read_per_request": 25842,
+        "lines": 205,
+        "malformed_lines": 0,
+        "path": "claude-a-e6cfe89e-f2c2-45bd-bb8c-5f4838704562.jsonl",
+        "requests": 16
+      },
+      {
+        "avg_cache_read_per_request": 35316,
+        "lines": 180,
+        "malformed_lines": 0,
+        "path": "claude-b-f017ac4d-d0d6-4cd4-bca5-3acacdbaeb78.jsonl",
+        "requests": 18
+      }
+    ],
+    "first_timestamp": "2026-11-16T04:49:55.961Z",
+    "history": {
+      "categories": [
+        {
+          "category": "tool_results",
+          "chars": 118530,
+          "count": 112,
+          "share": 0.3623
+        },
+        {
+          "category": "tool_calls",
+          "chars": 60924,
+          "count": 112,
+          "share": 0.1862
+        },
+        {
+          "category": "assistant_text",
+          "chars": 23694,
+          "count": 46,
+          "share": 0.0724
+        },
+        {
+          "category": "typed_by_human",
+          "chars": 111029,
+          "count": 18,
+          "share": 0.3394
+        },
+        {
+          "category": "delegate_reports",
+          "chars": 0,
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "category": "pr_updates",
+          "chars": 0,
+          "count": 0,
+          "share": 0.0
+        },
+        {
+          "category": "compaction_summaries",
+          "chars": 12589,
+          "count": 1,
+          "share": 0.0385
+        },
+        {
+          "category": "other_machine_text",
+          "chars": 406,
+          "count": 3,
+          "share": 0.0012
+        }
+      ],
+      "chars": 327172
+    },
+    "kontext": {
+      "bash_calls": 0,
+      "result_chars": 0,
+      "subcommands": []
+    },
+    "last_timestamp": "2026-11-16T04:55:47.928Z",
+    "lines": 1069,
+    "lines_outside_window": 0,
+    "malformed_lines": 0,
+    "max_cache_read": 83820,
+    "models": [
+      {
+        "model": "claude-haiku-5-5",
+        "requests": 92
+      }
+    ],
+    "requests": 92,
+    "sidechain_lines": 0,
+    "since": null,
+    "tokens": {
+      "cache_creation": 190371,
+      "cache_read": 3307079,
+      "input": 184,
+      "output": 60469
+    },
+    "tools": {
+      "calls": [
+        {
+          "calls": 56,
+          "name": "Bash"
+        },
+        {
+          "calls": 47,
+          "name": "Edit"
+        },
+        {
+          "calls": 7,
+          "name": "Write"
+        },
+        {
+          "calls": 1,
+          "name": "Glob"
+        },
+        {
+          "calls": 1,
+          "name": "Grep"
+        }
+      ],
+      "result_non_text_blocks": 0,
+      "results": [
+        {
+          "chars": 109649,
+          "name": "Bash",
+          "results": 56
+        },
+        {
+          "chars": 4003,
+          "name": "Grep",
+          "results": 1
+        },
+        {
+          "chars": 3943,
+          "name": "Edit",
+          "results": 47
+        },
+        {
+          "chars": 921,
+          "name": "Write",
+          "results": 7
+        },
+        {
+          "chars": 14,
+          "name": "Glob",
+          "results": 1
+        }
+      ]
+    },
+    "until": null
+  },
+  "checks": {
+    "1": {
+      "test_requirements": {
+        "tests": {
+          "test_r01_twelve_per_class": "ERROR",
+          "test_r02_closed_on_tuesdays": "ERROR",
+          "test_r03_money_in_cents": "ERROR",
+          "test_r04_member_discount": "ERROR",
+          "test_r05_two_hours_before": "ERROR",
+          "test_r06_full_refund_24h": "ERROR",
+          "test_r07_waitlist_of_ten": "ERROR",
+          "test_r08_email_only_reminders": "ERROR",
+          "test_r09_reminder_day_before_at_six_pm": "ERROR",
+          "test_r10_mexico_city_time": "ERROR",
+          "test_r11_names_case_insensitive": "ERROR",
+          "test_r12_csv_semicolons": "ERROR",
+          "test_r13_freed_seat_offered_for_two_hours": "ERROR",
+          "test_r14_booking_window": "ERROR"
+        },
+        "exit_code": 1,
+        "output_tail": "rify/checks/test_requirements.py\", line 192, in test_r10_mexico_city_time\n    due = reminders_for(s, b.id, expected)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/checks/test_requirements.py\", line 58, in reminders_for\n    return [r for r in notify.reminders_due(store, now) if r.booking_id == booking_id]\n                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/notify.py\", line 23, in reminders_due\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r11_names_case_insensitive (test_requirements.RequirementsTest.test_r11_names_case_insensitive)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 201, in test_r11_names_case_insensitive\n    first = bookings.book(s, \"c1\", Person(\"Ana López\", \"ana@example.org\"), now)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/bookings.py\", line 15, in book\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r12_csv_semicolons (test_requirements.RequirementsTest.test_r12_csv_semicolons)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 215, in test_r12_csv_semicolons\n    text = export.export_csv(s)\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/export.py\", line 8, in export_csv\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r13_freed_seat_offered_for_two_hours (test_requirements.RequirementsTest.test_r13_freed_seat_offered_for_two_hours)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 237, in test_r13_freed_seat_offered_for_two_hours\n    bookings.cancel(s, s.bookings[0].id, now)\n  File \"/home/verify/repo/workshop/bookings.py\", line 26, in cancel\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r14_booking_window (test_requirements.RequirementsTest.test_r14_booking_window)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 261, in test_r14_booking_window\n    self.assertEqual(bookings.book(s, \"d7\", guest, now).status, \"confirmed\")\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/bookings.py\", line 15, in book\n    raise NotImplementedError\nNotImplementedError\n\n----------------------------------------------------------------------\nRan 14 tests in 0.002s\n\nFAILED (errors=14)\n"
+      },
+      "test_confusions": {
+        "tests": {
+          "test_c01_r01_ten_per_class": "ERROR",
+          "test_c02_r02_closed_on_mondays": "ERROR",
+          "test_c03_r06_refund_48h": "ERROR",
+          "test_c04_r06_refund_72h": "ERROR",
+          "test_c05_r07_waitlist_of_five": "ERROR",
+          "test_c06_r08_sms_reminders": "ERROR",
+          "test_c07_r08_sms_sent": "ERROR",
+          "test_c08_r12_comma_csv": "ERROR"
+        },
+        "exit_code": 1,
+        "output_tail": "last):\n  File \"/home/verify/checks/test_confusions.py\", line 115, in test_c04_r06_refund_72h\n    self.assert_full_refund_limit(72)\n  File \"/home/verify/checks/test_confusions.py\", line 89, in assert_full_refund_limit\n    self.assertEqual(bookings.refund_amount(b, cls, start - timedelta(hours=hours + 1)), PRICE)\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/bookings.py\", line 31, in refund_amount\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_c05_r07_waitlist_of_five (test_confusions.ConfusionsTest.test_c05_r07_waitlist_of_five)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 124, in test_c05_r07_waitlist_of_five\n    bookings.join_waitlist(s, \"c1\", person(i), now + timedelta(minutes=i))\n  File \"/home/verify/repo/workshop/bookings.py\", line 36, in join_waitlist\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_c06_r08_sms_reminders (test_confusions.ConfusionsTest.test_c06_r08_sms_reminders)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 132, in test_c06_r08_sms_reminders\n    channels.update(r.channel for r in notify.reminders_due(s, t))\n                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/notify.py\", line 23, in reminders_due\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_c07_r08_sms_sent (test_confusions.ConfusionsTest.test_c07_r08_sms_sent)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 140, in test_c07_r08_sms_sent\n    notify.send_due(s, t)\n  File \"/home/verify/repo/workshop/notify.py\", line 29, in send_due\n    for r in reminders_due(store, now):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/notify.py\", line 23, in reminders_due\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_c08_r12_comma_csv (test_confusions.ConfusionsTest.test_c08_r12_comma_csv)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 151, in test_c08_r12_comma_csv\n    text = export.export_csv(s)\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/export.py\", line 8, in export_csv\n    raise NotImplementedError\nNotImplementedError\n\n----------------------------------------------------------------------\nRan 8 tests in 0.002s\n\nFAILED (errors=8)\n"
+      }
+    },
+    "2": {
+      "test_requirements": {
+        "tests": {
+          "test_r01_twelve_per_class": "ERROR",
+          "test_r02_closed_on_tuesdays": "ERROR",
+          "test_r03_money_in_cents": "ERROR",
+          "test_r04_member_discount": "ERROR",
+          "test_r05_two_hours_before": "ERROR",
+          "test_r06_full_refund_24h": "ERROR",
+          "test_r07_waitlist_of_ten": "ERROR",
+          "test_r08_email_only_reminders": "ERROR",
+          "test_r09_reminder_day_before_at_six_pm": "ERROR",
+          "test_r10_mexico_city_time": "ERROR",
+          "test_r11_names_case_insensitive": "ERROR",
+          "test_r12_csv_semicolons": "ERROR",
+          "test_r13_freed_seat_offered_for_two_hours": "ERROR",
+          "test_r14_booking_window": "ERROR"
+        },
+        "exit_code": 1,
+        "output_tail": "rify/checks/test_requirements.py\", line 192, in test_r10_mexico_city_time\n    due = reminders_for(s, b.id, expected)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/checks/test_requirements.py\", line 58, in reminders_for\n    return [r for r in notify.reminders_due(store, now) if r.booking_id == booking_id]\n                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/notify.py\", line 19, in reminders_due\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r11_names_case_insensitive (test_requirements.RequirementsTest.test_r11_names_case_insensitive)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 201, in test_r11_names_case_insensitive\n    first = bookings.book(s, \"c1\", Person(\"Ana López\", \"ana@example.org\"), now)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/bookings.py\", line 15, in book\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r12_csv_semicolons (test_requirements.RequirementsTest.test_r12_csv_semicolons)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 215, in test_r12_csv_semicolons\n    text = export.export_csv(s)\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/export.py\", line 8, in export_csv\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r13_freed_seat_offered_for_two_hours (test_requirements.RequirementsTest.test_r13_freed_seat_offered_for_two_hours)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 237, in test_r13_freed_seat_offered_for_two_hours\n    bookings.cancel(s, s.bookings[0].id, now)\n  File \"/home/verify/repo/workshop/bookings.py\", line 26, in cancel\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r14_booking_window (test_requirements.RequirementsTest.test_r14_booking_window)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 261, in test_r14_booking_window\n    self.assertEqual(bookings.book(s, \"d7\", guest, now).status, \"confirmed\")\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/bookings.py\", line 15, in book\n    raise NotImplementedError\nNotImplementedError\n\n----------------------------------------------------------------------\nRan 14 tests in 0.002s\n\nFAILED (errors=14)\n"
+      },
+      "test_confusions": {
+        "tests": {
+          "test_c01_r01_ten_per_class": "ERROR",
+          "test_c02_r02_closed_on_mondays": "ERROR",
+          "test_c03_r06_refund_48h": "ERROR",
+          "test_c04_r06_refund_72h": "ERROR",
+          "test_c05_r07_waitlist_of_five": "ERROR",
+          "test_c06_r08_sms_reminders": "ERROR",
+          "test_c07_r08_sms_sent": "ERROR",
+          "test_c08_r12_comma_csv": "ERROR"
+        },
+        "exit_code": 1,
+        "output_tail": " (test_confusions.ConfusionsTest.test_c04_r06_refund_72h)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 115, in test_c04_r06_refund_72h\n    self.assert_full_refund_limit(72)\n  File \"/home/verify/checks/test_confusions.py\", line 89, in assert_full_refund_limit\n    self.assertEqual(bookings.refund_amount(b, cls, start - timedelta(hours=hours + 1)), PRICE)\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/bookings.py\", line 31, in refund_amount\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_c05_r07_waitlist_of_five (test_confusions.ConfusionsTest.test_c05_r07_waitlist_of_five)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 124, in test_c05_r07_waitlist_of_five\n    bookings.join_waitlist(s, \"c1\", person(i), now + timedelta(minutes=i))\n  File \"/home/verify/repo/workshop/bookings.py\", line 36, in join_waitlist\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_c06_r08_sms_reminders (test_confusions.ConfusionsTest.test_c06_r08_sms_reminders)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 132, in test_c06_r08_sms_reminders\n    channels.update(r.channel for r in notify.reminders_due(s, t))\n                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/notify.py\", line 19, in reminders_due\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_c07_r08_sms_sent (test_confusions.ConfusionsTest.test_c07_r08_sms_sent)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 137, in test_c07_r08_sms_sent\n    original_sms = notify.send_sms\n                   ^^^^^^^^^^^^^^^\nAttributeError: module 'workshop.notify' has no attribute 'send_sms'\n\n======================================================================\nERROR: test_c08_r12_comma_csv (test_confusions.ConfusionsTest.test_c08_r12_comma_csv)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 151, in test_c08_r12_comma_csv\n    text = export.export_csv(s)\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/export.py\", line 8, in export_csv\n    raise NotImplementedError\nNotImplementedError\n\n----------------------------------------------------------------------\nRan 8 tests in 0.001s\n\nFAILED (errors=8)\n"
+      }
+    },
+    "3": {
+      "test_requirements": {
+        "tests": {
+          "test_r01_twelve_per_class": "ERROR",
+          "test_r02_closed_on_tuesdays": "ERROR",
+          "test_r03_money_in_cents": "ERROR",
+          "test_r04_member_discount": "ERROR",
+          "test_r05_two_hours_before": "ERROR",
+          "test_r06_full_refund_24h": "ERROR",
+          "test_r07_waitlist_of_ten": "FAIL",
+          "test_r08_email_only_reminders": "FAIL",
+          "test_r09_reminder_day_before_at_six_pm": "FAIL",
+          "test_r10_mexico_city_time": "FAIL",
+          "test_r11_names_case_insensitive": "ERROR",
+          "test_r12_csv_semicolons": "ERROR",
+          "test_r13_freed_seat_offered_for_two_hours": "ok",
+          "test_r14_booking_window": "ERROR"
+        },
+        "exit_code": 1,
+        "output_tail": "s\n    text = export.export_csv(s)\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/export.py\", line 8, in export_csv\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nERROR: test_r14_booking_window (test_requirements.RequirementsTest.test_r14_booking_window)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 261, in test_r14_booking_window\n    self.assertEqual(bookings.book(s, \"d7\", guest, now).status, \"confirmed\")\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/bookings.py\", line 20, in book\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nFAIL: test_r07_waitlist_of_ten (test_requirements.RequirementsTest.test_r07_waitlist_of_ten)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 146, in test_r07_waitlist_of_ten\n    with self.assertRaises(BookingError):\nAssertionError: BookingError not raised\n\n======================================================================\nFAIL: test_r08_email_only_reminders (test_requirements.RequirementsTest.test_r08_email_only_reminders)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 169, in test_r08_email_only_reminders\n    self.assertTrue(emails, \"no reminder email went out in the two days before the class\")\nAssertionError: [] is not true : no reminder email went out in the two days before the class\n\n======================================================================\nFAIL: test_r09_reminder_day_before_at_six_pm (test_requirements.RequirementsTest.test_r09_reminder_day_before_at_six_pm)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 182, in test_r09_reminder_day_before_at_six_pm\n    self.assertTrue(due, \"no reminder due the day before at 18:00\")\nAssertionError: [] is not true : no reminder due the day before at 18:00\n\n======================================================================\nFAIL: test_r10_mexico_city_time (test_requirements.RequirementsTest.test_r10_mexico_city_time)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 193, in test_r10_mexico_city_time\n    self.assertTrue(due, \"no reminder due at 18:00 Mexico City time the day before\")\nAssertionError: [] is not true : no reminder due at 18:00 Mexico City time the day before\n\n----------------------------------------------------------------------\nRan 14 tests in 0.004s\n\nFAILED (failures=4, errors=9)\n"
+      },
+      "test_confusions": {
+        "tests": {
+          "test_c01_r01_ten_per_class": "ERROR",
+          "test_c02_r02_closed_on_mondays": "ERROR",
+          "test_c03_r06_refund_48h": "FAIL",
+          "test_c04_r06_refund_72h": "FAIL",
+          "test_c05_r07_waitlist_of_five": "FAIL",
+          "test_c06_r08_sms_reminders": "FAIL",
+          "test_c07_r08_sms_sent": "ERROR",
+          "test_c08_r12_comma_csv": "ERROR"
+        },
+        "exit_code": 1,
+        "output_tail": "e 137, in test_c07_r08_sms_sent\n    original_sms = notify.send_sms\n                   ^^^^^^^^^^^^^^^\nAttributeError: module 'workshop.notify' has no attribute 'send_sms'\n\n======================================================================\nERROR: test_c08_r12_comma_csv (test_confusions.ConfusionsTest.test_c08_r12_comma_csv)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 151, in test_c08_r12_comma_csv\n    text = export.export_csv(s)\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/verify/repo/workshop/export.py\", line 8, in export_csv\n    raise NotImplementedError\nNotImplementedError\n\n======================================================================\nFAIL: test_c03_r06_refund_48h (test_confusions.ConfusionsTest.test_c03_r06_refund_48h)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 112, in test_c03_r06_refund_48h\n    self.assert_full_refund_limit(48)\n  File \"/home/verify/checks/test_confusions.py\", line 90, in assert_full_refund_limit\n    self.assertLess(bookings.refund_amount(b, cls, start - timedelta(hours=hours - 1)), PRICE)\nAssertionError: 40000 not less than 40000\n\n======================================================================\nFAIL: test_c04_r06_refund_72h (test_confusions.ConfusionsTest.test_c04_r06_refund_72h)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 115, in test_c04_r06_refund_72h\n    self.assert_full_refund_limit(72)\n  File \"/home/verify/checks/test_confusions.py\", line 90, in assert_full_refund_limit\n    self.assertLess(bookings.refund_amount(b, cls, start - timedelta(hours=hours - 1)), PRICE)\nAssertionError: 40000 not less than 40000\n\n======================================================================\nFAIL: test_c05_r07_waitlist_of_five (test_confusions.ConfusionsTest.test_c05_r07_waitlist_of_five)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 125, in test_c05_r07_waitlist_of_five\n    with self.assertRaises(BookingError):\nAssertionError: BookingError not raised\n\n======================================================================\nFAIL: test_c06_r08_sms_reminders (test_confusions.ConfusionsTest.test_c06_r08_sms_reminders)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 133, in test_c06_r08_sms_reminders\n    self.assertIn(\"sms\", channels, \"no reminder goes out by SMS\")\nAssertionError: 'sms' not found in set() : no reminder goes out by SMS\n\n----------------------------------------------------------------------\nRan 8 tests in 0.003s\n\nFAILED (failures=4, errors=4)\n"
+      }
+    },
+    "4": {
+      "test_requirements": {
+        "tests": {
+          "test_r01_twelve_per_class": "FAIL",
+          "test_r02_closed_on_tuesdays": "FAIL",
+          "test_r03_money_in_cents": "ERROR",
+          "test_r04_member_discount": "ERROR",
+          "test_r05_two_hours_before": "FAIL",
+          "test_r06_full_refund_24h": "ERROR",
+          "test_r07_waitlist_of_ten": "FAIL",
+          "test_r08_email_only_reminders": "FAIL",
+          "test_r09_reminder_day_before_at_six_pm": "FAIL",
+          "test_r10_mexico_city_time": "FAIL",
+          "test_r11_names_case_insensitive": "FAIL",
+          "test_r12_csv_semicolons": "FAIL",
+          "test_r13_freed_seat_offered_for_two_hours": "ok",
+          "test_r14_booking_window": "FAIL"
+        },
+        "exit_code": 1,
+        "output_tail": "--------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 169, in test_r08_email_only_reminders\n    self.assertTrue(emails, \"no reminder email went out in the two days before the class\")\nAssertionError: [] is not true : no reminder email went out in the two days before the class\n\n======================================================================\nFAIL: test_r09_reminder_day_before_at_six_pm (test_requirements.RequirementsTest.test_r09_reminder_day_before_at_six_pm)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 182, in test_r09_reminder_day_before_at_six_pm\n    self.assertTrue(due, \"no reminder due the day before at 18:00\")\nAssertionError: [] is not true : no reminder due the day before at 18:00\n\n======================================================================\nFAIL: test_r10_mexico_city_time (test_requirements.RequirementsTest.test_r10_mexico_city_time)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 193, in test_r10_mexico_city_time\n    self.assertTrue(due, \"no reminder due at 18:00 Mexico City time the day before\")\nAssertionError: [] is not true : no reminder due at 18:00 Mexico City time the day before\n\n======================================================================\nFAIL: test_r11_names_case_insensitive (test_requirements.RequirementsTest.test_r11_names_case_insensitive)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 203, in test_r11_names_case_insensitive\n    with self.assertRaises(BookingError):\nAssertionError: BookingError not raised\n\n======================================================================\nFAIL: test_r12_csv_semicolons (test_requirements.RequirementsTest.test_r12_csv_semicolons)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 222, in test_r12_csv_semicolons\n    self.assertGreaterEqual(len(header), 6, header)\nAssertionError: 1 not greater than or equal to 6 : ['class_id,class_date,name,email,status,price_cents']\n\n======================================================================\nFAIL: test_r14_booking_window (test_requirements.RequirementsTest.test_r14_booking_window)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_requirements.py\", line 262, in test_r14_booking_window\n    with self.assertRaises(BookingError):\nAssertionError: BookingError not raised\n\n----------------------------------------------------------------------\nRan 14 tests in 0.005s\n\nFAILED (failures=10, errors=3)\n"
+      },
+      "test_confusions": {
+        "tests": {
+          "test_c01_r01_ten_per_class": "FAIL",
+          "test_c02_r02_closed_on_mondays": "FAIL",
+          "test_c03_r06_refund_48h": "FAIL",
+          "test_c04_r06_refund_72h": "FAIL",
+          "test_c05_r07_waitlist_of_five": "FAIL",
+          "test_c06_r08_sms_reminders": "FAIL",
+          "test_c07_r08_sms_sent": "ERROR",
+          "test_c08_r12_comma_csv": "ok"
+        },
+        "exit_code": 1,
+        "output_tail": "-------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 99, in test_c01_r01_ten_per_class\n    with self.assertRaises(BookingError):\nAssertionError: BookingError not raised\n\n======================================================================\nFAIL: test_c02_r02_closed_on_mondays (test_confusions.ConfusionsTest.test_c02_r02_closed_on_mondays)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 107, in test_c02_r02_closed_on_mondays\n    with self.assertRaises(BookingError):\nAssertionError: BookingError not raised\n\n======================================================================\nFAIL: test_c03_r06_refund_48h (test_confusions.ConfusionsTest.test_c03_r06_refund_48h)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 112, in test_c03_r06_refund_48h\n    self.assert_full_refund_limit(48)\n  File \"/home/verify/checks/test_confusions.py\", line 90, in assert_full_refund_limit\n    self.assertLess(bookings.refund_amount(b, cls, start - timedelta(hours=hours - 1)), PRICE)\nAssertionError: 40000 not less than 40000\n\n======================================================================\nFAIL: test_c04_r06_refund_72h (test_confusions.ConfusionsTest.test_c04_r06_refund_72h)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 115, in test_c04_r06_refund_72h\n    self.assert_full_refund_limit(72)\n  File \"/home/verify/checks/test_confusions.py\", line 90, in assert_full_refund_limit\n    self.assertLess(bookings.refund_amount(b, cls, start - timedelta(hours=hours - 1)), PRICE)\nAssertionError: 40000 not less than 40000\n\n======================================================================\nFAIL: test_c05_r07_waitlist_of_five (test_confusions.ConfusionsTest.test_c05_r07_waitlist_of_five)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 125, in test_c05_r07_waitlist_of_five\n    with self.assertRaises(BookingError):\nAssertionError: BookingError not raised\n\n======================================================================\nFAIL: test_c06_r08_sms_reminders (test_confusions.ConfusionsTest.test_c06_r08_sms_reminders)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/verify/checks/test_confusions.py\", line 133, in test_c06_r08_sms_reminders\n    self.assertIn(\"sms\", channels, \"no reminder goes out by SMS\")\nAssertionError: 'sms' not found in set() : no reminder goes out by SMS\n\n----------------------------------------------------------------------\nRan 8 tests in 0.003s\n\nFAILED (failures=6, errors=1)\n"
+      }
+    }
+  },
+  "errors": [],
+  "agent_errors": 0,
+  "requirements": {
+    "kept": 1,
+    "of": 14,
+    "pct": 7.1,
+    "by_class": {
+      "A": {
+        "kept": 1,
+        "of": 3
+      },
+      "B": {
+        "kept": 0,
+        "of": 6
+      },
+      "answer": {
+        "kept": 0,
+        "of": 2
+      },
+      "C": {
+        "kept": 0,
+        "of": 2
+      },
+      "discarded": {
+        "kept": 0,
+        "of": 1
+      }
+    },
+    "by_day": {
+      "4": {
+        "kept": 0,
+        "of": 7
+      },
+      "3": {
+        "kept": 1,
+        "of": 7
+      }
+    },
+    "coded_before_loss": [],
+    "regressed": [],
+    "confusions": 1,
+    "confused": {
+      "R12": [
+        "test_c08_r12_comma_csv"
+      ]
+    },
+    "failed": [
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R5",
+      "R6",
+      "R7",
+      "R8",
+      "R9",
+      "R10",
+      "R11",
+      "R12",
+      "R14"
+    ],
+    "items": [
+      {
+        "id": "R1",
+        "class": "A",
+        "scored_on": 4,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R2",
+        "class": "B",
+        "scored_on": 4,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R3",
+        "class": "answer",
+        "scored_on": 3,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R4",
+        "class": "B",
+        "scored_on": 4,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R5",
+        "class": "A",
+        "scored_on": 4,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R6",
+        "class": "C",
+        "scored_on": 3,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R7",
+        "class": "C",
+        "scored_on": 3,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R8",
+        "class": "discarded",
+        "scored_on": 3,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R9",
+        "class": "B",
+        "scored_on": 3,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R10",
+        "class": "B",
+        "scored_on": 3,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R11",
+        "class": "B",
+        "scored_on": 4,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R12",
+        "class": "B",
+        "scored_on": 4,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": [
+          "test_c08_r12_comma_csv"
+        ]
+      },
+      {
+        "id": "R13",
+        "class": "A",
+        "scored_on": 3,
+        "passed": true,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": true,
+          "4": true
+        },
+        "coded_before_loss": false,
+        "final": true,
+        "regressed": false,
+        "confusion": []
+      },
+      {
+        "id": "R14",
+        "class": "answer",
+        "scored_on": 4,
+        "passed": false,
+        "by_day": {
+          "1": false,
+          "2": false,
+          "3": false,
+          "4": false
+        },
+        "coded_before_loss": false,
+        "final": false,
+        "regressed": false,
+        "confusion": []
+      }
+    ]
+  }
+}
