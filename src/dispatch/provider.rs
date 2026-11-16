@@ -81,6 +81,8 @@ pub trait Provider {
     /// to its end, for a network failure say, is an error). Calls
     /// `conversation` with the conversation's id as soon as it is known.
     fn prompt(&self, t: &Turn, conversation: &mut dyn FnMut(&str)) -> Result<()>;
+    /// How a person looks at what happened in a stopped sandbox (one line).
+    fn inspect_hint(&self, id: &str) -> String;
 }
 
 /// The provider for `[dispatch] service`.
@@ -217,6 +219,13 @@ impl Provider for Boat {
             bail!("{}", failure(&format!("boat stop {id}"), &o));
         }
         Ok(())
+    }
+
+    fn inspect_hint(&self, id: &str) -> String {
+        format!(
+            "`boat events {id}` shows what the coordinator did; `boat resume {id}` brings the \
+             sandbox back (its data is kept 14 days)"
+        )
     }
 
     fn setup(&self, id: &str) -> Result<Setup> {

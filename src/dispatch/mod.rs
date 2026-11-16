@@ -17,6 +17,7 @@ pub mod provider;
 pub mod script;
 pub mod state;
 pub mod turn;
+pub mod watch;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -542,6 +543,23 @@ fn start(
     ));
     let w = config::resolve_project(Some(project))?.writer;
     record(home, &w, start_entry(run, s))?;
+    // The watcher follows it from here; the sandbox does not depend on it.
+    match watch::ensure(project) {
+        Ok(true) => say(&format!(
+            "watcher running (pid {}): it stops the sandbox when the epic closes",
+            watch::pid(project)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".into())
+        )),
+        Ok(false) => say(&format!(
+            "warning: the watcher did not start; start it with `{}`",
+            watch::restart_command(project)
+        )),
+        Err(e) => say(&format!(
+            "warning: could not start the watcher ({e:#}); start it with `{}`",
+            watch::restart_command(project)
+        )),
+    }
     Ok(())
 }
 
@@ -570,6 +588,8 @@ pub struct StatusReport {
     pub project: String,
     pub settings: Settings,
     pub live: usize,
+    /// The watcher's pid, if it runs on this machine.
+    pub watcher: Option<u32>,
     pub runs: Vec<Row>,
 }
 
@@ -612,6 +632,7 @@ pub fn status(project: &str) -> Result<StatusReport> {
     Ok(StatusReport {
         project: project.into(),
         live: rows.iter().filter(|r| r.run.state.live()).count(),
+        watcher: watch::pid(project).or_else(|| watch::alive(project).then_some(0)),
         settings,
         runs: rows,
     })
@@ -631,6 +652,16 @@ impl StatusReport {
         )];
         if self.runs.is_empty() {
             l.push("No epic was dispatched from this machine.".into());
+        }
+        match self.watcher {
+            Some(p) => l.push(format!("The watcher runs (pid {p}).")),
+            None if self.live > 0 => l.push(format!(
+                "The watcher is not running: the sandboxes keep working, but nothing stops them \
+                 when their epic closes, resumes them or marks them stuck. Start it again with \
+                 `{}`; it picks up from the saved state.",
+                watch::restart_command(&self.project)
+            )),
+            None => {}
         }
         let now = now_ms();
         for r in &self.runs {

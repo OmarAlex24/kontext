@@ -107,6 +107,12 @@ pub fn dir(project: &str) -> Result<PathBuf> {
 }
 
 fn ensure_dir(project: &str) -> Result<PathBuf> {
+    // Only inside a config folder that exists: a watcher whose config went
+    // away (a test's folder, removed) must not make it again.
+    let cfg = config::config_dir()?;
+    if !cfg.is_dir() {
+        anyhow::bail!("the kontext config folder {} does not exist", cfg.display());
+    }
     let d = dir(project)?;
     fs::create_dir_all(&d).with_context(|| format!("could not create {}", d.display()))?;
     Ok(d)

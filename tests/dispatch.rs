@@ -123,8 +123,10 @@ impl World {
             .env("KONTEXT_ACTOR", "human:omar")
             .env("KONTEXT_BOAT", &self.boat)
             .env("FAKE_BOAT_DIR", &self.fake)
+            .env("KONTEXT_DISPATCH_POLL_MS", "100")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.dir.path().join("gitconfig"))
+            .env_remove("KONTEXT_NOW")
             .env_remove("KONTEXT_ROLE")
             .env_remove("KONTEXT_TOKEN")
             .env_remove("KONTEXT_SERVER")
@@ -168,8 +170,9 @@ impl World {
     }
 
     /// Charter and goal signed; epics `foundations` (two tasks), `payments`
-    /// after it, and `small` (one task); the plan signed.
-    fn plan(&self, sign: bool) {
+    /// after it, and `small` (one task); the plan signed. Returns the tasks
+    /// (epic, id).
+    fn plan(&self, sign: bool) -> Vec<(String, String)> {
         let c = self.id(&["charter", "--objective", "Charge by card"]);
         self.ok(&["sign", &c]);
         let g = self.id(&["goal", "add", "Recurring charge"]);
@@ -185,18 +188,41 @@ impl World {
             }
             self.ok(&a);
         }
+        let mut tasks = Vec::new();
         for (t, e) in [
             ("Schema", "foundations"),
             ("Migrations", "foundations"),
             ("Card charge", "payments"),
             ("Fix the typo", "small"),
         ] {
-            self.ok(&["task", "add", t, "--epic", e, "--acceptance", "tests pass"]);
+            let id = self.id(&["task", "add", t, "--epic", e, "--acceptance", "tests pass"]);
+            tasks.push((e.to_string(), id));
         }
         if sign {
             let s: Value = serde_json::from_str(&self.ok(&["--json", "scope", "summary"])).unwrap();
             self.ok(&["scope", "sign", "--hash", s["hash"].as_str().unwrap()]);
         }
+        tasks
+    }
+
+    /// `kontext dispatch status --json`.
+    fn status(&self) -> Value {
+        serde_json::from_str(&self.ok(&["--json", "dispatch", "status"])).unwrap()
+    }
+
+    fn wait_state(&self, name: &str, state: &str) {
+        wait_for(&format!("{name} {state}"), || {
+            self.run_of(name)["state"] == state
+        });
+    }
+
+    /// The prompts Boat got, in order.
+    fn prompts(&self) -> Vec<String> {
+        self.calls()
+            .lines()
+            .filter(|l| l.starts_with("prompt "))
+            .map(str::to_string)
+            .collect()
     }
 
     fn calls(&self) -> String {
@@ -233,9 +259,25 @@ impl World {
 }
 
 impl Drop for World {
-    /// Every turn the fake boat holds ends, and the test waits for the
-    /// turns' processes to say so: none outlives it.
+    /// The watcher stops first (so it starts no new turn), then every turn
+    /// the fake boat holds ends, and the test waits for the turns' processes
+    /// to say so: none outlives it.
     fn drop(&mut self) {
+        let dir = self.config.join("dispatch/demo");
+        if let Ok(pid) = fs::read_to_string(dir.join("watcher.pid")) {
+            let _ = Command::new("kill").arg(pid.trim()).output();
+        }
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < until {
+            let held = fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join("watcher.lock"))
+                .is_ok_and(|f| f.try_lock().is_err());
+            if !held {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let _ = fs::write(self.fake.join("end-all"), "");
         let turns = self.config.join("dispatch/demo/turns");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -689,4 +731,132 @@ fn the_start_script_sets_the_sandbox_up_and_removes_the_token_file() {
     let o = c.output().unwrap();
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn the_watcher_stops_the_sandbox_when_the_epic_closes_in_the_ledger() {
+    let Some(w) = World::new() else { return };
+    let tasks = w.plan(true);
+    let o = w.run(&["dispatch", "foundations"]);
+    assert!(text(&o).contains("watcher running (pid"), "{}", text(&o));
+    let st = w.status();
+    assert!(st["watcher"].as_u64().is_some(), "{st}");
+    // The coordinator's turn is still going; the ledger alone says it closed.
+    for (e, t) in &tasks {
+        if e == "foundations" {
+            w.ok(&["done", t, "--run", "true"]);
+        }
+    }
+    w.wait_state("foundations", "closed");
+    let run = w.run_of("foundations");
+    assert!(w.fake.join("bx_fake1.stopped").exists());
+    assert_eq!(run["token_revoked"], true);
+    assert!(!w.token(run["token_id"].as_str().unwrap())["revoked"].is_null());
+    let found = w.ok(&["recall", "sandbox"]);
+    assert!(found.contains("the epic closed"), "{found}");
+    assert_eq!(w.prompts().len(), 1, "it was not resumed");
+    // Nothing is live: the watcher stops.
+    wait_for("the watcher to stop", || w.status()["watcher"].is_null());
+}
+
+#[test]
+fn a_coordinator_is_resumed_once_and_then_it_is_stuck() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    wait_for("the conversation id", || {
+        w.run_of("foundations")["conversation"] == "cv_bx_fake1"
+    });
+    // Its turn ends with the epic open: once more, same conversation.
+    fs::write(w.fake.join("end-bx_fake1-1"), "").unwrap();
+    w.wait_state("foundations", "resumed");
+    wait_for("the second prompt", || w.prompts().len() == 2);
+    let second = &w.prompts()[1];
+    assert!(second.contains("--resume cv_bx_fake1"), "{second}");
+    assert!(
+        second.contains("Continue from `kontext --actor agent:epic:foundations"),
+        "{second}"
+    );
+    assert_eq!(w.run_of("foundations")["turns"], 2);
+    // And again: stuck. The pm hears it, the sandbox stops, the token goes.
+    fs::write(w.fake.join("end-bx_fake1-2"), "").unwrap();
+    w.wait_state("foundations", "stuck");
+    let run = w.run_of("foundations");
+    assert!(
+        run["reason"].as_str().unwrap().contains("stopped again"),
+        "{run}"
+    );
+    assert!(w.fake.join("bx_fake1.stopped").exists());
+    assert_eq!(run["token_revoked"], true);
+    let pm = w.ok(&[
+        "--actor", "agent:pm", "--role", "pm", "resume", "--as", "pm",
+    ]);
+    assert!(
+        pm.contains("Epic foundations is stuck in its sandbox"),
+        "{pm}"
+    );
+    assert_eq!(w.prompts().len(), 2, "no third prompt");
+    let status = w.ok(&["dispatch", "status"]);
+    assert!(status.contains("foundations  stuck"), "{status}");
+}
+
+#[test]
+fn a_turn_that_could_not_be_followed_decides_nothing() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    let epic = w.run_of("foundations")["epic"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(w.fake.join("end-bx_fake1-1"), "1").unwrap();
+    wait_for("the turn's end", || w.turn_file(&epic, 1, "exit").exists());
+    // Ten ticks of the watcher later: no resume, not stuck.
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert_eq!(w.run_of("foundations")["state"], "running");
+    assert_eq!(w.prompts().len(), 1);
+    assert!(!w.fake.join("bx_fake1.stopped").exists());
+    w.ok(&["dispatch", "stop", "foundations"]);
+}
+
+#[test]
+fn a_restarted_watcher_picks_up_and_the_time_limit_marks_it_stuck() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    let pid = w.status()["watcher"].as_u64().unwrap();
+    // The watcher dies (the Mac slept, say): the sandbox keeps working.
+    assert!(
+        Command::new("kill")
+            .arg(pid.to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait_for("the watcher to be gone", || w.status()["watcher"].is_null());
+    let status = w.ok(&["dispatch", "status"]);
+    assert!(status.contains("The watcher is not running"), "{status}");
+    assert!(
+        status.contains("kontext --project demo dispatch watch --detach"),
+        "{status}"
+    );
+    assert_eq!(w.run_of("foundations")["state"], "running");
+    assert!(!w.fake.join("bx_fake1.stopped").exists());
+    // Started again past the time limit, from the saved state: stuck.
+    let out = w.ok_env(
+        &[("KONTEXT_NOW", "2099-01-01T00:00:00Z")],
+        &["dispatch", "watch", "--detach"],
+    );
+    assert!(out.contains("The watcher of demo runs"), "{out}");
+    w.wait_state("foundations", "stuck");
+    let run = w.run_of("foundations");
+    assert!(
+        run["reason"]
+            .as_str()
+            .unwrap()
+            .contains("its time limit (8h) passed"),
+        "{run}"
+    );
+    assert!(w.fake.join("bx_fake1.stopped").exists());
+    assert_eq!(run["token_revoked"], true);
 }

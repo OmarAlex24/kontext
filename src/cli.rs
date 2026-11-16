@@ -953,6 +953,16 @@ pub enum DispatchCmd {
         /// The epic: E-…, epic:<name> or <name>
         epic: String,
     },
+    /// Follows this project's live sandboxes until none is left: stops one when its epic closes
+    /// in the ledger, resumes a coordinator once when its turn ends with the epic open, and marks
+    /// it stuck (a question to the pm, the sandbox stopped, the token revoked) when it stops
+    /// again or its time runs out. `dispatch` starts it; this starts it again (after the machine
+    /// slept, say), and it picks up from the saved state
+    Watch {
+        /// Start it in the background and return
+        #[arg(long)]
+        detach: bool,
+    },
     /// Holds one turn of an epic's coordinator open until it ends (started by dispatch itself)
     #[command(hide = true)]
     Turn {
@@ -1399,9 +1409,10 @@ fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
         Cmd::Install {
             skills_only: true, ..
         } => return None,
-        // The turn's process only talks to the sandbox service.
+        // The turn's process only talks to the sandbox service; the watcher
+        // syncs on its own.
         Cmd::Dispatch {
-            cmd: Some(DispatchCmd::Turn { .. }),
+            cmd: Some(DispatchCmd::Turn { .. } | DispatchCmd::Watch { .. }),
             ..
         } => return None,
         _ => {}
@@ -2402,6 +2413,22 @@ impl Ctx<'_> {
         match (cmd, epic) {
             (Some(DispatchCmd::Turn { epic, n }), _) => {
                 crate::dispatch::turn::hold(&p.name, &epic, n)?;
+            }
+            (Some(DispatchCmd::Watch { detach: false }), _) => {
+                crate::dispatch::watch::run(&p.name)?;
+            }
+            (Some(DispatchCmd::Watch { detach: true }), _) => {
+                if crate::dispatch::watch::ensure(&p.name)? {
+                    println!(
+                        "The watcher of {} runs (pid {}).",
+                        p.name,
+                        crate::dispatch::watch::pid(&p.name)
+                            .map(|x| x.to_string())
+                            .unwrap_or_else(|| "?".into())
+                    );
+                } else {
+                    bail!("the watcher did not start: see the dispatch folder's watcher.log");
+                }
             }
             (Some(DispatchCmd::Status), _) => {
                 let r = crate::dispatch::status(&p.name)?;
