@@ -286,6 +286,55 @@ pub fn locate(repos: &Repos, own_in_worktrees: bool) -> Option<PathBuf> {
         .find(|pm| pm.join("items.md").is_file())
 }
 
+/// The `.pm/` with an `items.md` that belongs to `project`, for what binds
+/// the owner (`scope summary`, `scope sign`, `handoff`). The `.pm/` of the
+/// repo the command runs in counts only if that repo is the project's: its
+/// own `.kontext.toml` names it (a linked worktree without one, the main
+/// checkout's), or `projects.toml` maps it, or its remote is in `[[repos]]`.
+/// Then the project's repos tied the same way. Never one found by folder
+/// name alone, and never another project's: from any other folder, `None`.
+pub fn locate_for(repos: &Repos, project: &str, own_in_worktrees: bool) -> Option<PathBuf> {
+    let tied = repos.tied();
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(h) = repos.here() {
+        let ours = crate::config::checkout_project(&h.root).as_deref() == Some(project)
+            || tied.contains(&h.root);
+        if ours && let Some(pm) = pm_dir(&h.root, own_in_worktrees) {
+            out.push(pm);
+        }
+    }
+    for root in tied {
+        // A mapped repo that names another project is not this one's.
+        if crate::config::checkout_project(&root).is_some_and(|p| p != project) {
+            continue;
+        }
+        let pm = root.join(PM_DIR);
+        if !out.contains(&pm) {
+            out.push(pm);
+        }
+    }
+    out.into_iter().find(|pm| pm.join("items.md").is_file())
+}
+
+/// What `scope summary`, `scope sign` and `handoff` say when [`locate_for`]
+/// finds nothing: where a `.pm/` counts, and how to make a repo the project's.
+pub fn not_found_text(project: &str) -> String {
+    format!(
+        "No .pm/items.md found in a repo of {project} from here. {}",
+        where_it_counts(project)
+    )
+}
+
+/// Which repos' `.pm/` count for `project`, and how to make one count.
+pub fn where_it_counts(project: &str) -> String {
+    format!(
+        "A repo counts when its .kontext.toml names {project} (`kontext install` writes it; \
+         `kontext install --link-only` writes only that file), when projects.toml maps it for \
+         {project}, or when its remote is in [[repos]] of project.toml. Run it from that repo \
+         (where the planning chat runs)."
+    )
+}
+
 // ------------------------------------------------------------ table
 
 /// The cells of a table line, trimmed. `\|` is a `|` inside a cell.
@@ -756,6 +805,77 @@ pub fn build(st: &State, project: &str, people: &[String], pm: &Path, items_md: 
 }
 
 /// Reads `<pm>/items.md` and builds the ideas.
+/// One of the user's sentences that points to an entry: the idea's id, its
+/// quote (the dump line, verbatim) and the date it was said.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Said {
+    pub idea: String,
+    pub quote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
+}
+
+/// Entry id → the user's sentences of the ideas that cite it (in `where` or
+/// `evidence`). Only ideas with a quote of the user's own words (never a line
+/// under `**Coordinator asked:**`), and not discarded. A citation of a
+/// superseded entry counts for its last replacement, as `kontext ideas`
+/// follows it: superseding a feature (to give it its why) keeps the quotes.
+pub type SaidAbout = BTreeMap<String, Vec<Said>>;
+
+pub fn said_about(st: &State, ideas: &Ideas) -> SaidAbout {
+    let mut out: SaidAbout = BTreeMap::new();
+    for i in &ideas.ideas {
+        if i.state == IdeaState::Discarded {
+            continue;
+        }
+        let Some(q) = i.quote.as_deref().filter(|q| !q.trim().is_empty()) else {
+            continue;
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for r in &i.refs {
+            let id = replacement(st, &r.id);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            out.entry(id).or_default().push(Said {
+                idea: i.id.clone(),
+                quote: q.to_string(),
+                said: i.said.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// The lines that show them: `- "<quote>" (P3, Nov 12)`.
+pub fn said_lines(said: &[&Said]) -> Vec<String> {
+    said.iter()
+        .map(|s| {
+            let when = s
+                .said
+                .as_deref()
+                .map(|d| format!(", {}", month_day(d)))
+                .unwrap_or_default();
+            format!("- \"{}\" ({}{when})", s.quote, s.idea)
+        })
+        .collect()
+}
+
+/// What the user said about a feature: the sentences of the ideas that cite
+/// it. For a task, its feature's (a task's own citations are not shown: the
+/// views show what the user said about the visible work).
+pub fn said_for<'a>(st: &State, said: &'a SaidAbout, id: &str) -> Vec<&'a Said> {
+    let feature = match st.get(id) {
+        Some(e) if e.kind == "feature" => Some(e.id.as_str()),
+        Some(e) if e.kind == "task" => crate::features::counted_feature(st, e),
+        _ => None,
+    };
+    feature
+        .and_then(|f| said.get(f))
+        .map(|v| v.iter().collect())
+        .unwrap_or_default()
+}
+
 pub fn load(st: &State, project: &str, people: &[String], pm: &Path) -> Result<Ideas> {
     let path = pm.join("items.md");
     let text =

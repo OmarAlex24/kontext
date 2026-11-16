@@ -152,6 +152,9 @@ pub struct TreeEpic {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeMark>,
+    /// Epics of its wave that touch the same paths (as `kontext plan` says).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overlaps: Vec<plan::Overlap>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -316,6 +319,7 @@ fn epic_node(st: &State, n: &Node, waiting: &BTreeSet<String>, marks: &Marks) ->
         feature_list,
         reason: None,
         scope: marks.mark(&n.id),
+        overlaps: Vec::new(),
     }
 }
 
@@ -329,8 +333,11 @@ pub fn build(st: &State, project: &str, people: &[String], ideas: Option<&Ideas>
     let node = |e: &PlanEpic| nodes.iter().find(|n| n.id == e.id);
     let epics = |list: &[PlanEpic]| -> Vec<TreeEpic> {
         list.iter()
-            .filter_map(node)
-            .map(|n| epic_node(st, n, &waiting, &marks))
+            .filter_map(|e| node(e).map(|n| (e, n)))
+            .map(|(e, n)| TreeEpic {
+                overlaps: e.overlaps.clone(),
+                ..epic_node(st, n, &waiting, &marks)
+            })
             .collect()
     };
     let done = epics(&layout.closed);
@@ -446,6 +453,9 @@ fn epic_lines(e: &TreeEpic, indent: &str, last: bool, out: &mut Vec<Line>) {
     }
     if let Some(r) = &e.reason {
         right.push_str(&format!(" · {r}"));
+    }
+    for o in &e.overlaps {
+        right.push_str(&format!(" · {}", o.text()));
     }
     out.push(Line {
         left: format!(

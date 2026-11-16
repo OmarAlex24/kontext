@@ -228,6 +228,8 @@ pub struct BriefOpts {
     pub max_chars: usize,
     pub generated: String,
     pub frontier: Frontier,
+    /// The user's sentences by the entry they cite (empty without `.pm/`).
+    pub said: crate::ideas::SaidAbout,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -410,7 +412,7 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
         }
     ));
     if features::has_features(st, &epic.id) {
-        feature_board(st, epic, &ts, lv, &mut l);
+        feature_board(st, epic, &ts, lv, &o.said, &mut l);
     } else if ts.is_empty() {
         l.push(format!(
             "- (none) Add tasks with `kontext task add \"<title>\" --epic {name} --acceptance \"…\"`"
@@ -560,7 +562,14 @@ fn build_brief(st: &State, new: &[Entry], o: &BriefOpts, lv: Level) -> String {
 /// The board of an epic with features: each feature in force with its state
 /// and acceptance, its tasks under it (open first), and the tasks with no
 /// feature (or whose feature is no longer in force) in a last group.
-fn feature_board(st: &State, epic: &Entry, ts: &[&Entry], lv: Level, l: &mut Vec<String>) {
+fn feature_board(
+    st: &State,
+    epic: &Entry,
+    ts: &[&Entry],
+    lv: Level,
+    said: &crate::ideas::SaidAbout,
+    l: &mut Vec<String>,
+) {
     let fs = features::of_epic(st, &epic.id);
     l.push(format!("{}.", features::counts_text(st, &epic.id)));
     let line = |t: &Entry| {
@@ -590,6 +599,28 @@ fn feature_board(st: &State, epic: &Entry, ts: &[&Entry], lv: Level, l: &mut Vec
                 one_line(a, 240)
             )),
             None => l.push("When it works, the human sees: (not stated)".into()),
+        }
+        // Why it exists and what the user said about it: only for a feature
+        // that has them (otherwise the board reads as before).
+        if let Some(w) = features::why(f) {
+            l.push(format!("Why it exists: {}", one_line(w, 400)));
+        }
+        let theirs = crate::ideas::said_for(st, said, &f.id);
+        if !theirs.is_empty() {
+            if lv.detail {
+                l.push("The user said (verbatim):".into());
+                l.extend(crate::ideas::said_lines(&theirs));
+            } else {
+                l.push(format!(
+                    "The user said {} about it: `kontext show {}`.",
+                    if theirs.len() == 1 {
+                        "one thing".to_string()
+                    } else {
+                        format!("{} things", theirs.len())
+                    },
+                    f.id
+                ));
+            }
         }
         let of: Vec<&&Entry> = ts
             .iter()
@@ -735,7 +766,14 @@ pub fn brief_json(st: &State, new: &[Entry], o: &BriefOpts) -> Value {
     if features::has_features(st, &epic.id) {
         v["features"] = features::of_epic(st, &epic.id)
             .into_iter()
-            .map(|f| features::json(st, f))
+            .map(|f| {
+                let mut j = features::json(st, f);
+                let theirs = crate::ideas::said_for(st, &o.said, &f.id);
+                if !theirs.is_empty() {
+                    j["user_said"] = json!(theirs);
+                }
+                j
+            })
             .collect();
     }
     if let Some(p) = crate::scope::pending_line(st) {
@@ -755,6 +793,8 @@ pub struct NextOpts {
     pub actor: String,
     /// Character budget.
     pub max_chars: usize,
+    /// The user's sentences by the entry they cite (empty without `.pm/`).
+    pub said: crate::ideas::SaidAbout,
 }
 
 /// Answers to the task's questions.
@@ -869,6 +909,31 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
             f.id,
             f.title.trim()
         ));
+        // Cut as `brief` cuts it, and shorter at the tight levels (the plan's
+        // summary prints it whole: the signature binds it).
+        if let Some(w) = features::why(f) {
+            let cap = if lv.detail { 400 } else { 160 };
+            l.push(format!("- Why the feature exists: {}", one_line(w, cap)));
+        }
+    }
+    let theirs = crate::ideas::said_for(st, &o.said, task);
+    if !theirs.is_empty() {
+        let cap = if lv.list_cap.is_some() { 3 } else { usize::MAX };
+        l.push("- What the user said about it (verbatim):".into());
+        l.extend(
+            crate::ideas::said_lines(&theirs)
+                .into_iter()
+                .take(cap)
+                .map(|x| format!("  {x}")),
+        );
+        if theirs.len() > cap {
+            l.push(format!(
+                "  - … {} more: `kontext show {}`",
+                theirs.len() - cap,
+                // `show` lists them on the feature, not on the task.
+                features::counted_feature(st, t).unwrap_or(task)
+            ));
+        }
     }
     let goals = string_list(t.fields.get("goals"));
     if goals.is_empty() {
@@ -976,8 +1041,14 @@ fn build_next(st: &State, task: &str, o: &NextOpts, lv: NextLevel) -> String {
     l.push(format!(
         "- Progress: `kontext log \"…\" --task {task}`. Renew your claim: with no journal entry or close within {lease}, it expires and the task goes back to ready."
     ));
+    // The reader `kontext ask --task` picks (the same function routes it).
+    let reader = match tasks::task_reader(st, task) {
+        Some(r) if r.starts_with("epic:") => r,
+        Some(r) => format!("{r}, who assigned you this task"),
+        None => format!("epic:{name}"),
+    };
     l.push(format!(
-        "- Questions: if the charter or a decision answers it, keep going. If not, `kontext ask \"…\" --task {task}` (it goes to epic:{name}) and move on with what you can."
+        "- Questions: if the charter or a decision answers it, keep going. If not, `kontext ask \"…\" --task {task}` (it goes to {reader}) and move on with what you can."
     ));
     l.push("- Don't decide: if something should change, `kontext propose`.".into());
     l.push(format!(
@@ -1010,6 +1081,10 @@ pub fn next_json(st: &State, task: &str, o: &NextOpts) -> Value {
     });
     if let Some(f) = features::counted_feature(st, t).and_then(|f| st.get(f)) {
         v["feature"] = features::json(st, f);
+    }
+    let theirs = crate::ideas::said_for(st, &o.said, task);
+    if !theirs.is_empty() {
+        v["user_said"] = json!(theirs);
     }
     let skipped = scope_skipped(st, t);
     if !skipped.is_empty() {

@@ -687,9 +687,7 @@ fn resolve_after(
             active: true,
             tasks: 0,
             closed_tasks: 0,
-            features: 0,
-            done_features: 0,
-            open_loose: 0,
+            ..Default::default()
         });
         let plan = crate::plan::compute(&nodes);
         if let Some(c) = plan.cycles.iter().find(|c| c.iter().any(|n| n == own)) {
@@ -1218,8 +1216,32 @@ pub fn frontier_of(st: &State) -> Frontier {
     f
 }
 
+/// Who reads a question about a task asked with no `--to`. A task the pm
+/// (or a person) assigned directly, with no coordinator in between (a small
+/// task, DESIGN §12.1), sends it to whoever assigned it: `pm`, or that
+/// person. Otherwise to the epic's coordinator (`epic:<name>`). `kontext
+/// next` prints this same reader, so the hint and the routing never differ.
+pub fn task_reader(st: &State, task: &str) -> Option<String> {
+    let assigner = st
+        .task(task)
+        .and_then(|i| i.holder.as_ref())
+        .filter(|h| h.kind == "assign")
+        .and_then(|h| st.get(&h.record))
+        .map(|r| &r.actor);
+    if let Some(a) = assigner {
+        if crate::inbox::is_pm(a) {
+            return Some(crate::inbox::PM.to_string());
+        }
+        if !a.is_agent() {
+            return Some(a.name.clone());
+        }
+    }
+    epic_of_task(st, task).map(|e| format!("epic:{}", epic_name(e)))
+}
+
 /// `fields` of a question: `to`, and `task` and `epic` if the question is
-/// about a task or goes to an epic.
+/// about a task or goes to an epic. With a task and no `--to`, the reader is
+/// [`task_reader`].
 pub fn question_fields(
     st: &State,
     to: Option<&str>,
@@ -1229,9 +1251,11 @@ pub fn question_fields(
     let mut f = Map::new();
     let mut epic_name_of_task = None;
     let mut task_feature = None;
+    let mut task_to = None;
     if let Some(t) = task.map(str::trim).filter(|t| !t.is_empty()) {
         let id = open_task(st, t)?;
         epic_name_of_task = epic_of_task(st, &id).map(epic_name);
+        task_to = task_reader(st, &id);
         task_feature = st
             .get(&id)
             .and_then(|t| crate::features::counted_feature(st, t))
@@ -1253,8 +1277,13 @@ pub fn question_fields(
         }
         f.insert("feature".into(), json!(id));
     }
-    let to = match to.map(str::trim).filter(|t| !t.is_empty()) {
-        Some(t) => t.to_string(),
+    let to = match to
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .or(task_to)
+    {
+        Some(t) => t,
         None => match &epic_name_of_task {
             Some(n) => format!("epic:{n}"),
             None => bail!("missing --to <reader> (owner, pm, epic:<x> or a person)"),

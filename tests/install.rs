@@ -161,6 +161,12 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "Do not do bulk reading or long shell work there",
         "ask for a short hand-back",
         "about five lines at most",
+        "**Check the plan before the signature.**",
+        "`kontext-plan-checker`",
+        "**Hand off, if another chat runs the plan.**",
+        "`kontext handoff`",
+        "never from a summary of this one",
+        "before it has tasks, `kontext feature add` again with `--why`",
     ] {
         assert!(orq.contains(needed), "missing {needed:?}");
     }
@@ -203,6 +209,9 @@ fn dry_run_writes_nothing_then_install_is_idempotent() {
         "Bulk reading and long shell work go to a subagent",
         "good moment to compact",
         "Once per closed phase",
+        "## 11. Starting after a handoff",
+        "kontext capture here --replace",
+        "never from a summary of that chat",
     ] {
         assert!(pm.contains(needed), "missing {needed:?}");
     }
@@ -395,6 +404,34 @@ fn installs_agent_files_and_keeps_edited_ones() {
     assert!(!front.contains("effort"), "{front}");
     assert!(reader.contains("**Coordinator asked:**"), "{reader}");
     assert!(reader.lines().count() <= 60);
+    // The plan's check before the signature (DESIGN §12.4): its own model,
+    // it writes as the pm and only the records a plan can be checked with.
+    let checker = fs::read_to_string(agents.join("kontext-plan-checker.md")).unwrap();
+    assert!(
+        checker.starts_with("---\nname: kontext-plan-checker\ndescription: "),
+        "{checker}"
+    );
+    let front = checker.split("---").nth(1).unwrap();
+    assert!(front.contains("\nmodel: opus\n"), "{front}");
+    assert!(
+        front.contains("\ntools: Read, Grep, Glob, Bash\n"),
+        "{front}"
+    );
+    assert!(!front.contains("effort"), "{front}");
+    for needed in [
+        "kontext --actor agent:plan-checker --role pm",
+        "kontext epic touches",
+        "kontext epic after",
+        "kontext epic parallel",
+        "Leave no ⚠",
+        "write it after both epics' `touches`",
+        "do not invent one",
+        "Never read `.pm/dumps/`",
+        "no `scope sign`",
+    ] {
+        assert!(checker.contains(needed), "checker: missing {needed:?}");
+    }
+    assert!(checker.lines().count() <= 60);
     let coord = fs::read_to_string(agents.join("kontext-coordinator.md")).unwrap();
     assert!(coord.contains("next --epic <name> --claim"), "{coord}");
     assert!(
@@ -412,6 +449,43 @@ fn installs_agent_files_and_keeps_edited_ones() {
     ] {
         assert!(coord.contains(rule), "coordinator: missing {rule:?}");
     }
+    // A small task is not fanned out (DESIGN §12.1): the same three reasons
+    // for a team in the coordinator, the pm skill and the orchestrate skill.
+    let skills = r.join(".claude/skills");
+    let pm = fs::read_to_string(skills.join("kontext-pm/SKILL.md")).unwrap();
+    let orq = fs::read_to_string(skills.join("kontext-orchestrate/SKILL.md")).unwrap();
+    for (who, text) in [
+        ("coordinator", &coord),
+        ("kontext-pm", &pm),
+        ("kontext-orchestrate", &orq),
+    ] {
+        for rule in [
+            "never by file count",
+            "really run",
+            "bulk reading that would fill",
+            "independent check of a risky change",
+        ] {
+            assert!(text.contains(rule), "{who}: missing {rule:?}");
+        }
+    }
+    assert!(coord.contains("do it yourself"), "{coord}");
+    assert!(
+        pm.contains("goes to one worker, with no coordinator"),
+        "{pm}"
+    );
+    assert!(orq.contains("| **S–M** | One agent"), "{orq}");
+    // The small task is assigned by the pm, so its questions reach the pm.
+    for (who, text) in [("kontext-pm", &pm), ("kontext-orchestrate", &orq)] {
+        assert!(
+            text.contains("kontext assign <T> --to agent:<x>-impl-1"),
+            "{who}: {text}"
+        );
+    }
+    assert!(
+        pm.contains("comes to you (`kontext inbox --as pm`)"),
+        "{pm}"
+    );
+    assert!(pm.contains("one coordinator per epic"), "{pm}");
     for name in ["kontext-implementer", "kontext-tester", "kontext-scout"] {
         let text = fs::read_to_string(agents.join(format!("{name}.md"))).unwrap();
         for rule in ["Hand back about five lines at most", "re-reads"] {

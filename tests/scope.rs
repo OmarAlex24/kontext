@@ -512,6 +512,8 @@ fn pm_repo(p: &Project, rows: &str) -> PathBuf {
     let repo = p.dir.path().join("app");
     fs::create_dir_all(repo.join(".pm/dumps")).unwrap();
     git(&repo, &["init", "-q"]);
+    // The project's repo: its .kontext.toml names it (`kontext install`).
+    fs::write(repo.join(".kontext.toml"), "project = \"demo\"\n").unwrap();
     fs::write(
         repo.join(".pm/items.md"),
         format!(
@@ -718,7 +720,9 @@ fn the_summary_says_whether_the_ideas_were_checked() {
     let elsewhere = summary(&t.p);
     let text = elsewhere["summary"].as_str().unwrap();
     assert!(
-        text.contains("Ideas not checked: no .pm/items.md found from "),
+        text.contains(
+            "Ideas not checked: no .pm/items.md found in a repo of this project where this ran."
+        ),
         "{text}"
     );
     assert!(!text.contains("Not placed"), "{text}");
@@ -751,7 +755,7 @@ fn the_summary_says_whether_the_ideas_were_checked() {
     pm_ok(&t.p, &["feature", "add", "Invoices", "--epic", "pay"]);
     let text = summary(&t.p)["summary"].as_str().unwrap().to_string();
     assert!(
-        text.contains("## Your ideas\nIdeas not checked: no .pm/items.md found from "),
+        text.contains("## Your ideas\nIdeas not checked: no .pm/items.md found in a repo of this project where this ran."),
         "{text}"
     );
     let (_, out, _) = in_dir(&t.p, &repo, &["scope", "summary"]);

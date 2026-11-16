@@ -258,3 +258,64 @@ fn team_flow_end_to_end() {
     );
     assert!(p.kontext_ok(&["verify"]).starts_with("OK: "));
 }
+
+/// A small task the pm assigns straight to one worker (no coordinator,
+/// DESIGN §12.1): the worker's `ask --task` reaches the pm's inbox, and
+/// `next` names the pm. A task a worker claims under a coordinator still
+/// goes to `epic:<name>`. The hint and the routing come from one function.
+#[test]
+fn a_task_the_pm_assigns_sends_its_questions_to_the_pm() {
+    let (p, _g, _e) = with_epic();
+    let pm = [("KONTEXT_ACTOR", "agent:pm"), ("KONTEXT_ROLE", "pm")];
+    let small = p.id_of(
+        &pm,
+        &[
+            "task",
+            "add",
+            "Refund endpoint",
+            "--epic",
+            "payments",
+            "--acceptance",
+            "POST /refunds",
+        ],
+    );
+    p.kontext_env_ok(&pm, &["assign", &small, "--to", "agent:pay-impl-1"]);
+    let worker = implementer("pay-impl-1");
+    let brief = p.run_as_ok(&worker, &["next", "--epic", "payments"]);
+    assert!(brief.contains(&format!("# Assignment: {small}")), "{brief}");
+    assert!(brief.contains("Assignment mark: `"), "{brief}");
+    assert!(
+        brief.contains("(it goes to pm, who assigned you this task)"),
+        "{brief}"
+    );
+    let out = p.run_as_ok(
+        &worker,
+        &["--json", "ask", "Which currency?", "--task", &small],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["fields"]["to"], "pm", "{v:#}");
+    let inbox = p.kontext_env_ok(&pm, &["inbox", "--as", "pm"]);
+    assert!(inbox.contains("Which currency?"), "{inbox}");
+
+    // Under a coordinator: the worker claims it, the question goes to the epic.
+    let coord = [
+        ("KONTEXT_ACTOR", "agent:epic:payments"),
+        ("KONTEXT_ROLE", "coordinator"),
+    ];
+    let team = p.id_of(
+        &coord,
+        &["task", "add", "Refund screen", "--epic", "payments"],
+    );
+    let brief = p.run_as_ok(
+        &implementer("pay-impl-2"),
+        &["next", "--epic", "payments", "--claim"],
+    );
+    assert!(brief.contains(&format!("# Assignment: {team}")), "{brief}");
+    assert!(brief.contains("(it goes to epic:payments)"), "{brief}");
+    let out = p.run_as_ok(
+        &implementer("pay-impl-2"),
+        &["--json", "ask", "Which icon?", "--task", &team],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["fields"]["to"], "epic:payments", "{v:#}");
+}

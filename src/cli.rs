@@ -151,6 +151,40 @@ pub enum EpicCmd {
         #[arg(long = "after", value_name = "EPIC")]
         after: Vec<String>,
     },
+    /// Makes an epic that already exists wait for other epics (the pm or an owner). `kontext plan`
+    /// moves it to a later wave. Not a scope change: after the signature it holds no task
+    After {
+        /// The epic that waits: E-…, epic:<name> or <name>
+        epic: String,
+        /// The epics it comes after (they must exist)
+        #[arg(required = true, value_name = "EPIC")]
+        deps: Vec<String>,
+        /// Why it has to wait (shown in the plan the owner signs)
+        #[arg(long)]
+        why: String,
+    },
+    /// Records the paths an epic is expected to touch (files or folders; a folder covers what is
+    /// under it). `kontext plan` warns when two epics of one wave share one. The pm or an owner
+    Touches {
+        /// The epic: E-…, epic:<name> or <name>
+        epic: String,
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<String>,
+        /// Why (optional)
+        #[arg(long, default_value = "")]
+        why: String,
+    },
+    /// Records that two epics of one wave may run in parallel although they touch the same paths,
+    /// and why: it silences `kontext plan`'s warning for that pair. The pm or an owner
+    Parallel {
+        /// One epic: E-…, epic:<name> or <name>
+        epic: String,
+        /// The other
+        other: String,
+        /// Why running them at once is fine (shown in the plan the owner signs)
+        #[arg(long)]
+        why: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -165,6 +199,9 @@ pub enum FeatureCmd {
         /// What the human would see when it works
         #[arg(long)]
         acceptance: Option<String>,
+        /// Why it exists: what the user needs it for (shown to the workers and in the plan)
+        #[arg(long, default_value = "")]
+        why: String,
         /// Goal it serves (can be repeated)
         #[arg(long = "goal", value_name = "G")]
         goals: Vec<String>,
@@ -265,6 +302,10 @@ pub enum CaptureCmd {
         /// The conversation's session id, outside Claude Code (default: $CLAUDE_CODE_SESSION_ID)
         #[arg(long, value_name = "ID")]
         session: Option<String>,
+        /// Also forgets every other named conversation: this one becomes the only one captured
+        /// (the new PM chat after `kontext handoff`)
+        #[arg(long)]
+        replace: bool,
     },
     /// The conversations named for capture on this machine
     List,
@@ -553,6 +594,10 @@ pub enum Cmd {
     /// The whole project on one screen: waves, epics, their features and the ideas not placed.
     /// Doesn't write anything
     Tree,
+    /// From the planning chat to a new PM chat: refuses (exit 2) until the plan is signed, no idea
+    /// is "Not placed" and no message of the user's is unaudited; then prints the new chat's
+    /// opening prompt. Doesn't write anything
+    Handoff,
     /// The coordinator's view of an epic, with its assignment mark. Advances the epic:<name> cursor
     Brief {
         /// Epic: E-…, epic:<name> or <name>
@@ -951,7 +996,7 @@ fn capture_cmd(project: Option<&str>, json_out: bool, cmd: CaptureCmd) -> Result
         "current": current,
     });
     let list = match cmd {
-        CaptureCmd::Here { session } => {
+        CaptureCmd::Here { session, replace } => {
             let (id, source) = match session.map(|s| s.trim().to_string()) {
                 Some(s) if !s.is_empty() => (s, "--session"),
                 Some(_) => bail!("--session needs a session id"),
@@ -966,12 +1011,28 @@ fn capture_cmd(project: Option<&str>, json_out: bool, cmd: CaptureCmd) -> Result
                     ),
                 },
             };
-            let (added, list) = capture::name(&p.home, &id, &cwd)?;
+            let (added, gone, list) = if replace {
+                capture::name_only(&p.home, &id, &cwd)?
+            } else {
+                let (added, list) = capture::name(&p.home, &id, &cwd)?;
+                (added, Vec::new(), list)
+            };
             lines.push(if added {
                 format!("Named conversation {id} (from {source}) for the capture.")
             } else {
                 format!("Conversation {id} (from {source}) was already named.")
             });
+            if replace {
+                lines.push(match gone.len() {
+                    0 => "No other conversation was named.".to_string(),
+                    1 => format!("Forgot {}: it is no longer captured.", gone[0]),
+                    n => format!(
+                        "Forgot {n} other named conversations ({}): they are no longer captured.",
+                        gone.join(", ")
+                    ),
+                });
+                out["forgotten"] = json!(gone);
+            }
             let why = capture_blocked_here(&cwd, &settings);
             for w in &why {
                 lines.push(format!("Nothing is captured from it here yet: {w}."));
@@ -1309,12 +1370,31 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             )?;
             Ok((w.entries, w.warnings))
         }),
+        Cmd::Epic {
+            cmd: EpicCmd::After { epic, deps, why },
+        } => cx.written_warn("the dependency", |s, a| {
+            let w = crate::epics::add_after(s, a, &epic, &deps, &why)?;
+            Ok((w.entries, w.warnings))
+        }),
+        Cmd::Epic {
+            cmd: EpicCmd::Parallel { epic, other, why },
+        } => cx.written_warn("the parallel record", |s, a| {
+            let w = crate::epics::add_parallel(s, a, &epic, &other, &why)?;
+            Ok((w.entries, w.warnings))
+        }),
+        Cmd::Epic {
+            cmd: EpicCmd::Touches { epic, paths, why },
+        } => cx.written_warn("the paths", |s, a| {
+            let w = crate::epics::add_touches(s, a, &epic, &paths, &why)?;
+            Ok((w.entries, w.warnings))
+        }),
         Cmd::Feature {
             cmd:
                 FeatureCmd::Add {
                     title,
                     epic,
                     acceptance,
+                    why,
                     goals,
                     body,
                     tags,
@@ -1324,6 +1404,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 title,
                 epic,
                 acceptance,
+                why,
                 goals,
                 body,
                 tags: clean_list(&tags),
@@ -1401,6 +1482,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             peek,
         } => cx.brief(&epic, max_chars, peek),
         Cmd::Tree => cx.tree(),
+        Cmd::Handoff => cx.handoff(),
         Cmd::Plan => {
             let (mut store, _) = cx.open()?;
             let st = store.state()?;
@@ -2559,15 +2641,25 @@ impl Ctx<'_> {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// The `.pm/` folder and its `items.md` (what `kontext ideas` and
-    /// `kontext tree` read), or the folder where none was found.
+    /// The `.pm/` folder and its `items.md` of a repo of this project
+    /// ([`crate::ideas::locate_for`]), or the folder where none was found.
     fn ideas_source(&self, project: &Project) -> Result<crate::scope::IdeasSource> {
         let cwd = std::env::current_dir()?;
         let repos = Repos::load(project, &cwd)?;
         let own = crate::capture::Settings::of(project).worktrees;
         let not_found = || crate::scope::IdeasSource::NotFound(cwd.display().to_string());
-        let Some(pm) = crate::ideas::locate(&repos, own) else {
-            return Ok(not_found());
+        // Only a `.pm/` of this project's repos: one in any other folder
+        // (another repo, an empty table) would vouch for ideas it never saw.
+        let Some(pm) = crate::ideas::locate_for(&repos, &project.name, own) else {
+            // One that is here but not the project's must not turn into a
+            // signed "Ideas not checked" over ideas left unplaced in it.
+            return Ok(match crate::ideas::locate(&repos, own) {
+                Some(pm) => crate::scope::IdeasSource::Foreign {
+                    pm,
+                    dir: cwd.display().to_string(),
+                },
+                None => not_found(),
+            });
         };
         let Ok(items_md) = fs::read_to_string(pm.join("items.md")) else {
             return Ok(not_found());
@@ -2583,6 +2675,9 @@ impl Ctx<'_> {
     fn scope_summary(&self) -> Result<ExitCode> {
         let (mut store, project) = self.open()?;
         let src = self.ideas_source(&project)?;
+        if let Some(why) = src.foreign(&project.name) {
+            eprintln!("⚠ {why} `kontext scope sign` refuses from here.");
+        }
         let st = app::state(&mut store, &project)?;
         let ideas = src.check(&st, &project.name);
         let s = crate::scope::summary(&st, &project.name, &ideas);
@@ -2598,11 +2693,49 @@ impl Ctx<'_> {
     fn scope_sign(&self, args: crate::scope::SignArgs) -> Result<ExitCode> {
         let (store, project) = self.open()?;
         let src = self.ideas_source(&project)?;
+        if let Some(why) = src.foreign(&project.name) {
+            bail!("{why}");
+        }
         drop(store);
         let code = self.written("the scope signature", |s, a| {
             crate::scope::sign(s, a, &project.name, &src, &args)
         })?;
         Ok(code)
+    }
+
+    /// `kontext handoff`: read-only.
+    fn handoff(&self) -> Result<ExitCode> {
+        let (mut store, project) = self.open()?;
+        let src = self.ideas_source(&project)?;
+        let st = app::state(&mut store, &project)?;
+        let ideas = src.check(&st, &project.name);
+        let settings = crate::capture::Settings::of(&project);
+        let home = config::resolve_project(self.project)?.home;
+        let named = crate::capture::named(&home).unwrap_or_default();
+        let signing = Machine::load()?
+            .signing_key()?
+            .map(|k| k.display().to_string());
+        let h = crate::handoff::check(
+            &st,
+            &project.name,
+            &ideas,
+            settings.enabled,
+            named,
+            signing.as_deref(),
+        );
+        if self.json {
+            print_json(&h)?;
+            return Ok(if h.ready {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            });
+        }
+        if !h.ready {
+            return Err(Refused(h.missing_text()).into());
+        }
+        print!("{}", h.text());
+        Ok(ExitCode::SUCCESS)
     }
 
     fn tree(&self) -> Result<ExitCode> {
@@ -2856,10 +2989,27 @@ impl Ctx<'_> {
         let (mut store, project) = self.open()?;
         let st = app::state(&mut store, &project)?;
         let id = st.resolve(id)?;
+        // What the user said about a feature (from `.pm/`, if found here).
+        let said = if st.kind_of(&id) == Some("feature") {
+            app::said_about(&st, &project)
+        } else {
+            Default::default()
+        };
+        let theirs = crate::ideas::said_for(&st, &said, &id);
         if self.json {
-            print_json(&views::show_json(&st, &id))?;
+            let mut v = views::show_json(&st, &id);
+            if !theirs.is_empty() {
+                v["user_said"] = json!(theirs);
+            }
+            print_json(&v)?;
         } else {
             print!("{}", views::show(&st, &id));
+            if !theirs.is_empty() {
+                println!("\n**What the user said about it** (verbatim, from .pm/)\n");
+                for line in crate::ideas::said_lines(&theirs) {
+                    println!("{line}");
+                }
+            }
         }
         Ok(ExitCode::SUCCESS)
     }

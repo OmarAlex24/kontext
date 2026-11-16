@@ -612,6 +612,23 @@ fn read_link(p: &Path) -> Result<RepoLink> {
     toml::from_str(&s).with_context(|| format!("could not read {}", p.display()))
 }
 
+/// The project a checkout belongs to, from the `.kontext.toml` at its root
+/// only (never one found walking up: a repo nested in a linked one is not
+/// linked); in a linked git worktree without one, the main checkout's.
+/// `None` outside git, or with no file (or one that can't be read).
+pub fn checkout_project(dir: &Path) -> Option<String> {
+    let (root, linked) = crate::git::checkout(dir)?;
+    let own = root.join(".kontext.toml");
+    let path = if own.is_file() {
+        own
+    } else if linked {
+        crate::git::main_checkout(&root)?.join(".kontext.toml")
+    } else {
+        return None;
+    };
+    read_link(&path).ok().map(|l| l.project)
+}
+
 fn found(path: PathBuf, kind: LinkKind) -> Result<Option<FoundLink>> {
     let link = read_link(&path)?;
     Ok(Some(FoundLink { path, link, kind }))

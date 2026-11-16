@@ -87,6 +87,39 @@ pub fn signed_covers(st: &State) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+/// The `after` records that count now, every epic's, in ledger order.
+pub fn after_records(st: &State) -> Vec<String> {
+    let mut out: Vec<String> = st
+        .epic_records
+        .values()
+        .flatten()
+        .filter(|id| st.kind_of(id) == Some("after"))
+        .cloned()
+        .collect();
+    out.sort_by_key(|id| position(st, id));
+    out.dedup();
+    out
+}
+
+/// The `after` records the last signature saw: its `fields.after_records`
+/// (written since that field exists), or for an older signature without
+/// it, the ones before it in the ledger.
+pub fn signed_after(st: &State) -> BTreeSet<String> {
+    let Some(s) = last(st) else {
+        return BTreeSet::new();
+    };
+    if s.fields.contains_key("after_records") {
+        return string_list(s.fields.get("after_records"))
+            .into_iter()
+            .collect();
+    }
+    let at = position(st, &s.id);
+    after_records(st)
+        .into_iter()
+        .filter(|id| position(st, id) < at)
+        .collect()
+}
+
 /// The ids of the scope kinds in a set of covers.
 fn scope_part(st: &State, covers: &BTreeSet<String>) -> BTreeSet<String> {
     covers
@@ -431,10 +464,24 @@ fn acceptance_line(f: &Entry) -> String {
 /// The epics in dependency order counted as if every one were open, so that
 /// closing work does not move it: what a change compares, before and after.
 /// It is not `kontext plan` (that one moves closed epics out of the waves).
-fn epic_order(st: &State, keep: &dyn Fn(&str) -> bool) -> plan::Plan {
+fn epic_order(st: &State, keep: &dyn Fn(&str) -> bool, after: &dyn Fn(&str) -> bool) -> plan::Plan {
     let nodes: Vec<plan::Node> = plan::nodes(st)
         .into_iter()
         .map(|mut n| {
+            // Its own dependencies, then those of the `after` records kept.
+            if let Some(e) = st.get(&n.id) {
+                n.after = string_list(e.fields.get("depends_on"));
+                for r in crate::epics::records(st, &n.id, "after") {
+                    if !after(&r.id) {
+                        continue;
+                    }
+                    for d in string_list(r.fields.get("depends_on")) {
+                        if !n.after.contains(&d) {
+                            n.after.push(d);
+                        }
+                    }
+                }
+            }
             n.active = keep(&n.id);
             n.tasks = 1;
             n.closed_tasks = 0;
@@ -483,7 +530,118 @@ fn feature_lines(st: &State, epic: &str, indent: &str, l: &mut Vec<String>) {
             whole(&f.title),
             acceptance_line(f)
         ));
+        if let Some(w) = crate::features::why(f) {
+            l.push(format!("{indent}  Why: {}", whole(w)));
+        }
     }
+}
+
+/// What `after` and `touches` records added to an epic, whole (only an
+/// epic that has them gets these lines).
+fn epic_record_lines(st: &State, e: &Entry, indent: &str, l: &mut Vec<String>) {
+    for r in crate::epics::records(st, &e.id, "after") {
+        let deps: Vec<String> = string_list(r.fields.get("depends_on"))
+            .iter()
+            .map(|d| {
+                st.get(d)
+                    .map(|x| whole(&x.title))
+                    .unwrap_or_else(|| d.clone())
+            })
+            .collect();
+        l.push(format!(
+            "{indent}Comes after {} ({}): {}",
+            deps.join(", "),
+            r.id,
+            whole(&r.why)
+        ));
+    }
+    let paths = crate::epics::touches(st, &e.id);
+    if !paths.is_empty() {
+        l.push(format!("{indent}Touches: {}", paths.join(", ")));
+    }
+    // Each `touches` record's why, whole: the signature binds it.
+    for r in crate::epics::records(st, &e.id, "touches") {
+        if !r.why.trim().is_empty() {
+            l.push(format!(
+                "{indent}  Why {} ({}): {}",
+                string_list(r.fields.get("paths")).join(", "),
+                r.id,
+                whole(&r.why)
+            ));
+        }
+    }
+    for r in crate::epics::records(st, &e.id, "parallel") {
+        let other = r
+            .refs
+            .iter()
+            .take(2)
+            .find(|x| **x != e.id)
+            .map(|x| {
+                st.get(x)
+                    .map(|o| whole(&o.title))
+                    .unwrap_or_else(|| x.clone())
+            })
+            .unwrap_or_else(|| "?".into());
+        // It covers only the paths it stored: say which (a record written
+        // when they shared none covers nothing).
+        let paths = string_list(r.fields.get("paths"));
+        if paths.is_empty() {
+            l.push(format!(
+                "{indent}Parallel record with {other} ({}) covers no path (they shared none when \
+                 it was written): {}",
+                r.id,
+                whole(&r.why)
+            ));
+        } else {
+            l.push(format!(
+                "{indent}May run in parallel with {other} on {} ({}): {}",
+                paths.join(", "),
+                r.id,
+                whole(&r.why)
+            ));
+        }
+    }
+}
+
+/// An epic of the plan: its line, what records added to it, its features.
+fn epic_block(st: &State, e: &Entry, head: String, l: &mut Vec<String>) {
+    epic_block_with(st, e, head, &[], l);
+}
+
+/// The same, with the epics of its wave it shares paths with (whole).
+fn epic_block_with(
+    st: &State,
+    e: &Entry,
+    head: String,
+    overlaps: &[plan::Overlap],
+    l: &mut Vec<String>,
+) {
+    l.push(head);
+    epic_record_lines(st, e, "  ", l);
+    for o in overlaps {
+        // With a parallel record for the pair: it covers other paths, not these.
+        let not = if o.parallel.is_empty() {
+            String::new()
+        } else {
+            let they = if o.parallel.len() == 1 {
+                "it covers"
+            } else {
+                "they cover"
+            };
+            let what = if o.covered.is_empty() {
+                "no path".to_string()
+            } else {
+                format!("only {}", o.covered.join(", "))
+            };
+            format!(" (not covered by {}: {they} {what})", o.parallel.join(", "))
+        };
+        l.push(format!(
+            "  ⚠ Same paths as {} in this wave: {}{not}",
+            whole(&o.title),
+            o.paths.join(", ")
+        ));
+    }
+    feature_lines(st, &e.id, "  ", l);
 }
 
 fn epic_line(e: &Entry) -> String {
@@ -537,7 +695,7 @@ fn not_placed_line(np: &NotPlaced) -> String {
 /// from `.pm/items.md`, or that there was none to read from where it ran.
 pub enum IdeasCheck {
     Read(Ideas),
-    /// No `.pm/items.md` found from this folder (nor in the mapped repos).
+    /// No `.pm/items.md` of this project's repos found from this folder.
     NotFound(String),
 }
 
@@ -561,9 +719,12 @@ impl IdeasCheck {
 /// and a signature run where it was not never match.
 fn ideas_lines(ic: &IdeasCheck, plan: bool, l: &mut Vec<String>) {
     match ic {
-        IdeasCheck::NotFound(dir) => l.push(format!(
-            "Ideas not checked: no .pm/items.md found from {dir}."
-        )),
+        // No folder in it: the text is signed and synced, and a path is this
+        // machine's only.
+        IdeasCheck::NotFound(_) => l.push(
+            "Ideas not checked: no .pm/items.md found in a repo of this project where this ran."
+                .into(),
+        ),
         IdeasCheck::Read(i) if i.not_placed.is_empty() => {
             l.push("Not placed: 0 of your ideas.".into())
         }
@@ -610,8 +771,7 @@ fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
         l.push(format!("## Done ({})", plan.closed.len()));
         for pe in &plan.closed {
             if let Some(e) = st.get(&pe.id) {
-                l.push(epic_line(e));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block(st, e, epic_line(e), &mut l);
             }
         }
     }
@@ -628,8 +788,7 @@ fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
         }
         for pe in &w.epics {
             if let Some(e) = st.get(&pe.id) {
-                l.push(epic_line(e));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block_with(st, e, epic_line(e), &pe.overlaps, &mut l);
             }
         }
     }
@@ -638,8 +797,7 @@ fn plan_text(st: &State, project: &str, ideas: &IdeasCheck) -> String {
         l.push(format!("## No wave ({})", plan.blocked.len()));
         for b in &plan.blocked {
             if let Some(e) = st.get(&b.epic.id) {
-                l.push(format!("{}: {}", epic_line(e), b.reason));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block(st, e, format!("{}: {}", epic_line(e), b.reason), &mut l);
             }
         }
     }
@@ -723,8 +881,7 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
                 l.extend(g);
             }
             "epic" => {
-                l.push(format!("- Epic {}", &epic_line(e)[2..]));
-                feature_lines(st, &e.id, "  ", &mut l);
+                epic_block(st, e, format!("- Epic {}", &epic_line(e)[2..]), &mut l);
             }
             "feature" => {
                 // A feature of an epic that enters is listed under it.
@@ -741,6 +898,9 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
                     whole(&e.title),
                     acceptance_line(e)
                 ));
+                if let Some(w) = crate::features::why(e) {
+                    l.push(format!("  Why: {}", whole(w)));
+                }
             }
             _ => {}
         }
@@ -814,10 +974,15 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
     l.push(String::new());
     // Not `kontext plan`'s waves (those move as work closes): the order the
     // epics' dependencies give, counting every one as open.
-    l.push("## Epic order (by their dependencies, every epic counted as open)".into());
     let covers = signed_covers(st);
-    let before = epic_order(st, &|id| covers.contains(id));
-    let now = epic_order(st, &|id| st.status_of(id) == Some(Status::Active));
+    let seen = signed_after(st);
+    added_after_lines(st, &covers, &seen, &adds, &mut l);
+    l.push("## Epic order (by their dependencies, every epic counted as open)".into());
+    // Before: the epics and the `after` records the signature saw.
+    let before = epic_order(st, &|id| covers.contains(id), &|r| seen.contains(r));
+    let now = epic_order(st, &|id| st.status_of(id) == Some(Status::Active), &|_| {
+        true
+    });
     let (b, n) = (order_line(&before), order_line(&now));
     if b == n {
         l.push(format!("Unchanged: {n}."));
@@ -829,6 +994,63 @@ fn change_text(st: &State, project: &str, d: &Diff, ideas: &IdeasCheck) -> Strin
     l.push("## Your ideas".into());
     ideas_lines(ideas, false, &mut l);
     l.join("\n")
+}
+
+/// The `after` records added since the signature (it did not see them), each
+/// whole. One that makes a signed epic wait on scope that enters with this
+/// change says so: that epic now waits on work not signed yet.
+fn added_after_lines(
+    st: &State,
+    covers: &BTreeSet<String>,
+    seen: &BTreeSet<String>,
+    adds: &BTreeSet<&String>,
+    l: &mut Vec<String>,
+) {
+    let new: Vec<String> = after_records(st)
+        .into_iter()
+        .filter(|id| !seen.contains(id))
+        .collect();
+    if new.is_empty() {
+        return;
+    }
+    let name = |id: &str| {
+        st.get(id)
+            .map(|x| whole(&x.title))
+            .unwrap_or_else(|| id.to_string())
+    };
+    l.push(format!(
+        "## Dependencies added since the signature ({})",
+        new.len()
+    ));
+    for id in &new {
+        let Some(r) = st.get(id) else { continue };
+        let epic = r.refs.first().cloned().unwrap_or_default();
+        let deps = string_list(r.fields.get("depends_on"));
+        let names: Vec<String> = deps.iter().map(|d| name(d)).collect();
+        l.push(format!(
+            "- {} comes after {} ({}): {}",
+            name(&epic),
+            names.join(", "),
+            r.id,
+            whole(&r.why)
+        ));
+        if covers.contains(&epic) {
+            let entering: Vec<String> = deps
+                .iter()
+                .filter(|d| adds.contains(d))
+                .map(|d| name(d))
+                .collect();
+            if !entering.is_empty() {
+                l.push(format!(
+                    "  ⚠ {} is signed and now waits on {}, which enters with this change and is \
+                     not signed yet",
+                    name(&epic),
+                    entering.join(", ")
+                ));
+            }
+        }
+    }
+    l.push(String::new());
 }
 
 /// What would be signed now. `ideas`: what `kontext ideas` reads from
@@ -911,6 +1133,14 @@ pub enum IdeasSource {
     },
     /// The folder it ran from.
     NotFound(String),
+    /// A `.pm/items.md` found from here ([`crate::ideas::locate`]) in a repo
+    /// that is not one of the project's: it does not count, and `scope sign`
+    /// refuses rather than sign "Ideas not checked" past ideas it can see.
+    Foreign {
+        pm: std::path::PathBuf,
+        /// The folder it ran from.
+        dir: String,
+    },
 }
 
 impl IdeasSource {
@@ -922,7 +1152,22 @@ impl IdeasSource {
                 people,
             } => IdeasCheck::Read(crate::ideas::build(st, project, people, pm, items_md)),
             IdeasSource::NotFound(dir) => IdeasCheck::NotFound(dir.clone()),
+            IdeasSource::Foreign { dir, .. } => IdeasCheck::NotFound(dir.clone()),
         }
+    }
+
+    /// Why this `.pm/` does not count, for `scope summary` (on stderr, out of
+    /// the signed text) and `scope sign` (which refuses).
+    pub fn foreign(&self, project: &str) -> Option<String> {
+        let IdeasSource::Foreign { pm, .. } = self else {
+            return None;
+        };
+        Some(format!(
+            "{}/items.md is in a repo that is not {project}'s, so it does not count and the \
+             ideas in it are not checked. {}",
+            pm.display(),
+            crate::ideas::where_it_counts(project)
+        ))
     }
 }
 
@@ -992,6 +1237,10 @@ pub fn sign(
         r.fields.insert("removes".into(), json!(s.removes));
         r.fields.insert("summary".into(), json!(s.summary));
         r.fields.insert("summary_hash".into(), json!(s.hash));
+        // The `after` records it saw: a later change summary compares the
+        // epic order against these, not against the ones added since.
+        r.fields
+            .insert("after_records".into(), json!(after_records(st)));
         if let Some(said) = a.said.as_deref().filter(|x| !x.trim().is_empty()) {
             r.fields.insert("said".into(), json!(said));
         }

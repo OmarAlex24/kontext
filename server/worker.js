@@ -129,7 +129,7 @@ class HttpError extends Error {
 }
 
 /// What only an owner or the pm writes: the plan and the decisions.
-const GOVERNANCE = ["charter", "goal", "epic", "feature", "scope", "sign", "accept", "reject", "decision", "supersede"];
+const GOVERNANCE = ["charter", "goal", "epic", "feature", "scope", "sign", "accept", "reject", "decision", "supersede", "after", "touches", "parallel"];
 /// What a coordinator hands out, and an implementer or tester may not.
 const COORDINATION = ["task", "assign"];
 /// All a scout writes.

@@ -40,6 +40,9 @@ pub fn kind_label(kind: &str) -> &str {
         "reopen" => "reopening",
         "confirm" => "confirmation",
         "dismiss" => "dismissal",
+        "after" => "dependency",
+        "touches" => "paths",
+        "parallel" => "parallel record",
         other => other,
     }
 }
@@ -122,6 +125,20 @@ pub(crate) fn record_line(st: &State, r: &Entry) -> String {
         "supersede" => format!(
             "{target} superseded by {} ({by}): {title}",
             r.refs.get(1).map(String::as_str).unwrap_or("?")
+        ),
+        "after" => format!(
+            "{target} {title} now comes after {} ({by}; why: {})",
+            r.refs.get(1..).unwrap_or_default().join(", "),
+            one_line(&r.why, 120)
+        ),
+        "touches" => format!(
+            "{target} {title} touches {} ({by})",
+            crate::state::string_list(r.fields.get("paths")).join(", ")
+        ),
+        "parallel" => format!(
+            "{target} {title} may run in parallel with {} ({by}; why: {})",
+            r.refs.get(1).map(String::as_str).unwrap_or("?"),
+            one_line(&r.why, 120)
         ),
         other => format!("{} of {target} by {by}", kind_label(other)),
     }
@@ -1424,7 +1441,14 @@ pub fn show(st: &State, id: &str) -> String {
         if e.kind == "scope"
             && matches!(
                 k.as_str(),
-                "type" | "covers" | "adds" | "removes" | "summary" | "summary_hash" | "said"
+                "type"
+                    | "covers"
+                    | "adds"
+                    | "removes"
+                    | "summary"
+                    | "summary_hash"
+                    | "said"
+                    | "after_records"
             )
         {
             continue;
@@ -1437,6 +1461,35 @@ pub fn show(st: &State, id: &str) -> String {
             other => other.to_string(),
         };
         l.push(format!("- **{k}:** {}", text.trim().replace('\n', "\n  ")));
+    }
+    if e.kind == "epic" {
+        // What `after` and `touches` records added to it (§4.3).
+        for r in crate::epics::records(st, id, "after") {
+            let deps: Vec<String> = string_list(r.fields.get("depends_on"))
+                .iter()
+                .map(|d| ref_label(st, d))
+                .collect();
+            l.push(format!(
+                "- **Also comes after** ({}): {}. Why: {}",
+                r.id,
+                deps.join("; "),
+                one_line(&r.why, 100_000)
+            ));
+        }
+        let paths = crate::epics::touches(st, id);
+        if !paths.is_empty() {
+            l.push(format!("- **Touches:** {}", paths.join(", ")));
+        }
+        for r in crate::epics::records(st, id, "touches") {
+            if !r.why.trim().is_empty() {
+                l.push(format!(
+                    "  - Why {} ({}): {}",
+                    string_list(r.fields.get("paths")).join(", "),
+                    r.id,
+                    one_line(&r.why, 100_000)
+                ));
+            }
+        }
     }
     for (label, text) in [("Why", &e.why), ("Body", &e.body)] {
         if !text.trim().is_empty() {

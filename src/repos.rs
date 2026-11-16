@@ -107,6 +107,29 @@ impl Repos {
         (here == name).then(|| h.root.clone())
     }
 
+    /// The roots of the project's repos that something other than a folder
+    /// name ties to it: the repos `projects.toml` maps for it on this machine,
+    /// and the repo the command runs in if its remote is one in `[[repos]]`.
+    pub fn tied(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self
+            .mapped
+            .values()
+            .filter(|p| p.is_dir())
+            .map(|p| git::root(p).unwrap_or_else(|| p.clone()))
+            .collect();
+        if let Some(h) = &self.here
+            && let Some(rem) = &h.remote
+            && self
+                .list
+                .iter()
+                .any(|r| r.remote.as_deref().map(remote_key).as_deref() == Some(rem))
+            && !out.contains(&h.root)
+        {
+            out.push(h.root.clone());
+        }
+        out
+    }
+
     /// The `[[repos]]` that are on this machine, with their root.
     pub fn available(&self) -> Vec<(Repo, PathBuf)> {
         self.list

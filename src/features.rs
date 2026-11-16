@@ -299,6 +299,11 @@ pub fn status_text(st: &State, id: &str) -> Option<String> {
     Some(s)
 }
 
+/// Why the feature exists (`feature add --why`), if it says.
+pub fn why(f: &Entry) -> Option<&str> {
+    Some(f.why.trim()).filter(|w| !w.is_empty())
+}
+
 /// The feature's acceptance: what the human would see when it works.
 pub fn acceptance(f: &Entry) -> Option<&str> {
     f.fields
@@ -335,6 +340,8 @@ pub struct FeatureArgs {
     pub title: String,
     pub epic: String,
     pub acceptance: Option<String>,
+    /// Why it exists (the entry's `why`).
+    pub why: String,
     pub goals: Vec<String>,
     pub body: String,
     pub tags: Vec<String>,
@@ -393,6 +400,7 @@ pub fn add(store: &mut Store, actor: &Actor, a: &FeatureArgs) -> Result<Written>
         let mut r = RawEntry::new("feature", a.title.trim());
         r.actor = Some(actor.clone());
         r.body = a.body.clone();
+        r.why = a.why.trim().to_string();
         r.tags = a.tags.clone();
         r.fields.insert("epic".into(), json!(epic_id));
         r.fields.insert("goals".into(), json!(goals));

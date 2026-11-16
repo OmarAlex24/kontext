@@ -83,6 +83,10 @@
     div.appendChild(line);
     div.title = e.id + " · " + e.name;
     if (e.reason) div.appendChild(el("p", "reason", e.reason));
+    (e.overlaps || []).forEach(function (o) {
+      var not = (o.parallel || []).length ? "; not covered by " + o.parallel.join(", ") : "";
+      div.appendChild(el("p", "reason", "⚠ same paths as " + o.title + " (" + o.paths.join(", ") + not + ")"));
+    });
     if (!e.closed && e.feature_list.length) {
       var ul = el("ul", "features");
       e.feature_list.forEach(function (f) { ul.appendChild(feature(f)); });

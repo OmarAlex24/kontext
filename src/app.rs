@@ -34,6 +34,23 @@ pub fn budget(project: &Project, role: &str) -> usize {
         .unwrap_or(DEFAULT_BUDGET)
 }
 
+/// The user's sentences (from `.pm/`, as `kontext ideas` finds it from the
+/// current folder) by the entry they point to. Empty when there is no
+/// `.pm/items.md` (a sandbox, a worker in another checkout) or it can't be
+/// read: the views that show them never fail for it.
+pub fn said_about(st: &State, project: &Project) -> crate::ideas::SaidAbout {
+    let load = || -> Option<crate::ideas::SaidAbout> {
+        let cwd = std::env::current_dir().ok()?;
+        let repos = Repos::load(project, &cwd).ok()?;
+        let own = crate::capture::Settings::of(project).worktrees;
+        let pm = crate::ideas::locate(&repos, own)?;
+        let people: Vec<String> = project.people.keys().cloned().collect();
+        let ideas = crate::ideas::load(st, &project.name, &people, &pm).ok()?;
+        Some(crate::ideas::said_about(st, &ideas))
+    };
+    load().unwrap_or_default()
+}
+
 /// A built view and the frontier it reached (to advance the cursor by exactly
 /// what was shown).
 pub struct Rendered<T> {
@@ -213,6 +230,7 @@ pub fn brief(
         max_chars: max_chars.unwrap_or_else(|| budget(project, "coordinator")),
         generated: now_text(),
         frontier: frontier.clone(),
+        said: said_about(&st, project),
     };
     Ok(Rendered {
         view: Brief {
@@ -259,6 +277,7 @@ pub fn next(
         claimed,
         actor: format!("{}:{}", actor.kind, actor.name),
         max_chars: max_chars.unwrap_or(DEFAULT_BUDGET),
+        said: said_about(&st, project),
     };
     Ok(Next {
         text: board::next(&st, &task, &opts),

@@ -1757,6 +1757,10 @@ const GOVERNANCE: &[&str] = &[
     "reject",
     "decision",
     "supersede",
+    // An epic's dependency and paths, added after it was written.
+    "after",
+    "touches",
+    "parallel",
 ];
 /// What a coordinator hands out, and an implementer or tester may not.
 const COORDINATION: &[&str] = &["task", "assign"];
@@ -2708,6 +2712,30 @@ mod tests {
     use super::*;
     use crate::model::Actor;
 
+    /// The binary refuses what the server refuses: the kinds lists of
+    /// `identity_problem` and `actorAllowed` (server/worker.js) are the same.
+    #[test]
+    fn kind_lists_match_the_worker() {
+        let js = crate::server::WORKER_JS;
+        for (name, list) in [
+            ("GOVERNANCE", GOVERNANCE),
+            ("COORDINATION", COORDINATION),
+            ("SCOUT_KINDS", SCOUT_KINDS),
+        ] {
+            let start = js
+                .find(&format!("const {name} = ["))
+                .unwrap_or_else(|| panic!("{name} not in worker.js"));
+            let rest = &js[start..];
+            let line = &rest[rest.find('[').unwrap() + 1..rest.find(']').unwrap()];
+            let kinds: Vec<&str> = line
+                .split(',')
+                .map(|k| k.trim().trim_matches('"'))
+                .filter(|k| !k.is_empty())
+                .collect();
+            assert_eq!(kinds, list, "{name}");
+        }
+    }
+
     /// A token with these claims and a made-up secret.
     fn forged(claims: Value) -> String {
         let b = crate::media::base64(claims.to_string().as_bytes())
@@ -2971,6 +2999,51 @@ mod tests {
             ),
             ("scout", agent("s-1", Some("scout")), "fact", false, true),
             ("scout", agent("s-1", Some("scout")), "done", false, false),
+            // An epic's dependency and paths: the pm (the plan checker
+            // writes as one) and an owner, never a coordinator.
+            (
+                "pm",
+                agent("plan-checker", Some("pm")),
+                "after",
+                false,
+                true,
+            ),
+            (
+                "pm",
+                agent("plan-checker", Some("pm")),
+                "touches",
+                false,
+                true,
+            ),
+            ("owner", Actor::human("omar"), "after", false, true),
+            (
+                "pm",
+                agent("plan-checker", Some("pm")),
+                "parallel",
+                false,
+                true,
+            ),
+            (
+                "coordinator",
+                agent("epic:payments", Some("coordinator")),
+                "parallel",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("epic:payments", Some("coordinator")),
+                "after",
+                false,
+                false,
+            ),
+            (
+                "coordinator",
+                agent("epic:payments", Some("coordinator")),
+                "touches",
+                false,
+                false,
+            ),
         ];
         for (role, actor, kind, approved, allowed) in cases {
             let t = token(Some(role), &["pay-lead", "epic:payments"]);

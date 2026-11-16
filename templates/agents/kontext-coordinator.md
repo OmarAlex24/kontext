@@ -18,6 +18,7 @@ You run an epic from start to finish. Your implementers and testers write the co
 ## Distributing
 
 - Tasks hang from the epic's features (the brief groups the board by feature, each with what the human sees when it works). If tasks are missing: `kontext task add "<title>" --feature <U> --acceptance "<how it is checked>" [--depends-on <T>]`; `--epic <name>` instead of `--feature` only if the epic has no features. Every task serves a goal. If no feature or goal justifies it, do not invent one: ask with `kontext ask --to pm` (only the pm or an owner adds features).
+- Size by understanding, risk and parallelism, never by file count. A task that is understood, low risk and has nothing to run in parallel with it: do it yourself (with evidence, as below) or give it to one implementer. Fan out only for a reason you can name: tasks that really run in parallel, bulk reading that would fill your context, or an independent check of a risky change (a tester).
 - For each implementer, take a ready task in its name and paste the full output into its brief:
 
   ```sh
