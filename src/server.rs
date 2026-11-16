@@ -144,6 +144,13 @@ pub struct DeployArgs {
     pub no_check: bool,
     /// Replace a Worker with this name that kontext did not deploy.
     pub replace: bool,
+    /// Set a new admin secret on a kontext Worker that this machine has no
+    /// record of (deployed from another machine): every other machine's
+    /// admin secret for it stops working.
+    pub replace_admin_secret: bool,
+    /// The command a needs-human result tells the human to run again
+    /// (default: this binary's `server deploy`); `kontext setup` passes its own.
+    pub command: Option<String>,
 }
 
 /// What it did.
@@ -274,31 +281,66 @@ impl std::fmt::Display for CfError {
 
 impl std::error::Error for CfError {}
 
-/// `$CLOUDFLARE_API_TOKEN`, or one line from stdin (without echo on a terminal).
+/// `$CLOUDFLARE_API_TOKEN`; on a terminal with a human at it, typed without
+/// echo (waited for at most [`crate::human::prompt_wait`]); otherwise a line
+/// piped on stdin, waited for at most [`crate::human::STDIN_WAIT`]. With none
+/// of them it does not wait: it says what the human has to do
+/// ([`crate::human::NeedsHuman`], exit 4). When the environment says an agent
+/// or CI runs it ([`crate::human::no_prompt`]), a terminal is not taken as a
+/// human: no prompt.
 fn cloudflare_token() -> Result<String> {
     if let Ok(t) = std::env::var("CLOUDFLARE_API_TOKEN")
         && !t.trim().is_empty()
     {
         return Ok(t.trim().to_string());
     }
-    let tty = std::io::stdin().is_terminal();
-    if tty {
-        eprint!("Cloudflare API token (Workers Scripts: Edit): ");
-        let _ = std::io::stderr().flush();
+    let needs = || anyhow::Error::from(crate::human::NeedsHuman::cloudflare_token(None));
+    if !std::io::stdin().is_terminal() {
+        return crate::human::piped_line(crate::human::STDIN_WAIT).ok_or_else(needs);
+    }
+    if crate::human::no_prompt() {
+        return Err(needs());
+    }
+    eprintln!(
+        "Create a token with the permission it needs (already filled in) at\n  {}\n\
+         and paste it here. It is used once and not stored.",
+        crate::human::cloudflare_token_url()
+    );
+    match read_tty_line("Cloudflare API token (Workers Scripts: Edit): ", true)? {
+        Some(t) if !t.is_empty() => Ok(t),
+        Some(_) => bail!("no Cloudflare API token: set CLOUDFLARE_API_TOKEN or type it on stdin"),
+        None => Err(needs()),
+    }
+}
+
+/// One line typed on the terminal after `prompt` (on stderr), without echo if
+/// `secret`. `None` if nobody typed one within [`crate::human::prompt_wait`].
+fn read_tty_line(prompt: &str, secret: bool) -> Result<Option<String>> {
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    if secret {
         stty(&["-echo"]);
     }
+    let wait = crate::human::prompt_wait();
     let mut line = String::new();
-    let read = std::io::stdin().lock().read_line(&mut line);
-    if tty {
+    let read = if crate::human::stdin_ready(wait) {
+        std::io::stdin().lock().read_line(&mut line).map(Some)
+    } else {
+        Ok(None)
+    };
+    if secret {
         stty(&["echo"]);
         eprintln!();
     }
-    read.context("could not read the Cloudflare API token from stdin")?;
-    let t = line.trim().to_string();
-    if t.is_empty() {
-        bail!("no Cloudflare API token: set CLOUDFLARE_API_TOKEN or type it on stdin");
+    if read.as_ref().is_ok_and(Option::is_none) {
+        eprintln!(
+            "Nothing was typed in {} s: kontext stops here instead of waiting.",
+            wait.as_secs()
+        );
     }
-    Ok(t)
+    Ok(read
+        .context("could not read from the terminal")?
+        .map(|_| line.trim().to_string()))
 }
 
 fn stty(args: &[&str]) {
@@ -472,10 +514,45 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
                 .unwrap_or(want)
                 .to_string()
         }
-        (None, None) => bail!(
-            "account {account} has no workers.dev subdomain yet. Pick one (it is public: \
-             <name>.workers.dev) and run again with --subdomain <name>. Nothing was changed"
-        ),
+        (None, None) => {
+            // On a terminal with a human at it, the human picks it here, in
+            // the same run; otherwise the command says how (exit 4) and
+            // changes nothing.
+            let picked = if std::io::stdin().is_terminal() && !crate::human::no_prompt() {
+                eprintln!(
+                    "Account {account} has no workers.dev subdomain yet. Pick one: it is public, and \
+                     the server's URL will be https://{}.<name>.workers.dev",
+                    args.name
+                );
+                read_tty_line("workers.dev subdomain: ", false)?
+            } else {
+                None
+            };
+            let Some(picked) = picked.filter(|p| !p.is_empty()) else {
+                return Err(crate::human::NeedsHuman::workers_subdomain(
+                    &account,
+                    &args.name,
+                    &args.command.clone().unwrap_or_else(|| {
+                        format!("{} server deploy", crate::human::self_command())
+                    }),
+                    None,
+                )
+                .into());
+            };
+            let v = cf.call(
+                "PUT",
+                &sub_path,
+                Some((
+                    "application/json",
+                    json!({ "subdomain": picked }).to_string().as_bytes(),
+                )),
+            )?;
+            subdomain_created = true;
+            v.get("subdomain")
+                .and_then(Value::as_str)
+                .unwrap_or(&picked)
+                .to_string()
+        }
     };
 
     // 3. Is the Worker there, and with which migration?
@@ -523,11 +600,31 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
     // before uploading so a failure halfway never loses it.
     let mut servers = Servers::load()?;
     let url = format!("https://{}.{subdomain}.workers.dev", args.name);
+    let ours = existing.as_ref().is_some_and(|s| {
+        s.get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|t| t.iter().any(|x| x.as_str() == Some(SCRIPT_TAG)))
+    });
     let (secret, secret_new) = match servers
         .by_script(&account, &args.name)
         .or_else(|| servers.by_url(&url))
     {
         Some(s) => (s.admin_secret.clone(), false),
+        // A kontext server deployed from another machine: a new secret here
+        // would replace the one every other machine has.
+        None if ours && !args.replace_admin_secret => {
+            return Err(crate::store::Refused(format!(
+                "account {account} already has the kontext server {url}, deployed from another machine: \
+                 this machine has no record of its admin secret, and deploying from here would set a new \
+                 one, so the admin secret on every other machine (their `kontext setup`, `init --server` \
+                 and `server connect`) would stop working. Nothing was changed. To work on a project that \
+                 is on that server, run `kontext invite` on a machine that has it and `kontext join \
+                 <line>` here; to update the server, run `kontext server deploy` on the machine that \
+                 deployed it. Only if no machine has its admin secret any more, run again with \
+                 --replace-admin-secret (every other machine's admin secret for it stops working)"
+            ))
+            .into());
+        }
         None => (new_secret()?, true),
     };
     servers.upsert(ServerEntry {
@@ -569,7 +666,9 @@ pub fn deploy(args: &DeployArgs) -> Result<Deployed> {
         )),
     )?;
 
-    let reachable = if args.no_check {
+    // With a fake Cloudflare API (the tests), the URL is not a real one.
+    let fake_api = std::env::var("KONTEXT_CF_API").is_ok_and(|s| !s.trim().is_empty());
+    let reachable = if args.no_check || fake_api {
         None
     } else {
         Some(wait_reachable(&url))

@@ -71,7 +71,8 @@ impl Link {
         let Some(url) = machine.server_for(project) else {
             return Ok(Link::None);
         };
-        Ok(match config::token_for(project)? {
+        // Only a token that may go to this server (issued by it).
+        Ok(match config::token_for_server(project, &url, Some(&url))? {
             Some(token) => Link::Ready(Remote { url, token }),
             None => Link::NoToken(url),
         })
@@ -146,18 +147,68 @@ impl Conn {
         self.send(method, path, Some("application/octet-stream"), Some(body))
     }
 
-    /// A JSON answer that must be 2xx.
+    /// A JSON answer that must be 2xx; otherwise a [`ServerAnswered`].
     pub fn ok(r: Reply, what: &str) -> Result<Value> {
-        let v = r.json().with_context(|| what.to_string())?;
         if !r.ok() {
-            bail!(
-                "{what}: the server answered {}: {}",
-                r.status,
-                v.get("message").and_then(Value::as_str).unwrap_or("")
-            );
+            return Err(ServerAnswered::of(&r, what).into());
         }
-        Ok(v)
+        r.json().with_context(|| what.to_string())
     }
+}
+
+/// The server answered with an error status. A 5xx is the server failing,
+/// which [`offline`] counts as not answering.
+#[derive(Debug)]
+pub struct ServerAnswered {
+    pub what: String,
+    pub status: u16,
+    /// The `error` code of the answer (`forbidden`, `no_project`, …), if any.
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl ServerAnswered {
+    pub fn of(r: &Reply, what: &str) -> ServerAnswered {
+        let v = r.json().ok();
+        let text = |k: &str| {
+            v.as_ref()
+                .and_then(|v| v.get(k))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        ServerAnswered {
+            what: what.to_string(),
+            status: r.status,
+            code: text("error"),
+            message: text("message").unwrap_or_else(|| {
+                let t = r.text();
+                t.chars().take(200).collect::<String>().trim().to_string()
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for ServerAnswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: the server answered {}: {}",
+            self.what, self.status, self.message
+        )
+    }
+}
+
+impl std::error::Error for ServerAnswered {}
+
+/// The server is not there to do the job: no answer in time (the network,
+/// the server down, a timeout), or an answer that says it failed (5xx).
+/// What only needs the server waits; nothing local is held up by it.
+pub(crate) fn offline(e: &anyhow::Error) -> bool {
+    unreachable(e)
+        || e.chain().any(|c| {
+            c.downcast_ref::<ServerAnswered>()
+                .is_some_and(|s| s.status >= 500)
+        })
 }
 
 /// The server does not take the token (unknown, revoked or expired).
@@ -1883,6 +1934,10 @@ pub struct Status {
     pub unpushed: Option<u64>,
     pub refused: Vec<Problem>,
     pub forks: Vec<Problem>,
+    /// A token is saved for the project but was issued by another server,
+    /// so it is not sent to this one: why, and what to do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_elsewhere: Option<String>,
 }
 
 pub fn status(home: &Path, link: &Link) -> Option<Status> {
@@ -1892,6 +1947,11 @@ pub fn status(home: &Path, link: &Link) -> Option<Status> {
         Link::Ready(r) => (r.url.clone(), Some(r)),
     };
     let st = State::load(home, &url);
+    let token_elsewhere = remote
+        .is_none()
+        .then(|| project_for_home(home))
+        .flatten()
+        .and_then(|(_, name)| config::token_elsewhere(&name, &url));
     let unpushed = remote.map(|r| {
         let w = &r.token.writer;
         let local = read_tail(&home.join("ledger").join(format!("{w}.jsonl")))
@@ -1910,6 +1970,7 @@ pub fn status(home: &Path, link: &Link) -> Option<Status> {
         unpushed,
         refused: st.refused,
         forks: st.forks,
+        token_elsewhere,
     })
 }
 
@@ -1918,8 +1979,9 @@ impl Status {
         let mut l = vec![format!(
             "Server: {}{}",
             self.url,
-            match (&self.project, &self.writer) {
-                (Some(p), Some(w)) => format!(" (project {p}, token for writer {w})"),
+            match (&self.project, &self.writer, &self.token_elsewhere) {
+                (Some(p), Some(w), _) => format!(" (project {p}, token for writer {w})"),
+                (_, _, Some(why)) => format!(" (no token for it: {why})"),
                 _ => " (no token: ask an owner for one and save it in the kontext config folder, \
                        tokens/<project>.token, mode 0600)"
                     .into(),
@@ -1985,6 +2047,80 @@ pub fn create_project(
     Ok(Some(Token::parse(raw)?))
 }
 
+/// The project on the server is this machine's own create whose answer
+/// never came back (the request went through, the reply was lost): no
+/// lines, no config, and no token but the owner tokens the admin secret made
+/// for `writer`. Then those tokens, which nobody holds, are revoked and a new
+/// owner token for `writer` is made with the admin secret. `Ok(None)` if the
+/// project there is anything else (another project with the same name).
+pub fn take_back_lost_create(
+    url: &str,
+    admin: &str,
+    project: &str,
+    person: &str,
+    writer: &str,
+) -> Result<Option<Token>> {
+    let conn = Conn::new(url, project, admin, Duration::from_secs(10));
+    let frontier = Conn::ok(conn.get("frontier")?, "read the project on the server")?;
+    let empty = |k: &str| {
+        frontier
+            .get(k)
+            .is_none_or(|v| v.as_object().is_some_and(|o| o.is_empty()))
+    };
+    if !empty("tails") || !empty("config") {
+        return Ok(None);
+    }
+    let list = Conn::ok(conn.get("tokens")?, "list the project's tokens")?;
+    let now = now_ms();
+    let active: Vec<&Value> = list
+        .get("tokens")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter(|t| t.get("revoked").is_none_or(Value::is_null))
+                .filter(|t| {
+                    t.get("expires")
+                        .and_then(Value::as_i64)
+                        .is_none_or(|x| x > now)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ours = |t: &Value| {
+        t.get("writer").and_then(Value::as_str) == Some(writer)
+            && t.get("created_by").and_then(Value::as_str) == Some("admin")
+            && t.get("role").and_then(Value::as_str) == Some("owner")
+    };
+    if !active.iter().all(|t| ours(t)) {
+        return Ok(None);
+    }
+    for t in &active {
+        if let Some(id) = t.get("id").and_then(Value::as_str) {
+            Conn::ok(
+                conn.json("POST", &format!("tokens/{id}/revoke"), &json!({}))?,
+                "revoke the token whose answer was lost",
+            )?;
+        }
+    }
+    let v = Conn::ok(
+        conn.json(
+            "POST",
+            "tokens",
+            &json!({ "person": person, "role": "owner", "writer": writer }),
+        )?,
+        "make this machine's owner token",
+    )?;
+    let raw = v
+        .get("token")
+        .and_then(Value::as_str)
+        .context("the server gave no token")?;
+    let t = Token::parse(raw)?;
+    if t.project != project || t.writer != writer {
+        bail!("the server sent a token for another project or writer");
+    }
+    Ok(Some(t))
+}
+
 /// The admin secret for `url`, or an error that says where to get it.
 pub fn require_admin(url: &str) -> Result<String> {
     crate::server::admin_secret(url)?.with_context(|| {
@@ -2018,7 +2154,7 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
     let token = match created {
         // Made once by the server: saved before anything else can fail.
         Some(t) => {
-            t.save(name)?;
+            t.save(name, &url)?;
             t
         }
         None => {
@@ -2034,7 +2170,8 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
                 );
             }
             let given = env_token(name)?;
-            let saved = config::token_for(name)?.filter(|t| t.project == name);
+            let saved = config::token_for_server(name, &url, configured.as_deref())?
+                .filter(|t| t.project == name);
             let Some(t) = given.clone().or(saved) else {
                 bail!(
                     "{}this machine has no token for {name} on {url}. Ask the project's owner for one \
@@ -2067,7 +2204,7 @@ pub fn connect(name: &str, home: &Path, writer: &str, url: &str) -> Result<Repor
                 };
                 let who = Conn::of(&remote, Duration::from_secs(30)).get("whoami")?;
                 Conn::ok(who, "check the token")?;
-                t.save(name)?;
+                t.save(name, &url)?;
             }
             t
         }
@@ -2101,6 +2238,13 @@ pub struct CloneArgs {
     /// which the network never holds up. What does not fit comes with the
     /// next commands.
     pub quick: bool,
+    /// The token to use instead of `$KONTEXT_TOKEN` (`kontext join`, which
+    /// got it from the server and keeps it in this process).
+    pub token: Option<Token>,
+    /// When to be done talking to the server, in all (`kontext join`'s
+    /// limit): every request ends by then; what does not fit comes with the
+    /// next commands.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// `kontext clone --server <url> <project>`: brings a project down from its
@@ -2108,13 +2252,18 @@ pub struct CloneArgs {
 /// token (0600). This copy writes as the token's writer.
 pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
     let url = crate::server::normalize_url(&a.url);
-    let raw = std::env::var("KONTEXT_TOKEN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .context(
-            "set KONTEXT_TOKEN to a token for the project (the owner makes one with `kontext token create`)",
-        )?;
-    let token = Token::parse(&raw).context("$KONTEXT_TOKEN")?;
+    let token = match a.token.clone() {
+        Some(t) => t,
+        None => {
+            let raw = std::env::var("KONTEXT_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .context(
+                    "set KONTEXT_TOKEN to a token for the project (the owner makes one with `kontext token create`)",
+                )?;
+            Token::parse(&raw).context("$KONTEXT_TOKEN")?
+        }
+    };
     if !crate::cli::valid_name(&a.project) {
         bail!("invalid project name {:?}", a.project);
     }
@@ -2152,11 +2301,20 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
         url: url.clone(),
         token,
     };
-    let opts = if a.quick {
+    let mut opts = if a.quick {
         Options::auto()
     } else {
         Options::full(false)
     };
+    let left = || {
+        a.deadline.map(|d| {
+            d.saturating_duration_since(std::time::Instant::now())
+                .max(Duration::from_millis(200))
+        })
+    };
+    if let Some(left) = left() {
+        opts.timeout = opts.timeout.min(left);
+    }
     let conn = Conn::of(&remote, opts.timeout);
     // The claims are read without the secret: the server confirms them
     // before anything is written.
@@ -2206,7 +2364,12 @@ pub fn clone(a: CloneArgs) -> Result<(crate::sync::Cloned, Report)> {
     setup().map_err(undo)?;
     Machine::register(&name, &home).map_err(undo)?;
     Machine::set_server(&name, Some(&url))?;
-    remote.token.save(&name)?;
+    remote.token.save(&name, &url)?;
+    if let Some(left) = left() {
+        // The last request starts in time to end by the deadline.
+        opts.timeout = opts.timeout.min(left);
+        opts.budget = left.saturating_sub(opts.timeout);
+    }
     let report = sync(&home, &remote, &opts)?;
     let writer = remote.token.writer.clone();
     let mut warnings = Vec::new();
@@ -2297,9 +2460,12 @@ pub fn mint_writer(person: &str, role: &str, epic: Option<&str>) -> Result<Strin
 fn owner_conn(project: &str) -> Result<(Remote, Conn)> {
     let remote = match Link::of(project)? {
         Link::Ready(r) => r,
-        Link::NoToken(url) => bail!(
-            "project {project} has server {url} but no token on this machine (set KONTEXT_TOKEN)"
-        ),
+        Link::NoToken(url) => match config::token_elsewhere(project, &url) {
+            Some(why) => bail!("project {project} has server {url}, and {why}"),
+            None => bail!(
+                "project {project} has server {url} but no token on this machine (set KONTEXT_TOKEN)"
+            ),
+        },
         Link::None => bail!(
             "project {project} has no kontext server (`kontext server connect <url>` attaches one)"
         ),
@@ -2310,6 +2476,68 @@ fn owner_conn(project: &str) -> Result<(Remote, Conn)> {
 
 /// Makes a token on the project's server, with this machine's owner token.
 pub fn token_create(project: &str, home: &Path, a: &TokenArgs) -> Result<Minted> {
+    let (remote, conn, body) = token_body(project, home, a)?;
+    let role = body["role"].as_str().unwrap_or("").to_string();
+    let person = body["person"].as_str().unwrap_or("").to_string();
+    let writer = body["writer"].as_str().unwrap_or("").to_string();
+    let epic = body.get("epic").and_then(Value::as_str).map(str::to_string);
+    let v = Conn::ok(conn.json("POST", "tokens", &body)?, "token create")?;
+    let token = v
+        .get("token")
+        .and_then(Value::as_str)
+        .context("the server sent no token")?
+        .to_string();
+    let actors: Vec<String> = v
+        .get("actors")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut env = vec![
+        format!("KONTEXT_SERVER={}", remote.url),
+        format!("KONTEXT_PROJECT={}", remote.token.project),
+        format!("KONTEXT_TOKEN={token}"),
+    ];
+    match role.as_str() {
+        "owner" => env.push(format!("KONTEXT_ACTOR=human:{person}")),
+        "pm" => env.push("KONTEXT_ACTOR=agent:pm".into()),
+        "coordinator" if !actors.is_empty() => {
+            env.push(format!("KONTEXT_ACTOR=agent:{}", actors[0]))
+        }
+        _ => {}
+    }
+    if role != "owner" {
+        env.push(format!("KONTEXT_ROLE={role}"));
+    }
+    Ok(Minted {
+        id: v
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        token,
+        project: remote.token.project.clone(),
+        server: remote.url.clone(),
+        person,
+        role,
+        epic,
+        actors,
+        writer,
+        expires: v.get("expires").and_then(Value::as_i64),
+        env,
+    })
+}
+
+/// The token `token create` (or `invite`) asks the server for: its role,
+/// person, epic and the names a coordinator writes as, writer and lifetime.
+pub(crate) fn token_body(
+    project: &str,
+    home: &Path,
+    a: &TokenArgs,
+) -> Result<(Remote, Conn, Value)> {
     let role = a.role.trim().to_lowercase();
     if !ROLES.contains(&role.as_str()) {
         bail!("--role is one of {}", ROLES.join(", "));
@@ -2368,54 +2596,7 @@ pub fn token_create(project: &str, home: &Path, a: &TokenArgs) -> Result<Minted>
     if let Some(t) = ttl_ms {
         body["ttl_ms"] = json!(t);
     }
-    let v = Conn::ok(conn.json("POST", "tokens", &body)?, "token create")?;
-    let token = v
-        .get("token")
-        .and_then(Value::as_str)
-        .context("the server sent no token")?
-        .to_string();
-    let actors: Vec<String> = v
-        .get("actors")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut env = vec![
-        format!("KONTEXT_SERVER={}", remote.url),
-        format!("KONTEXT_PROJECT={}", remote.token.project),
-        format!("KONTEXT_TOKEN={token}"),
-    ];
-    match role.as_str() {
-        "owner" => env.push(format!("KONTEXT_ACTOR=human:{person}")),
-        "pm" => env.push("KONTEXT_ACTOR=agent:pm".into()),
-        "coordinator" if !actors.is_empty() => {
-            env.push(format!("KONTEXT_ACTOR=agent:{}", actors[0]))
-        }
-        _ => {}
-    }
-    if role != "owner" {
-        env.push(format!("KONTEXT_ROLE={role}"));
-    }
-    Ok(Minted {
-        id: v
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        token,
-        project: remote.token.project.clone(),
-        server: remote.url.clone(),
-        person,
-        role,
-        epic,
-        actors,
-        writer,
-        expires: v.get("expires").and_then(Value::as_i64),
-        env,
-    })
+    Ok((remote, conn, body))
 }
 
 impl Minted {
@@ -2619,7 +2800,7 @@ fn set_backoff(config: &Path, project: &str, until: Option<i64>) {
 
 /// Did the clone fail because the server could not be reached (or answered
 /// too late)?
-fn unreachable(e: &anyhow::Error) -> bool {
+pub(crate) fn unreachable(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<crate::http::Unreachable>())
 }
 
@@ -2673,6 +2854,8 @@ fn bootstrap_project(url: &str, token: &Token) -> Result<String> {
         home: Some(home),
         name: None,
         quick: true,
+        token: None,
+        deadline: None,
     });
     // Done, or nothing was made: the marker goes. A home left half made
     // keeps it, so the next attempt may remove that home.

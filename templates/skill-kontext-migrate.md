@@ -10,6 +10,7 @@ You are going to leave the project with kontext working and with the memory that
 Rules for all the work:
 
 - **Never write to a destination without first saying which path it goes to.** Wherever there is a `--dry-run`, run it first and show what comes out.
+- **Never ask for a secret in the chat** (a Cloudflare token, a kontext token, the admin secret): the chat is captured and synced. When a command needs one, it stops with exit code 4 and says what the human does in their terminal; tell them that, word for word.
 - **Agents do not decide.** Whatever you find as a decision or a rule comes in as a proposal; the human signs it from `kontext inbox`.
 - **Do not delete or edit the source files** (CLAUDE.md, AGENTS.md, notes, the automatic memory, the `ctx.py` ledger). kontext reads them; it does not replace them.
 - Invoke `kontext` as a bare command, with the identity in the arguments (`kontext --actor agent:kontext-migrate …`), as the `kontext` skill says.
@@ -35,7 +36,7 @@ Report in a short list: what there is, where it is, and how much (for example "C
 curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh
 ```
 
-That installs the release binary for macOS (Apple silicon) or Linux (x86_64, arm64; static, so it runs in any container) in `~/.local/bin`, checked against the release's checksums; it needs no Rust. If it says there is no release yet, or the machine is something else, build it:
+That installs the release binary for macOS (Apple silicon) or Linux (x86_64, arm64; static, so it runs in any container) in a folder already on the `PATH` (else `~/.local/bin`), checked against the release's checksums; it needs no Rust. Its last line is the next command. If it calls kontext by its full path (it says why: the folder is not on the `PATH`, or an older kontext comes first), use that full path for every kontext command in this skill. If it says there is no release yet, or the machine is something else, build it:
 
 ```sh
 cargo install --git https://github.com/OmarAlex24/kontext --locked
@@ -53,9 +54,10 @@ Ask **only once, all together**, only what you cannot work out:
 
 - **The owner** (who signs the charter and the decisions): propose the first name from `git config user.name`, in lowercase.
 - **Where the kontext-home lives** (propose `~/kontext-home/<name>`) and **how it is shared with other people, machines or sandboxes**: not at all (it works alone), a **git remote** (`kontext sync` by hand), or a **kontext server** (every command syncs on its own, sandboxes set themselves up with a token, and live updates in `kontext ui`; see "The kontext server" below). Offer the server when there is more than one machine, or agents in sandboxes or cloud threads.
+- **Whether this project already uses kontext on another machine.** If it does, nothing in step 4a applies: ask the human for the line `kontext invite` prints on that machine, run exactly that line (`kontext join kxj1.…`) from the code repo, and go on with step 4b. Never run `kontext setup` for a project that exists elsewhere: without a committed `.kontext.toml` it would make a second, empty project here.
 - **The cutover day**, only if another system is in use (for example `ctx.py`): until that day it keeps being used and is imported again; from that day on, you only write to kontext.
 
-In the same message, lay out the plan: the commands you are going to run and **the paths each one writes to** (`~/.config/kontext/projects.toml`, the kontext-home, `.kontext.toml`, `.claude/settings.json` or, with `--local` (step 5), `.claude/settings.local.json`, `.claude/skills/`, `.claude/agents/`). Wait for the answer.
+In the same message, lay out the plan: the commands you are going to run and **the paths each one writes to** (`~/.config/kontext/projects.toml`, the kontext-home, `.kontext.toml`, `.claude/settings.json` or, with `--local` (step 5), `.claude/settings.local.json`, `.claude/skills/`, `.claude/agents/`; with a server, `servers.json` and `tokens/<project>.token` in the kontext config folder, mode 0600). `kontext setup` has no `--dry-run`: the plan is where you say these paths. Wait for the answer.
 
 Everything else you decide yourself with the default values, without asking: the project name (the name of the repo folder), the context mode (`inject` for everyone, which `kontext init` leaves), the distill on as `init` leaves it, `default_role = "pm"`, and the agent files from `kontext install`.
 
@@ -63,21 +65,24 @@ Everything else you decide yourself with the default values, without asking: the
 
 In this order.
 
-**a) Creating the project** (if there is none: `kontext status` fails). From the code repo:
+**a) Setting up the project** (if there is none: `kontext status` fails). From the root of the code repo:
 
 ```sh
-kontext init <name> --home <path> [--remote <url>]
+kontext setup --json [--home <path>]                 # with a kontext server (the default)
+kontext setup --json --no-server [--home <path>]     # alone, or with a git remote (below)
 ```
 
-With a kontext server instead of a git remote (it needs the server's admin secret, below):
+It creates the project (named after the repo folder, or `--project <name>`), installs the hooks, skills and agent files (step 5's `kontext install`; it takes `--role`, `--local` and `--worktree-role` too), and with a server puts the project on it with its history and syncs. Each step comes back as `done`, `already` or `needed`. It is safe to run again: it resumes and changes nothing that is right.
 
-```sh
-kontext init <name> --home <path> --server <url>
-```
+- **Exit 4, `needs_human`:** a step only the human can do (the first time on a Cloudflare account, the API token). Tell the human what `needs_human.say` says, word for word: they open the link, create the token, and paste it into the command it names, in **their** terminal. Do not ask for the token, and do not offer to run that command for them. When they say it is done, run `kontext setup --json` again. Meanwhile the project and the install are done: go on with b) and c). Never run `kontext server deploy` yourself: it is the human's command, in their terminal.
+- **Exit 4 with `needs_human.reason` `join_project`:** this repo's project was set up on another machine (its `.kontext.toml` is committed) and is not on this one. Nothing was made. Tell the human what `needs_human.say` says: on a machine that has the project, `kontext invite` prints a line `kontext join kxj1.…`; when they give it to you, run it here, from the code repo. Do not add `--new-project` unless the human says the project exists on no machine.
+- **Exit 0 with `offline: true`:** the server did not answer; the project and the install are done. Go on, and run `kontext setup --json` again later (every command syncs on its own once the project is on the server).
+- **Exit 2:** it says what to run instead. A project of that name that is already on the server comes in with `kontext join` (below), not with setup.
+- **A git remote** instead of a server: `kontext init <name> --home <path> --remote <url>` first, then `kontext setup --no-server` to install.
 
-If the project already exists (`kontext status` works), `kontext server connect <url>` attaches it to the server and uploads everything, its history included; it changes nothing local, and running it again resumes.
+If the project already exists without a server (`kontext status` works), `kontext setup` attaches it to the server and uploads everything, its history included.
 
-`init` makes the first name from `git config user.name` the owner. If the owner the human named is someone else, change the `owners = [...]` line in `<home>/project.toml` (say so first: it is a write).
+`setup` and `init` make the first name from `git config user.name` the owner. If the owner the human named is someone else, change the `owners = [...]` line in `<home>/project.toml` (say so first: it is a write).
 
 **b) The `ctx.py` ledger** (if there is one). It has no `--dry-run`, but it can be repeated without duplicating anything:
 
@@ -104,7 +109,7 @@ The human signs them afterwards from `kontext inbox` (`kontext inbox sign <n>`);
 
 ## 5. Configuring
 
-In each code repo of the project:
+`kontext setup` already did this in the repo it ran in. In each other code repo of the project, `kontext setup --project <name>` (or by hand):
 
 ```sh
 kontext install --role pm --dry-run
@@ -126,9 +131,9 @@ The capture hook (it writes what the human types to the PM into `.pm/dumps/`) st
 
 Only if the human chose it. Each owner runs their own: a Cloudflare Worker on their account (the free plan is enough).
 
-1. **Deploying** (once per Cloudflare account): the human makes an API token in the Cloudflare dashboard with the account permission **Workers Scripts: Edit**, and runs `kontext server deploy` with it in `CLOUDFLARE_API_TOKEN` (and `CLOUDFLARE_ACCOUNT_ID` if the token sees more than one account; `--subdomain <name>` the first time if the account has no workers.dev subdomain). It prints the server's URL. If the account already has a Worker with that name that kontext did not deploy, it refuses (exit 2): use another `--name`, and use `--replace` only if the human says that Worker may be overwritten. Do not ask for the Cloudflare token in the chat: the human runs that command, or sets the variable where you run.
-2. The **admin secret** stays in `servers.json` in the kontext config folder (mode 0600) of the machine that deployed; `init --server` and `server connect` use it from there. On another machine, `KONTEXT_ADMIN_SECRET`.
-3. **Other people and machines:** the owner makes each one a token (`kontext token create --role owner --person <name>`; it is shown once) and they run `KONTEXT_TOKEN=<token> kontext clone --server <url> <project>`. A copy that already has the project without the server joins with `KONTEXT_TOKEN=<token> kontext server connect <url>` (its own lines go up).
+1. **Deploying** (once per Cloudflare account): `kontext setup` does it. Without `CLOUDFLARE_API_TOKEN` it stops with exit 4 and the link that creates the token with the permission **Workers Scripts: Edit** already filled in; the human runs `kontext server deploy` in their terminal and pastes it there (it is used once and not stored). If the account has no workers.dev subdomain, that command asks the human for one in their terminal; when `setup` itself stops with exit 4 for it, ask the human for the name (it is public) and run the command `needs_human.run` names with it. If the account already has a Worker with that name that kontext did not deploy, it refuses (exit 2): use another `--name`, and use `--replace` only if the human says that Worker may be overwritten. If it is a kontext Worker deployed from another machine, it refuses too (exit 2): this machine gets the project with `kontext invite` there and `kontext join` here; `--replace-admin-secret` only if the human asks for it (the other machine's admin secret stops working).
+2. The **admin secret** stays in `servers.json` in the kontext config folder (mode 0600) of the machine that deployed; `setup`, `init --server` and `server connect` use it from there. Another project on the same machine is `kontext setup` in its repo, with no human step.
+3. **Other people and machines:** `kontext invite` (owner by default; `--role`, `--person` as in `token create`) prints a `kontext join kxj1.…` line, and the same with `install.sh` for a machine without kontext. It works once and for 10 minutes; it carries a code, not a token. Give the line to the human to run on the other machine, in its code repo; there it gets its own token and installs the hooks. A used or expired line is refused: invite again. Only an owner invites. If it exits with 4 because the server needs an update, tell the human what `needs_human.say` says: they run `kontext server deploy` in a terminal on the machine that deployed it (it keeps the projects); then invite again.
 4. **Sandboxes and cloud threads:** `kontext token create --role coordinator --epic <name>` (or `implementer`, `tester`, `scout`; `--ttl 8h` for a sandbox that ends) prints `KONTEXT_SERVER`, `KONTEXT_PROJECT`, `KONTEXT_TOKEN`, `KONTEXT_ACTOR` and `KONTEXT_ROLE`; set them in the sandbox's environment, and its first kontext command sets the project up there. Each token writes only what its role may (DESIGN §14.2).
 
 **Never put a token, the admin secret, the server URL or the kontext-home in the code repo**, least of all a public one: tokens live in the config folder (0600) or in the environment. `kontext token list` and `kontext token revoke <id>` manage them.
@@ -167,5 +172,5 @@ Your turn to sign: `kontext inbox` (<n> pending). Each proposal says where it ca
 Left out:
 - <what> — <why>
 
-To continue: <cutover day and what to do that day; other repos where to run kontext install>.
+To continue: <cutover day and what to do that day; other repos where to run kontext setup; for another machine, `kontext invite` here>.
 ```

@@ -291,6 +291,7 @@ fn deploy(config: &Path, api: &str, token: &str, args: &[&str]) -> Output {
         .env("CLOUDFLARE_API_TOKEN", token)
         .env_remove("CLOUDFLARE_ACCOUNT_ID")
         .env_remove("KONTEXT_ADMIN_SECRET")
+        .stdin(std::process::Stdio::null())
         .output()
         .unwrap()
 }
@@ -309,10 +310,11 @@ fn deploy_creates_then_updates_the_worker() {
     let config = dir.path().join("config");
     let (api, cf) = fake_cf();
 
-    // An account with no workers.dev subdomain: it says so and changes nothing.
+    // An account with no workers.dev subdomain: the human picks it (exit 4),
+    // and nothing changes.
     let o = deploy(&config, &api, TOKEN, &[]);
-    assert!(!o.status.success(), "{}", text(&o));
-    assert!(text(&o).contains("--subdomain"), "{}", text(&o));
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    assert!(text(&o).contains("--subdomain <name>"), "{}", text(&o));
     assert!(cf.lock().unwrap().scripts.is_empty());
     assert!(!config.join("servers.json").exists());
 
@@ -462,4 +464,348 @@ fn deploy_refuses_an_unrelated_worker_with_the_same_name() {
     );
     let o = deploy(&config, &api, TOKEN, &[]);
     assert!(o.status.success(), "{}", text(&o));
+}
+
+/// `server deploy` with no token, as an agent runs it.
+fn deploy_no_token(config: &Path, api: &str, args: &[&str]) -> Command {
+    let mut c = Command::new(BIN);
+    c.args(["server", "deploy", "--no-check"])
+        .args(args)
+        .env("KONTEXT_CONFIG_DIR", config)
+        .env("KONTEXT_CF_API", api)
+        .env_remove("CLOUDFLARE_API_TOKEN")
+        .env_remove("CLOUDFLARE_ACCOUNT_ID")
+        .env_remove("KONTEXT_ADMIN_SECRET");
+    c
+}
+
+/// Without a terminal and without a token, deploy never waits on a prompt: it
+/// exits with 4 and gives the pre-filled token link and the command the human
+/// runs; nothing is sent to Cloudflare.
+#[test]
+fn deploy_without_a_token_says_what_the_human_does() {
+    use std::process::Stdio;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let (api, cf) = fake_cf();
+
+    // stdin is /dev/null.
+    let o = deploy_no_token(&config, &api, &[])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let t = text(&o);
+    assert!(t.contains("Needs you:"), "{t}");
+    assert!(
+        t.contains(
+            "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=%2A&zoneId=all&name=kontext"
+        ),
+        "{t}"
+    );
+    assert!(t.contains("server deploy`"), "{t}");
+
+    // --json: the same as data, on stdout.
+    let o = deploy_no_token(&config, &api, &["--json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let n = &v["needs_human"];
+    assert_eq!(n["reason"], "cloudflare_token");
+    assert_eq!(n["exit_code"], 4);
+    assert!(n["open"].as_str().unwrap().contains("workers_scripts"));
+    assert!(n["run"].as_str().unwrap().ends_with(" server deploy"));
+    assert!(n["say"].as_str().unwrap().contains("not here"));
+
+    // An open pipe that never writes: it gives up after a few seconds.
+    let started = std::time::Instant::now();
+    let mut child = deploy_no_token(&config, &api, &["--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _keep_open = child.stdin.take();
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    assert!(
+        cf.lock().unwrap().log.is_empty(),
+        "{:?}",
+        cf.lock().unwrap().log
+    );
+    assert!(!config.join("servers.json").exists());
+
+    // A token piped on stdin still works, also when it comes a moment later.
+    cf.lock().unwrap().subdomain = Some("omar-kx".into());
+    let mut child = deploy_no_token(&config, &api, &[])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    writeln!(stdin, "{TOKEN}").unwrap();
+    let o = child.wait_with_output().unwrap();
+    drop(stdin);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("https://kontext.omar-kx.workers.dev"));
+    assert!(
+        !fs::read_to_string(config.join("servers.json"))
+            .unwrap()
+            .contains(TOKEN)
+    );
+}
+
+/// A child whose stdin is a fresh pseudo-terminal, as some agent harnesses
+/// run commands: "stdin is a terminal" with nobody typing. Returns the child
+/// and the terminal's other end (what is written there is typed).
+fn on_a_pty(mut c: Command) -> (std::process::Child, fs::File) {
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty fills the two descriptors; the others may be null.
+    let r = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(r, 0, "openpty");
+    // SAFETY: both were just opened and are owned here only.
+    let (master, slave) = unsafe { (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave)) };
+    let child = c
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (child, master)
+}
+
+fn no_agent_env(c: &mut Command) -> &mut Command {
+    c.env_remove("CI")
+        .env_remove("CLAUDECODE")
+        .env_remove("KONTEXT_NO_PROMPT")
+}
+
+/// On a terminal nobody types at, deploy gives up after the prompt's limit
+/// with exit 4; when the environment says an agent or CI runs it, it does not
+/// prompt at all; a human typing at the terminal still deploys.
+#[test]
+fn deploy_on_a_terminal_with_nobody_there_stops_with_exit_4() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let (api, cf) = fake_cf();
+
+    // Nobody types: the prompt waits KONTEXT_PROMPT_WAIT_MS (five minutes
+    // when it is not set), then exit 4 with the needs-human result.
+    let mut c = deploy_no_token(&config, &api, &["--json"]);
+    no_agent_env(&mut c).env("KONTEXT_PROMPT_WAIT_MS", "1500");
+    let started = Instant::now();
+    let (child, _master) = on_a_pty(c);
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    assert!(started.elapsed() < Duration::from_secs(15));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("Cloudflare API token"), "{err}");
+    assert!(err.contains("Nothing was typed"), "{err}");
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["needs_human"]["reason"], "cloudflare_token");
+
+    // An agent or CI: no prompt, at once.
+    for (k, v) in [
+        ("CLAUDECODE", "1"),
+        ("CI", "true"),
+        ("KONTEXT_NO_PROMPT", "1"),
+    ] {
+        let mut c = deploy_no_token(&config, &api, &["--json"]);
+        no_agent_env(&mut c).env(k, v);
+        let started = Instant::now();
+        let (child, _master) = on_a_pty(c);
+        let o = child.wait_with_output().unwrap();
+        assert_eq!(o.status.code(), Some(4), "{k}: {}", text(&o));
+        assert!(started.elapsed() < Duration::from_secs(10), "{k}");
+        assert!(
+            !String::from_utf8_lossy(&o.stderr).contains("Cloudflare API token ("),
+            "{k} prompted: {}",
+            text(&o)
+        );
+        let j: Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert_eq!(j["needs_human"]["exit_code"], 4, "{k}");
+    }
+    assert!(
+        cf.lock().unwrap().log.is_empty(),
+        "{:?}",
+        cf.lock().unwrap().log
+    );
+
+    // The token is given, the account has no subdomain, nobody picks one:
+    // exit 4 that names --subdomain, and nothing is uploaded.
+    let mut c = deploy_no_token(&config, &api, &["--json"]);
+    no_agent_env(&mut c)
+        .env("CLOUDFLARE_API_TOKEN", TOKEN)
+        .env("KONTEXT_PROMPT_WAIT_MS", "1500");
+    let (child, _master) = on_a_pty(c);
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["needs_human"]["reason"], "workers_subdomain");
+    assert!(
+        v["needs_human"]["run"]
+            .as_str()
+            .unwrap()
+            .ends_with("server deploy --subdomain <name>")
+    );
+    assert!(cf.lock().unwrap().scripts.is_empty());
+
+    // A human types the token and the subdomain: it deploys.
+    let mut c = deploy_no_token(&config, &api, &[]);
+    no_agent_env(&mut c).env("KONTEXT_PROMPT_WAIT_MS", "20000");
+    let (child, mut master) = on_a_pty(c);
+    std::thread::sleep(Duration::from_millis(300));
+    writeln!(master, "{TOKEN}").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    writeln!(master, "omar-pty").unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("https://kontext.omar-pty.workers.dev"),
+        "{}",
+        text(&o)
+    );
+    assert!(
+        !fs::read_to_string(config.join("servers.json"))
+            .unwrap()
+            .contains(TOKEN)
+    );
+}
+
+/// A second machine (no servers.json) deploying to an account that already
+/// has the kontext Worker is refused: a new admin secret would break every
+/// other machine's. `--replace-admin-secret` is the explicit way through.
+#[test]
+fn deploy_from_another_machine_keeps_the_admin_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (api, cf) = fake_cf();
+    cf.lock().unwrap().subdomain = Some("omar-kx".into());
+    let o = deploy(&a, &api, TOKEN, &[]);
+    assert!(o.status.success(), "{}", text(&o));
+    let secret = cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"].clone();
+
+    let o = deploy(&b, &api, TOKEN, &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    let t = text(&o);
+    assert!(t.contains("deployed from another machine"), "{t}");
+    assert!(t.contains("--replace-admin-secret"), "{t}");
+    assert!(t.contains("every other machine"), "{t}");
+    assert!(t.contains("kontext invite"), "{t}");
+    assert_eq!(
+        cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"],
+        secret
+    );
+    assert!(!b.join("servers.json").exists());
+    // The machine that deployed it still updates it, keeping the secret.
+    let o = deploy(&a, &api, TOKEN, &[]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"],
+        secret
+    );
+
+    let o = deploy(&b, &api, TOKEN, &["--replace-admin-secret"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_ne!(
+        cf.lock().unwrap().scripts["kontext"].secrets["ADMIN_SECRET"],
+        secret
+    );
+}
+
+/// `kontext setup` deploys with CLOUDFLARE_API_TOKEN set; an account with no
+/// workers.dev subdomain is exit 4 naming `kontext setup --subdomain <name>`,
+/// and that flag registers it.
+#[test]
+fn setup_deploys_with_its_subdomain_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let home = dir.path().join("home");
+    let repo = home.join("code/notes");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("projects.toml"), "writer = \"omar@a\"\n").unwrap();
+    let gitconfig = dir.path().join("gitconfig");
+    fs::write(
+        &gitconfig,
+        "[user]\n\tname = Omar\n\temail = o@example.com\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (api, cf) = fake_cf();
+    let setup = |args: &[&str]| {
+        Command::new(BIN)
+            .arg("setup")
+            .arg("--json")
+            .args(args)
+            .current_dir(&repo)
+            .env("HOME", &home)
+            .env("KONTEXT_CONFIG_DIR", &config)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("KONTEXT_CF_API", &api)
+            .env("CLOUDFLARE_API_TOKEN", TOKEN)
+            .env_remove("CLOUDFLARE_ACCOUNT_ID")
+            .env_remove("KONTEXT_ADMIN_SECRET")
+            .env_remove("KONTEXT_PROJECT")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let o = setup(&[]);
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let n = &v["needs_human"];
+    assert_eq!(n["reason"], "workers_subdomain", "{}", text(&o));
+    assert!(
+        n["run"]
+            .as_str()
+            .unwrap()
+            .ends_with(" setup --subdomain <name>"),
+        "{}",
+        text(&o)
+    );
+    assert!(cf.lock().unwrap().scripts.is_empty());
+
+    let o = setup(&["--subdomain", "omar-setup"]);
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let server = v["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step"] == "server")
+        .unwrap()
+        .clone();
+    assert_eq!(server["status"], "done", "{}", text(&o));
+    assert!(
+        server["detail"]
+            .as_str()
+            .unwrap()
+            .contains("https://kontext.omar-setup.workers.dev"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(cf.lock().unwrap().subdomain.as_deref(), Some("omar-setup"));
 }

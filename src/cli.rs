@@ -6,7 +6,8 @@
 //! never open the project (see their modules).
 //!
 //! Exit codes: 0 ok, 1 error, 2 refused (nothing was written because a rule
-//! isn't met), 3 stale context in `done`.
+//! isn't met), 3 stale context in `done`, 4 needs the human (a step only the
+//! human can do, such as a Cloudflare API token: [`crate::human`]).
 
 use std::fs;
 use std::io::{BufRead, Write};
@@ -766,7 +767,7 @@ pub enum Cmd {
         /// Shows what would change, without writing anything
         #[arg(long)]
         dry_run: bool,
-        /// Also replaces the agent files you changed by hand
+        /// Also replaces the skills and agent files you changed by hand
         #[arg(long)]
         force: bool,
         /// Only the skills (kontext, kontext-orchestrate, kontext-show, kontext-migrate and
@@ -791,6 +792,117 @@ pub enum Cmd {
         /// Sets worktree_role in .kontext.toml: the role of sessions in linked git worktrees that
         /// have no .kontext.toml of their own
         #[arg(long, value_name = "ROLE", conflicts_with = "skills_only")]
+        worktree_role: Option<String>,
+    },
+    /// Sets kontext up in this code repo, from nothing to installed and syncing, in one command
+    /// that is safe to run again (it resumes and changes nothing that is already right).
+    ///
+    /// Run it from the root of the code repo (a git repo, not a linked worktree). It: 1) finds or
+    /// creates the project (name: --project, else the repo's .kontext.toml, else the repo's folder
+    /// name; its memory goes in ~/kontext-home/<name>, or --home); 2) installs the hooks, skills and
+    /// agent files, as `kontext install` (--role, --force, --local and --worktree-role go to it); 3)
+    /// uses the kontext server this machine already deployed, or deploys one to the human's
+    /// Cloudflare account (with CLOUDFLARE_API_TOKEN set); 4) creates the project there with its
+    /// history and syncs.
+    ///
+    /// Each step prints as done, already or needed (--json: the same as data, with "steps",
+    /// "ok", "needs_human" and "next").
+    ///
+    /// Exit codes: 0 everything is in place; 4 a step needs the human: it never prompts, it prints
+    /// why, the link to open and the one command the human runs in a terminal (with --json, in
+    /// "needs_human"; "say" is what to tell the human, word for word). Tell the human exactly that,
+    /// never ask for the token in the chat, and run `kontext setup` again once they say it is done;
+    /// 2 refused (it says what to run instead); 1 error.
+    ///
+    /// A server that does not answer within a few seconds is not an error: the project and the
+    /// install are done, the server steps print as needed, "ok" is false and "offline" true, the
+    /// exit code is 0, and "next" says to run `kontext setup` again when the server answers.
+    ///
+    /// Another machine does not run setup for a project that already exists: on a machine that has
+    /// it, `kontext invite` prints a `kontext join …` line to run there. In a clone whose
+    /// .kontext.toml names a project this machine does not have, setup creates nothing and exits
+    /// with 4 saying that (`--new-project` creates it, only if it exists on no machine yet).
+    #[command(verbatim_doc_comment)]
+    Setup {
+        /// Where to create the project's kontext-home if it is new (default ~/kontext-home/<name>)
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// The kontext server to use, if this machine knows several (or deployed none and has its
+        /// admin secret in KONTEXT_ADMIN_SECRET)
+        #[arg(long, value_name = "URL", conflicts_with = "no_server")]
+        server: Option<String>,
+        /// Only the project and the install, without a server (git sync, as `kontext init`)
+        #[arg(long)]
+        no_server: bool,
+        /// When it deploys the server (CLOUDFLARE_API_TOKEN set) to an account with no
+        /// workers.dev subdomain yet: registers this one (it is public)
+        #[arg(long, value_name = "NAME", conflicts_with = "no_server")]
+        subdomain: Option<String>,
+        /// The repo's .kontext.toml names a project this machine does not have, and that project
+        /// exists on no other machine yet: create it here. (When it was set up on another machine,
+        /// it comes with `kontext invite` there and `kontext join <line>` here instead)
+        #[arg(long)]
+        new_project: bool,
+        /// As in `kontext install`: also replaces the agent files you changed by hand
+        #[arg(long)]
+        force: bool,
+        /// As in `kontext install`: the hooks go in .claude/settings.local.json
+        #[arg(long)]
+        local: bool,
+        /// As in `kontext install`: the role of sessions in linked git worktrees
+        #[arg(long, value_name = "ROLE")]
+        worktree_role: Option<String>,
+    },
+    /// Invites another machine (or person) to the project: prints a `kontext join …` line to run
+    /// there, which works once and for 10 minutes (--valid-for). It carries a one-time code, not
+    /// a token: the server keeps only the code's hash, and the joining machine gets its own token,
+    /// which never leaves it. Needs this machine's owner token and a server deployed with
+    /// invitations (an older one: it says to run `kontext server deploy`)
+    Invite {
+        /// owner (the default: your own other machine), pm, coordinator, implementer, tester or scout
+        #[arg(long, default_value = "owner")]
+        role: String,
+        /// The epic (id or name); a coordinator needs it, and writes as its coordinator
+        #[arg(long)]
+        epic: Option<String>,
+        /// Whose it is (default: this machine's human)
+        #[arg(long)]
+        person: Option<String>,
+        /// The token it gives stops working after this long (`8h`, `7d`); default: it does not
+        #[arg(long)]
+        ttl: Option<String>,
+        /// The writer the new machine writes as (default: a new one, as in `token create`)
+        #[arg(long)]
+        writer: Option<String>,
+        /// How long the line works (`10m` by default, a day at most)
+        #[arg(long, value_name = "DURATION")]
+        valid_for: Option<String>,
+    },
+    /// Joins a project with the line `kontext invite` printed on a machine that has it: trades its
+    /// one-time code for this machine's own token, brings the project as `clone --server` does
+    /// and, run inside a code repo, installs the hooks as `install` does. Running it again resumes
+    /// and does not spend the code twice. A used or expired line is refused (exit 2): ask for a new
+    /// one
+    Join {
+        /// The join string (`kxj1.…`)
+        join: String,
+        /// Where to put the kontext-home (default: ~/kontext-home/<project>)
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// Name to register it under (default: the project's)
+        #[arg(long)]
+        name: Option<String>,
+        /// Only the project: no install in the current repo
+        #[arg(long)]
+        no_install: bool,
+        /// As in `kontext install`: also replaces the agent files you changed by hand
+        #[arg(long)]
+        force: bool,
+        /// As in `kontext install`: the hooks go in .claude/settings.local.json
+        #[arg(long)]
+        local: bool,
+        /// As in `kontext install`: the role of sessions in linked git worktrees
+        #[arg(long, value_name = "ROLE")]
         worktree_role: Option<String>,
     },
     /// Checks this installation: the binary, PATH, config and project, kontext-home, hooks,
@@ -851,9 +963,17 @@ pub enum TokenCmd {
 #[derive(Subcommand, Debug)]
 pub enum ServerCmd {
     /// Uploads the kontext server (a Worker with one SQLite Durable Object per project) to your
-    /// Cloudflare account and prints its URL. Needs CLOUDFLARE_API_TOKEN (or the token on stdin)
-    /// with the account permission "Workers Scripts: Edit". Running it again updates the Worker
-    /// and keeps its admin secret (saved in servers.json in the kontext config folder, mode 0600)
+    /// Cloudflare account and prints its URL. Needs a Cloudflare API token with the permission
+    /// "Workers Scripts: Edit": CLOUDFLARE_API_TOKEN, typed when it asks on a terminal (it prints
+    /// a link that creates one with that permission filled in), or piped on stdin. Without a
+    /// terminal and with no token it does not wait: it exits with 4 and says what the human does
+    /// (with --json, {"needs_human": …}). It never prompts when CI, CLAUDECODE or
+    /// KONTEXT_NO_PROMPT=1 is set (an agent or CI runs it, even on a pseudo-terminal), and a
+    /// prompt nobody answers in 5 minutes ends the same way. An account with no workers.dev
+    /// subdomain is asked for one on a terminal, else exit 4 naming --subdomain. The token is
+    /// used once and not stored. Running it again
+    /// updates the Worker and keeps its admin secret (saved in servers.json in the kontext config
+    /// folder, mode 0600)
     Deploy {
         /// The Worker's name: https://<name>.<subdomain>.workers.dev
         #[arg(long, default_value = "kontext")]
@@ -864,6 +984,10 @@ pub enum ServerCmd {
         /// Registers this workers.dev subdomain for the account, if it has none yet
         #[arg(long)]
         subdomain: Option<String>,
+        /// Sets a new admin secret on a kontext Worker that this machine did not deploy (it has
+        /// no record of it): the admin secret every other machine has for it stops working
+        #[arg(long)]
+        replace_admin_secret: bool,
         /// Does not wait for the URL to answer
         #[arg(long)]
         no_check: bool,
@@ -903,9 +1027,18 @@ pub enum DebugCmd {
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
+    let json_out = cli.json;
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
+            if let Some(n) = e.downcast_ref::<crate::human::NeedsHuman>() {
+                if json_out {
+                    let _ = print_json(&n.json());
+                } else {
+                    eprint!("kontext: {}", n.text());
+                }
+                return ExitCode::from(crate::human::EXIT_CODE);
+            }
             if let Some(r) = e.downcast_ref::<Refused>() {
                 eprintln!("kontext: refused: {r}");
                 return ExitCode::from(2);
@@ -923,7 +1056,7 @@ pub fn main() -> ExitCode {
 /// `kontext install --skills-only [--global]`: only the skills, in the current
 /// repo or in your user's. It needs no project: it's how you get the
 /// `kontext-migrate` skill before creating one.
-fn install_skills(dry_run: bool, global: bool) -> Result<ExitCode> {
+fn install_skills(dry_run: bool, global: bool, force: bool) -> Result<ExitCode> {
     let dir = if global {
         match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
             Some(d) => PathBuf::from(d).join("skills"),
@@ -934,12 +1067,22 @@ fn install_skills(dry_run: bool, global: bool) -> Result<ExitCode> {
             .join(".claude")
             .join("skills")
     };
-    let plan = install::plan_skills(&dir)?;
-    if plan.is_noop() {
+    let plan = install::plan_skills(&dir, force)?;
+    for k in &plan.kept {
         println!(
-            "The skills are already up to date in {}; nothing to change.",
-            dir.display()
+            "Kept {}: it was changed by hand (it matches no kontext version). `kontext install --skills-only --force` replaces it.",
+            k.display()
         );
+    }
+    if plan.is_noop() {
+        if plan.kept.is_empty() {
+            println!(
+                "The skills are already up to date in {}; nothing to change.",
+                dir.display()
+            );
+        } else {
+            println!("Nothing else to change in {}.", dir.display());
+        }
         return Ok(ExitCode::SUCCESS);
     }
     for c in plan.changes.iter().filter(|c| c.changed()) {
@@ -1114,16 +1257,16 @@ fn capture_cmd(project: Option<&str>, json_out: bool, cmd: CaptureCmd) -> Result
 }
 
 /// The options of `kontext install` (besides `--skills-only`).
-struct InstallHow<'a> {
-    dry_run: bool,
-    force: bool,
-    link_only: bool,
-    local: bool,
-    worktree_role: Option<&'a str>,
+pub(crate) struct InstallHow<'a> {
+    pub dry_run: bool,
+    pub force: bool,
+    pub link_only: bool,
+    pub local: bool,
+    pub worktree_role: Option<&'a str>,
 }
 
 /// The path of this binary, quoted if needed (for the hooks).
-fn exe_quoted() -> Result<String> {
+pub(crate) fn exe_quoted() -> Result<String> {
     let exe = std::env::current_exe().context("could not find the path of kontext")?;
     let exe = fs::canonicalize(&exe).unwrap_or(exe);
     Ok(install::shell_quote(&exe.display().to_string()))
@@ -1131,7 +1274,7 @@ fn exe_quoted() -> Result<String> {
 
 /// For `kontext install`: if this binary is in a cargo build directory, the
 /// hooks record a path that `cargo clean` deletes. A note, never a refusal.
-fn build_dir_note() -> Option<String> {
+pub(crate) fn build_dir_note() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe = fs::canonicalize(&exe).unwrap_or(exe);
     let checkout = install::cargo_build_checkout(&exe)?;
@@ -1170,7 +1313,11 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
     // the first command (quietly in the hook, which must stay silent).
     if !matches!(
         cli.cmd,
-        Cmd::Init { .. } | Cmd::Clone { .. } | Cmd::Server { .. } | Cmd::Measure { .. }
+        Cmd::Init { .. }
+            | Cmd::Clone { .. }
+            | Cmd::Join { .. }
+            | Cmd::Server { .. }
+            | Cmd::Measure { .. }
     ) && let Some(r) = crate::remote::bootstrap()
         && !matches!(cli.cmd, Cmd::Hook { .. })
     {
@@ -1210,6 +1357,9 @@ fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
         | Cmd::Sync { .. }
         | Cmd::Server { .. }
         | Cmd::Token { .. }
+        | Cmd::Setup { .. }
+        | Cmd::Invite { .. }
+        | Cmd::Join { .. }
         | Cmd::Ui { .. } => return None,
         Cmd::Install {
             skills_only: true, ..
@@ -1717,8 +1867,9 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             skills_only: true,
             dry_run,
             global,
+            force,
             ..
-        } => install_skills(dry_run, global),
+        } => install_skills(dry_run, global, force),
         Cmd::Install {
             dry_run,
             force,
@@ -1736,6 +1887,97 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             },
             cx.role.unwrap_or("pm"),
         ),
+        Cmd::Setup {
+            home,
+            server,
+            no_server,
+            subdomain,
+            new_project,
+            force,
+            local,
+            worktree_role,
+        } => {
+            let o = crate::setup::run(&crate::setup::Args {
+                project: project.map(str::to_string),
+                home,
+                server,
+                no_server,
+                subdomain,
+                new_project,
+                role: cx.role.unwrap_or("pm").to_string(),
+                force,
+                local,
+                worktree_role,
+            })?;
+            if cx.json {
+                print_json(&o)?;
+            } else {
+                print!("{}", o.text());
+            }
+            Ok(if o.needs_human.is_some() {
+                ExitCode::from(crate::human::EXIT_CODE)
+            } else if o.ok || o.offline {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Cmd::Invite {
+            role,
+            epic,
+            person,
+            ttl,
+            writer,
+            valid_for,
+        } => {
+            let p = config::resolve_project(project)?;
+            let i = crate::invite::invite(
+                &p.name,
+                &p.home,
+                &crate::invite::InviteArgs {
+                    token: crate::remote::TokenArgs {
+                        role,
+                        epic,
+                        person,
+                        ttl,
+                        writer,
+                    },
+                    valid_for,
+                },
+            )?;
+            if cx.json {
+                print_json(&i)?;
+            } else {
+                print!("{}", i.text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Join {
+            join,
+            home,
+            name,
+            no_install,
+            force,
+            local,
+            worktree_role,
+        } => {
+            let o = crate::invite::join(&crate::invite::JoinArgs {
+                join,
+                home,
+                name,
+                no_install,
+                role: cx.role.unwrap_or("pm").to_string(),
+                force,
+                local,
+                worktree_role,
+            })?;
+            if cx.json {
+                print_json(&o)?;
+            } else {
+                print!("{}", o.text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Init {
             name,
             home,
@@ -1754,6 +1996,8 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 home,
                 name,
                 quick: false,
+                token: None,
+                deadline: None,
             })?;
             if cx.json {
                 print_json(&json!({ "clone": c, "sync": r }))?;
@@ -1785,12 +2029,17 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             let p = config::resolve_project(project)?;
             match crate::remote::Link::of(&p.name)? {
                 crate::remote::Link::None => {}
-                crate::remote::Link::NoToken(url) => bail!(
-                    "project {} syncs with {url}, and this machine has no token for it: ask an owner for \
-                     one and save it in {} (mode 0600)",
-                    p.name,
-                    config::Token::path(&p.name)?.display()
-                ),
+                crate::remote::Link::NoToken(url) => {
+                    if let Some(why) = config::token_elsewhere(&p.name, &url) {
+                        bail!("project {} syncs with {url}, and {why}", p.name);
+                    }
+                    bail!(
+                        "project {} syncs with {url}, and this machine has no token for it: ask an owner \
+                         for one and save it in {} (mode 0600)",
+                        p.name,
+                        config::Token::path(&p.name)?.display()
+                    )
+                }
                 crate::remote::Link::Ready(remote) => {
                     let mut store = Store::open(&p.home, &p.writer)?;
                     let before = store.state()?;
@@ -2056,6 +2305,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                     subdomain,
                     no_check,
                     replace,
+                    replace_admin_secret,
                 },
         } => {
             let d = crate::server::deploy(&crate::server::DeployArgs {
@@ -2064,6 +2314,8 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
                 subdomain,
                 no_check,
                 replace,
+                replace_admin_secret,
+                command: None,
             })?;
             if cx.json {
                 print_json(&d)?;
@@ -2097,7 +2349,7 @@ struct Ctx<'a> {
     sign: bool,
 }
 
-fn print_json(v: &impl serde::Serialize) -> Result<()> {
+pub(crate) fn print_json(v: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
 }
@@ -3089,72 +3341,7 @@ impl Ctx<'_> {
     }
 
     fn install_inner(&self, how: &InstallHow, role: &str) -> Result<ExitCode> {
-        if let Some(r) = how.worktree_role
-            && (r.trim().is_empty() || r.trim() != r)
-        {
-            bail!("invalid --worktree-role {r:?}: give a role name, such as agent");
-        }
-        let resolved = config::resolve_project(self.project)?;
-        let cwd = std::env::current_dir()?;
-        let repo = install::repo_root(&cwd);
-        if repo == resolved.home {
-            bail!(
-                "{} is the kontext-home; run `kontext install` in the code repo",
-                repo.display()
-            );
-        }
-        let linked = matches!(crate::git::checkout(&repo), Some((_, true)));
-        if linked && how.worktree_role.is_some() {
-            bail!(
-                "{} is a linked git worktree: worktree_role is set in the main checkout's \
-                 .kontext.toml (a tracked one reaches the worktrees once it is committed); run \
-                 this there",
-                repo.display()
-            );
-        }
-        if linked && how.local {
-            let main = crate::git::main_checkout(&repo)
-                .map(|m| format!(" ({})", m.display()))
-                .unwrap_or_default();
-            bail!(
-                "{} is a linked git worktree: Claude Code reads .claude/settings.local.json from \
-                 the main checkout's root in a worktree, not from the worktree; run `kontext \
-                 install --local` in the main checkout{main}",
-                repo.display()
-            );
-        }
-        if linked
-            && !how.link_only
-            && let Some(f) = config::find_repo_link(&repo)?
-            && f.kind == config::LinkKind::MainCheckout
-        {
-            bail!(
-                "{} is a linked git worktree without a .kontext.toml of its own: kontext is \
-                 installed in the main checkout ({}); run `kontext install` there. `{}` marks this \
-                 worktree as the PM's (it writes only its .kontext.toml); `kontext install \
-                 --skills-only` also works here.",
-                repo.display(),
-                f.path.parent().unwrap_or(&f.path).display(),
-                crate::capture::MARK_COMMAND
-            );
-        }
-        let plan = if how.link_only {
-            install::plan_link_only(&repo, &resolved.name, role, how.worktree_role)?
-        } else {
-            let project = Project::load(&resolved.home)?;
-            install::plan(&install::Options {
-                repo: &repo,
-                project_name: &resolved.name,
-                home: &resolved.home,
-                default_role: role,
-                exe: exe_quoted()?,
-                distill: distill::Settings::of(&project)?.enabled,
-                capture: crate::capture::Settings::of(&project).enabled,
-                force: how.force,
-                local: how.local,
-                worktree_role: how.worktree_role,
-            })?
-        };
+        let (plan, repo, resolved) = install_plan(self.project, how, role)?;
         for k in &plan.kept {
             println!(
                 "Kept {}: it was changed by hand (it matches no kontext version). `kontext install --force` replaces it.",
@@ -3189,6 +3376,82 @@ impl Ctx<'_> {
         }
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// What `kontext install` would write in the current repo, after its checks:
+/// the plan, the repo's root and the project.
+pub(crate) fn install_plan(
+    project: Option<&str>,
+    how: &InstallHow,
+    role: &str,
+) -> Result<(install::Plan, PathBuf, config::Resolved)> {
+    if let Some(r) = how.worktree_role
+        && (r.trim().is_empty() || r.trim() != r)
+    {
+        bail!("invalid --worktree-role {r:?}: give a role name, such as agent");
+    }
+    let resolved = config::resolve_project(project)?;
+    let cwd = std::env::current_dir()?;
+    let repo = install::repo_root(&cwd);
+    if repo == resolved.home {
+        bail!(
+            "{} is the kontext-home; run `kontext install` in the code repo",
+            repo.display()
+        );
+    }
+    let linked = matches!(crate::git::checkout(&repo), Some((_, true)));
+    if linked && how.worktree_role.is_some() {
+        bail!(
+            "{} is a linked git worktree: worktree_role is set in the main checkout's \
+             .kontext.toml (a tracked one reaches the worktrees once it is committed); run \
+             this there",
+            repo.display()
+        );
+    }
+    if linked && how.local {
+        let main = crate::git::main_checkout(&repo)
+            .map(|m| format!(" ({})", m.display()))
+            .unwrap_or_default();
+        bail!(
+            "{} is a linked git worktree: Claude Code reads .claude/settings.local.json from \
+             the main checkout's root in a worktree, not from the worktree; run `kontext \
+             install --local` in the main checkout{main}",
+            repo.display()
+        );
+    }
+    if linked
+        && !how.link_only
+        && let Some(f) = config::find_repo_link(&repo)?
+        && f.kind == config::LinkKind::MainCheckout
+    {
+        bail!(
+            "{} is a linked git worktree without a .kontext.toml of its own: kontext is \
+             installed in the main checkout ({}); run `kontext install` there. `{}` marks this \
+             worktree as the PM's (it writes only its .kontext.toml); `kontext install \
+             --skills-only` also works here.",
+            repo.display(),
+            f.path.parent().unwrap_or(&f.path).display(),
+            crate::capture::MARK_COMMAND
+        );
+    }
+    let plan = if how.link_only {
+        install::plan_link_only(&repo, &resolved.name, role, how.worktree_role)?
+    } else {
+        let project = Project::load(&resolved.home)?;
+        install::plan(&install::Options {
+            repo: &repo,
+            project_name: &resolved.name,
+            home: &resolved.home,
+            default_role: role,
+            exe: exe_quoted()?,
+            distill: distill::Settings::of(&project)?.enabled,
+            capture: crate::capture::Settings::of(&project).enabled,
+            force: how.force,
+            local: how.local,
+            worktree_role: how.worktree_role,
+        })?
+    };
+    Ok((plan, repo, resolved))
 }
 
 /// Copies images (and, with `allow_html`, pages) to `media/` and returns what
@@ -3258,18 +3521,7 @@ fn init(
         );
     }
     let writer = machine.writer()?;
-    let home = match home {
-        Some(h) => h,
-        None => config::home_dir()?.join("kontext-home").join(name),
-    };
-    let home = if home.is_absolute() {
-        home
-    } else {
-        std::env::current_dir()?.join(home)
-    };
-    if home.exists() && fs::read_dir(&home)?.next().is_some() {
-        bail!("{} already exists and is not empty", home.display());
-    }
+    let home = new_home_path(name, home)?;
     // The project on the server first: if that fails, nothing local is made.
     let server = server.map(crate::server::normalize_url);
     let token = match &server {
@@ -3285,29 +3537,11 @@ fn init(
         }
         None => None,
     };
-    for d in ["ledger", "cursors"] {
-        fs::create_dir_all(home.join(d))?;
-        fs::write(home.join(d).join(".gitkeep"), "")?;
-    }
-    let home = fs::canonicalize(&home)?;
-    fs::write(
-        home.join("project.toml"),
-        Project::template(name, &config::human_name()),
-    )?;
-    fs::write(
-        home.join(".gitignore"),
-        format!("{}/\n", config::INTERNAL_DIR),
-    )?;
-    git(&home, &["init", "-q"])?;
-    if let Some(url) = remote {
-        git(&home, &["remote", "add", "origin", url])?;
-    }
-    Machine::register(name, &home)?;
-    Store::open(&home, &writer)?;
+    let home = make_home(name, &home, remote, &writer)?;
     println!("Project {name} created in {}", home.display());
     println!("Writer of this machine: {writer}");
     if let (Some(url), Some(token)) = (server, token) {
-        let saved = token.save(name)?;
+        let saved = token.save(name, &url)?;
         Machine::set_server(name, Some(&url))?;
         let remote = crate::remote::Remote {
             url: url.clone(),
@@ -3324,6 +3558,103 @@ fn init(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Where a new project's kontext-home goes (default
+/// `~/kontext-home/<name>`), absolute.
+pub(crate) fn home_path(name: &str, home: Option<PathBuf>) -> Result<PathBuf> {
+    let home = match home {
+        Some(h) => h,
+        None => config::home_dir()?.join("kontext-home").join(name),
+    };
+    Ok(if home.is_absolute() {
+        home
+    } else {
+        std::env::current_dir()?.join(home)
+    })
+}
+
+/// [`home_path`], refused if it is there and not empty.
+pub(crate) fn new_home_path(name: &str, home: Option<PathBuf>) -> Result<PathBuf> {
+    let home = home_path(name, home)?;
+    if home.exists() && fs::read_dir(&home)?.next().is_some() {
+        bail!("{} already exists and is not empty", home.display());
+    }
+    Ok(home)
+}
+
+/// The file [`make_home`] writes in the kontext-home's internal folder before
+/// anything else and removes once the project is registered: a home that
+/// still has it was left half made by a run that was killed.
+pub(crate) const HOME_MARKER: &str = "making-home";
+
+fn home_marker(home: &Path) -> PathBuf {
+    home.join(config::INTERNAL_DIR).join(HOME_MARKER)
+}
+
+/// A kontext-home that [`make_home`] started and did not finish: a real
+/// folder (not a link) with its marker. Only such a folder is ever removed.
+pub(crate) fn half_made_home(home: &Path) -> bool {
+    fs::symlink_metadata(home).is_ok_and(|m| m.is_dir())
+        && fs::symlink_metadata(home_marker(home)).is_ok_and(|m| m.is_file())
+}
+
+/// The marker of a home that is registered (its run was killed after the
+/// registration, before the marker went): it is not needed any more.
+pub(crate) fn finish_home(home: &Path) {
+    let _ = fs::remove_file(home_marker(home));
+}
+
+/// For the tests that kill `setup` between its steps: with
+/// `KONTEXT_TEST_KILL_AT=<point>`, the process kills itself (SIGKILL, as a
+/// killed run: no cleanup) when it reaches `point`.
+pub(crate) fn kill_point(point: &str) {
+    if std::env::var("KONTEXT_TEST_KILL_AT").is_ok_and(|p| p == point) {
+        // SAFETY: sends a signal to this process.
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGKILL);
+        }
+    }
+}
+
+/// The local part of `kontext init`: the kontext-home's folders,
+/// `project.toml`, its git repo, the registration and the index. Returns the
+/// kontext-home, canonical. Until the project is registered, the home carries
+/// [`HOME_MARKER`], so a run killed halfway leaves a home that `setup` knows
+/// it may remove and make again.
+pub(crate) fn make_home(
+    name: &str,
+    home: &Path,
+    remote: Option<&str>,
+    writer: &str,
+) -> Result<PathBuf> {
+    fs::create_dir_all(home.join(config::INTERNAL_DIR))?;
+    fs::write(home_marker(home), "")?;
+    for d in ["ledger", "cursors"] {
+        fs::create_dir_all(home.join(d))?;
+        fs::write(home.join(d).join(".gitkeep"), "")?;
+    }
+    kill_point("home:folders");
+    let home = fs::canonicalize(home)?;
+    fs::write(
+        home.join("project.toml"),
+        Project::template(name, &config::human_name()),
+    )?;
+    fs::write(
+        home.join(".gitignore"),
+        format!("{}/\n", config::INTERNAL_DIR),
+    )?;
+    kill_point("home:files");
+    git(&home, &["init", "-q"])?;
+    if let Some(url) = remote {
+        git(&home, &["remote", "add", "origin", url])?;
+    }
+    kill_point("home:git");
+    Machine::register(name, &home)?;
+    kill_point("home:registered");
+    Store::open(&home, writer)?;
+    finish_home(&home);
+    Ok(home)
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
