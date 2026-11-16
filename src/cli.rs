@@ -2419,13 +2419,14 @@ impl Ctx<'_> {
             }
             (Some(DispatchCmd::Watch { detach: true }), _) => {
                 if crate::dispatch::watch::ensure(&p.name)? {
-                    println!(
-                        "The watcher of {} runs (pid {}).",
-                        p.name,
-                        crate::dispatch::watch::pid(&p.name)
-                            .map(|x| x.to_string())
-                            .unwrap_or_else(|| "?".into())
-                    );
+                    match crate::dispatch::watch::pid(&p.name) {
+                        Some(pid) => println!("The watcher of {} runs (pid {pid}).", p.name),
+                        // It did what there was to do and left: nothing is live.
+                        None => println!(
+                            "The watcher of {} ran and stopped: no sandbox is live now.",
+                            p.name
+                        ),
+                    }
                 } else {
                     bail!("the watcher did not start: see the dispatch folder's watcher.log");
                 }

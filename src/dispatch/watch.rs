@@ -67,11 +67,7 @@ pub fn pid(project: &str) -> Option<u32> {
     if !alive(project) {
         return None;
     }
-    fs::read_to_string(pid_path(project).ok()?)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    pid_file(project)
 }
 
 /// The command that starts it again.
@@ -99,6 +95,7 @@ pub fn ensure(project: &str) -> Result<bool> {
         .stderr(log);
     turn::detach(&mut c);
     let mut child = c.spawn().context("could not start the watcher")?;
+    let id = child.id();
     let until = Instant::now() + Duration::from_secs(5);
     while Instant::now() < until {
         if alive(project) {
@@ -107,13 +104,23 @@ pub fn ensure(project: &str) -> Result<bool> {
             return Ok(true);
         }
         if let Ok(Some(_)) = child.try_wait() {
-            // It ended at once: another watcher took the lock, or it failed
-            // (its log says why).
-            return Ok(alive(project));
+            // It ended at once. It ran if it wrote its pid (it took the lock,
+            // did all there was to do and found nothing live left); otherwise
+            // another watcher took the lock, or it failed (its log says why).
+            return Ok(alive(project) || pid_file(project) == Some(id));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(false)
+}
+
+/// What the pid file says, whether or not that watcher still runs.
+fn pid_file(project: &str) -> Option<u32> {
+    fs::read_to_string(pid_path(project).ok()?)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn log(msg: &str) {
