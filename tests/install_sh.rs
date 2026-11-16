@@ -234,6 +234,8 @@ fn install_sh_uses_a_folder_on_the_path_and_says_what_comes_next() {
     let o = b.run(sys, &b.home, &["kxt1.not.this"], &[]);
     assert!(!o.status.success());
     assert!(err(&o).contains("join line"), "{}", err(&o));
+    // What was passed is not repeated (it could be a token).
+    assert!(!err(&o).contains("kxt1.not.this"), "{}", err(&o));
     assert!(!b.home.join(".local/bin/kontext").exists());
     // A join line cut short or with a stray character: refused before the
     // download.

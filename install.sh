@@ -102,7 +102,9 @@ case "$join" in
         esac
         [ "${#rest}" -ge 40 ] || fail "that join line is too short to be whole (was it cut?). Copy the line \`kontext invite\` printed again"
         ;;
-    *) fail "the argument is a join line (kxj1.…, from \`kontext invite\`), not \"$join\"" ;;
+    # Not echoed: whatever was passed by mistake (a token, say) stays out of
+    # the output an agent's chat captures.
+    *) fail "the argument is not a join line (those start with kxj1., from \`kontext invite\`); it is not repeated here" ;;
 esac
 
 command -v curl >/dev/null 2>&1 || fail "curl is needed"
