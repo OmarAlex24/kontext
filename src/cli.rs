@@ -366,13 +366,17 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: ServerCmd,
     },
-    /// Gives an open epic of a ready wave its own sandbox with a coordinator agent (DESIGN §12.5).
+    /// Gives an open epic of a ready wave its own sandbox with Claude Code as its coordinator
+    /// (DESIGN §12.5).
     ///
-    /// It refuses (exit 2, one line) unless the project syncs through a kontext server, the plan
-    /// is signed, the epic is open and every epic it comes after is closed (as `kontext plan`
-    /// computes it), the epic has no sandbox yet, and fewer than [dispatch] max_sandboxes are
-    /// running. Then it makes a coordinator token for the epic, and a sandbox that gets the token
-    /// as a file. `kontext dispatch status` and `kontext dispatch stop <epic>` follow it. An epic
+    /// It refuses (exit 2, one line) unless the project syncs through a kontext server, the agent
+    /// credential is set (`kontext dispatch credential set`), the plan is signed, the epic is open
+    /// and every epic it comes after is closed (as `kontext plan` computes it), the epic has no
+    /// sandbox yet (nor one not cleaned up), and fewer than [dispatch] max_sandboxes are running.
+    /// Then it makes a coordinator token for the epic and a sandbox that gets the token and the
+    /// credential as files; its start script clones the repo and sets kontext up; and it starts
+    /// Claude Code there (`claude -p` through `boat exec`, with every permission inside the
+    /// sandbox). `kontext dispatch status` and `kontext dispatch stop <epic>` follow it. An epic
     /// named like a subcommand goes by its id or as epic:<name>
     #[command(args_conflicts_with_subcommands = true)]
     Dispatch {
@@ -946,9 +950,11 @@ pub enum Cmd {
 #[derive(Subcommand, Debug)]
 pub enum DispatchCmd {
     /// Which epic runs in which sandbox on this machine, since when, its progress and its state
-    /// (starting, running, resumed, stuck, closed, stopped)
+    /// (starting, running, resumed, overdue, stuck, closed, stopped), and the agent credential
     Status,
-    /// Stops the epic's sandbox (its data is kept) and revokes its token
+    /// Ends the coordinator's turn, removes the credential from the sandbox, stops the sandbox
+    /// (its data is kept) and revokes its token. Exits non-zero while the clean-up is not
+    /// complete; run it again to retry
     Stop {
         /// The epic: E-…, epic:<name> or <name>
         epic: String,
@@ -956,7 +962,7 @@ pub enum DispatchCmd {
     /// Follows this project's live sandboxes until none is left: stops one when its epic closes
     /// in the ledger, resumes a coordinator once when its turn ends with the epic open, and marks
     /// it stuck (a question to the pm, the sandbox stopped, the token revoked) when it stops
-    /// again or its time runs out. `dispatch` starts it; this starts it again (after the machine
+    /// again, its turn fails or its time runs out. `dispatch` starts it; this starts it again (after the machine
     /// slept, say), and it picks up from the saved state
     Watch {
         /// Start it in the background and return
@@ -2479,7 +2485,23 @@ impl Ctx<'_> {
                         println!("{l}");
                     }
                 };
-                let run = crate::dispatch::dispatch(&p.name, &epic, &mut say)?;
+                let run = match crate::dispatch::dispatch(&p.name, &epic, &mut say) {
+                    Ok(run) => run,
+                    Err(e) => {
+                        // With --json, a failed dispatch says why on stdout too,
+                        // with the run as it was left (never a secret).
+                        if json && e.downcast_ref::<crate::store::Refused>().is_none() {
+                            let run = crate::dispatch::state::read(&p.name)
+                                .ok()
+                                .and_then(|runs| crate::dispatch::find_run(&runs, &epic).cloned());
+                            print_json(&serde_json::json!({
+                                "error": crate::dispatch::credential::redact(&format!("{e:#}")),
+                                "run": run,
+                            }))?;
+                        }
+                        return Err(e);
+                    }
+                };
                 if json {
                     print_json(&run)?;
                 } else {

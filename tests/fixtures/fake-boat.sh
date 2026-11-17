@@ -19,12 +19,18 @@
 #                       error:<text>    Claude Code failed with <text> (exit 1)
 #                       exit:<code>     the runner exited <code>, no result
 #   lost-<id>-<n>     `--status` does not know turn n's process
+#   hang-new          `new` makes the sandbox, then waits (until release-new
+#                     exists, 60 s at most) before it says it is ready
+#   hang-stop         `stop` waits the same way (until release-stop)
+#
+# A second `exec --detach` of a turn already started gets a process that
+# exits 90 at once, as the runner does when it refuses to run a turn twice.
 #   end-all           ends every turn as the first form does
 #
 # What it keeps: files/<name> for each --file (the file's base name),
 # <id>.setup-file for --setup-file, <id>.env with the -e values, <id>.stopped
-# once stopped, pid-<pid> ("<id> <n> <session>") per detached turn and
-# killed-<pid> once killed.
+# once stopped, <id>.name, pid-<pid> ("<id> <n> <session>") per detached
+# turn and killed-<pid> once killed. `list` shows the sandboxes not stopped.
 set -eu
 D=${FAKE_BOAT_DIR:?FAKE_BOAT_DIR is not set}
 mkdir -p "$D/files"
@@ -32,6 +38,15 @@ printf '%s\n' "$*" >>"$D/calls.log"
 
 cmd=${1:-}
 [ $# -gt 0 ] && shift
+
+# Waits for release-$1 while hang-$1 is there (60 s at most).
+hang() {
+    i=0
+    while [ -e "$D/hang-$1" ] && [ ! -e "$D/release-$1" ] && [ "$i" -lt 600 ]; do
+        i=$((i + 1))
+        sleep 0.1
+    done
+}
 
 next_id() {
     n=$(cat "$D/counter" 2>/dev/null || echo 0)
@@ -52,7 +67,8 @@ new)
         --file) files="$files$2
 "; shift 2 ;;
         --setup-file) setup=$2; shift 2 ;;
-        --name | --type | --ttl | --environment) shift 2 ;;
+        --name) name=$2; shift 2 ;;
+        --type | --ttl | --environment) shift 2 ;;
         *) shift ;;
         esac
     done
@@ -62,6 +78,7 @@ new)
     fi
     id=$(next_id)
     echo "{\"event\":\"created\",\"id\":\"$id\"}"
+    printf '%s' "${name:-}" >"$D/$id.name"
     printf '%s' "$envs" >"$D/$id.env"
     printf '%s' "$files" | while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -74,6 +91,7 @@ new)
         echo '{"event":"error","error":"the machine went away","code":"lost"}'
         exit 1
     fi
+    hang new
     echo '{"event":"state","state":"starting"}'
     echo "{\"event\":\"ready\",\"id\":\"$id\",\"state\":\"running\"}"
     ;;
@@ -85,12 +103,25 @@ info)
     ;;
 stop)
     id=$1
+    hang stop
     if [ -e "$D/fail-stop" ]; then
         echo '{"event":"error","error":"stop failed","code":"x"}'
         exit 1
     fi
     : >"$D/$id.stopped"
     echo "{\"id\":\"$id\",\"state\":\"stopping\"}"
+    ;;
+list)
+    printf '['
+    sep=""
+    for f in "$D"/bx_fake*.name; do
+        [ -e "$f" ] || continue
+        id=$(basename "$f" .name)
+        [ -e "$D/$id.stopped" ] && continue
+        printf '%s{"id":"%s","name":"%s","state":"ready"}' "$sep" "$id" "$(cat "$f")"
+        sep=","
+    done
+    echo ']'
     ;;
 exec)
     id=$1
@@ -132,6 +163,9 @@ exec)
         p=$(cat "$D/pids" 2>/dev/null || echo 7200)
         p=$((p + 1))
         echo "$p" >"$D/pids"
+        if grep -q "^$id ${n:-0} " "$D"/pid-* 2>/dev/null; then
+            : >"$D/dup-$p"
+        fi
         echo "$id ${n:-0} ${sid:-none}" >"$D/pid-$p"
         echo "{\"command\":\"x\",\"commandId\":\"cmd_$p\",\"logPath\":\"/home/user/.ascii/processes/$p.log\",\"pid\":$p,\"processId\":$p,\"success\":true}"
         ;;
@@ -147,6 +181,8 @@ exec)
         read -r sid_ n _ <"$D/pid-$pid"
         if [ -e "$D/lost-$sid_-$n" ]; then
             echo "{\"known\":false,\"running\":false,\"status\":\"lost\",\"pid\":$pid}"
+        elif [ -e "$D/dup-$pid" ]; then
+            echo "{\"known\":true,\"running\":false,\"status\":\"exited\",\"exitCode\":90,\"signal\":null,\"pid\":$pid}"
         elif [ -e "$D/killed-$pid" ]; then
             echo "{\"known\":true,\"running\":false,\"status\":\"exited\",\"exitCode\":143,\"signal\":\"SIGTERM\",\"pid\":$pid}"
         else
@@ -169,7 +205,7 @@ exec)
         case "$line" in
         *" read "[0-9]*)
             n=${line##* read }
-            p=$(grep -l "^$id $n " "$D"/pid-* 2>/dev/null | tail -n 1 | sed 's/.*pid-//')
+            p=$(grep -l "^$id $n " "$D"/pid-* 2>/dev/null | head -n 1 | sed 's/.*pid-//')
             turn_end "$id" "$n"
             [ -n "$p" ] && [ -e "$D/killed-$p" ] && how=killed
             case "$how" in

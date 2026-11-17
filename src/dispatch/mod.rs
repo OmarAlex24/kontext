@@ -17,15 +17,14 @@
 //!   the epic's brief and the pm see them.
 
 pub mod credential;
+pub mod guard;
 pub mod provider;
 pub mod script;
 pub mod state;
 pub mod turn;
 pub mod watch;
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -39,6 +38,7 @@ use crate::state::{State, Status};
 use crate::store::{Refused, Store};
 use crate::tasks::{self, epic_name, now_ms};
 
+use guard::TmpFile;
 use provider::{NewSandbox, Provider};
 use state::{Run, RunState};
 
@@ -114,7 +114,7 @@ pub fn config_of(project: &str) -> Result<(Settings, config::Resolved)> {
 }
 
 /// How long the start script may take.
-const SETUP_LIMIT_MS: i64 = 20 * 60_000;
+pub(crate) const SETUP_LIMIT_MS: i64 = 20 * 60_000;
 
 /// How often the dispatcher asks the service (5 s; `KONTEXT_DISPATCH_POLL_MS`
 /// in the tests).
@@ -236,36 +236,6 @@ pub fn sandbox_env(server: &str, project: &str, name: &str) -> Vec<(String, Stri
     ]
 }
 
-/// A local file in the dispatch folder's `tmp/`, readable only by this
-/// user, removed when dropped (on every path out of [`dispatch`]): the
-/// token, the agent's credential, and the other files the sandbox gets.
-struct TmpFile(PathBuf);
-
-impl TmpFile {
-    fn write(dir: &Path, prefix: &str, body: &str) -> Result<TmpFile> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let tmp = dir.join("tmp");
-        fs::create_dir_all(&tmp)?;
-        let path = tmp.join(format!("{prefix}-{}", config::random_hex(8)?));
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("could not write the {prefix} file"))?;
-        let t = TmpFile(path);
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-        Ok(t)
-    }
-}
-
-impl Drop for TmpFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
 /// Writes one of the dispatcher's entries in the ledger, as `agent:dispatcher`.
 pub fn record(home: &Path, writer: &str, raw: RawEntry) -> Result<Entry> {
     let mut store = Store::open(home, writer)?;
@@ -379,6 +349,26 @@ pub fn clean_up(project: &str, p: &dyn Provider, run: &mut Run) -> Vec<String> {
 /// What `dispatch` prints as it goes.
 pub type Say<'a> = &'a mut dyn FnMut(&str);
 
+/// Finds a sandbox the service made under the run's name before its id was
+/// saved (a dispatch killed during `boat new`), and records it.
+pub fn locate(project: &str, p: &dyn Provider, run: &mut Run) -> Result<bool> {
+    if run.sandbox.is_some() {
+        return Ok(true);
+    }
+    let Some(id) = p.find(&run.sandbox_name)? else {
+        return Ok(false);
+    };
+    run.sandbox = Some(id.clone());
+    run.sandbox_stopped = false;
+    state::update_id(project, run, |r| {
+        if r.sandbox.is_none() {
+            r.sandbox = Some(id);
+            r.sandbox_stopped = false;
+        }
+    })?;
+    Ok(true)
+}
+
 /// `kontext dispatch <epic>`.
 pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
     let remote = server(project)?;
@@ -411,29 +401,53 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
     if let Some(w) = &ready.warning {
         say(&format!("warning: {w}"));
     }
+    guard::sweep(project);
 
     // The reservation: the cap and "one sandbox per epic" hold even when
-    // two dispatches run at once.
+    // two dispatches run at once. This process holds the epic's dispatch
+    // lock until it is done, so the watcher knows someone is at work.
     let now = now_ms();
-    let mut run = {
+    let (mut run, _working) = {
         let mut l = state::lock(project)?;
-        if let Some(r) = l.runs.get(&ready.epic).filter(|r| r.state.live()) {
-            return refused(format!(
-                "epic {} already has a sandbox ({}, {})",
-                ready.name,
-                r.sandbox.as_deref().unwrap_or("being made"),
-                r.state.label()
-            ));
+        if let Some(r) = l.runs.get(&ready.epic) {
+            if r.state.live() {
+                return refused(format!(
+                    "epic {} already has a sandbox ({}, {})",
+                    ready.name,
+                    r.sandbox.as_deref().unwrap_or("being made"),
+                    r.state.label()
+                ));
+            }
+            if r.state == RunState::Overdue {
+                return refused(format!(
+                    "epic {}'s last sandbox ({}) ran out of time while the ledger could not be \
+                     pulled; the watcher decides whether it closed or is stuck once it can",
+                    ready.name,
+                    r.sandbox.as_deref().unwrap_or("?")
+                ));
+            }
+            if !r.clean() {
+                return refused(format!(
+                    "epic {}'s last sandbox is not cleaned up yet ({}): `kontext dispatch stop {}` \
+                     tries again",
+                    ready.name,
+                    left_text(r),
+                    ready.name
+                ));
+            }
         }
-        let live = l.live();
-        if live >= settings.max_sandboxes {
+        let billing = l.billing();
+        if billing >= settings.max_sandboxes {
             return refused(format!(
-                "{live} sandboxes are running, the most at once ([dispatch] max_sandboxes = {}); \
-                 `kontext dispatch status` lists them",
+                "{billing} sandboxes are running or not cleaned up yet, the most at once \
+                 ([dispatch] max_sandboxes = {}); `kontext dispatch status` lists them",
                 settings.max_sandboxes
             ));
         }
+        let working = guard::DispatchLock::take(project, &ready.epic)
+            .map_err(|e| Refused(format!("{e:#}")))?;
         let run = Run {
+            id: config::random_hex(8)?,
             epic: ready.epic.clone(),
             name: ready.name.clone(),
             service: prov.service().into(),
@@ -451,13 +465,21 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
             sandbox_stopped: false,
             token_revoked: false,
             ended: None,
+            pm_pending: false,
+            end_pending: false,
+            cleaning_until: None,
         };
         l.runs.insert(ready.epic.clone(), run.clone());
         l.save()?;
-        run
+        (run, working)
     };
+    guard::on_signals();
+    // The watcher follows the run from now on: if this process dies, it
+    // finishes the start or ends the run.
+    let watcher = watch::ensure(project);
+    guard::checkpoint(project, "reserved");
 
-    match start(
+    let started = start(
         project,
         &home,
         &remote,
@@ -466,24 +488,115 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
         &cred,
         &mut run,
         say,
-    ) {
+    );
+    let outcome = match started {
         Ok(()) => Ok(run),
-        Err(e) => {
-            // Whatever was made goes: the sandbox stops, the token is revoked.
-            let mut left = clean_up(project, prov.as_ref(), &mut run);
-            let why = format!("{e:#}");
-            run.state = RunState::Stuck;
-            run.reason = Some(format!("the dispatch failed: {why}"));
-            run.ended = Some(now_ms());
-            let saved = run.clone();
-            if let Err(se) = state::update(project, &run.epic, |r| *r = saved) {
-                left.push(format!("could not save the state: {se:#}"));
+        Err(e) if e.downcast_ref::<state::Gone>().is_some() => {
+            let now = e.downcast::<state::Gone>().map(|g| g.0).ok();
+            for l in give_up(project, prov.as_ref(), &run, now.as_ref()) {
+                say(&format!("warning: {l}"));
             }
+            Err(anyhow::anyhow!(
+                "epic {} was {} while dispatch was starting it: dispatch stops here",
+                run.name,
+                now.as_ref().map(|r| r.state.label()).unwrap_or("replaced")
+            ))
+        }
+        Err(e) => {
+            // Whatever was made goes: the turn ends, the credential is
+            // removed, the sandbox stops, the token is revoked. The run is
+            // marked stuck (with the clean-up lease) first, so nobody else
+            // acts on it meanwhile.
+            let why = credential::redact(&format!("{e:#}"));
+            let ended = now_ms();
+            let claimed = state::update_own(project, &run, |r| {
+                r.state = RunState::Stuck;
+                r.reason = Some(format!("the dispatch failed: {why}"));
+                r.ended = Some(ended);
+                r.lease();
+            });
+            let left = match claimed {
+                Ok(_) => {
+                    let mut left = clean_up(project, prov.as_ref(), &mut run);
+                    if let Err(se) = state::merge_clean_up(project, &run) {
+                        left.push(format!("could not save the state: {se:#}"));
+                    }
+                    left
+                }
+                // Someone else ended it meanwhile.
+                Err(g) => {
+                    let now = g.downcast::<state::Gone>().map(|g| g.0).ok();
+                    give_up(project, prov.as_ref(), &run, now.as_ref())
+                }
+            };
             for l in &left {
                 say(&format!("warning: {l}"));
             }
             Err(e)
         }
+    };
+    if outcome.is_ok() {
+        match watcher {
+            Ok(true) => say(&format!(
+                "watcher running (pid {}): it stops the sandbox when the epic closes",
+                watch::pid(project)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into())
+            )),
+            Ok(false) => say(&format!(
+                "warning: the watcher did not start; start it with `{}`",
+                watch::restart_command(project)
+            )),
+            Err(e) => say(&format!(
+                "warning: could not start the watcher ({e:#}); start it with `{}`",
+                watch::restart_command(project)
+            )),
+        }
+    }
+    outcome
+}
+
+/// The run changed while `dispatch` worked on it (stopped, closed, stuck or
+/// replaced): what this process made that the saved run does not know of
+/// is added to it and cleaned up, and nothing else is touched.
+fn give_up(project: &str, p: &dyn Provider, mine: &Run, now: Option<&Run>) -> Vec<String> {
+    let ours = now.is_some_and(|r| r.id == mine.id);
+    let mut todo = if ours {
+        // What this process made goes into the saved run; whoever is
+        // cleaning it up (or the watcher, later) takes it from there.
+        let added = state::update_id(project, mine, |r| {
+            if r.sandbox.is_none() && mine.sandbox.is_some() {
+                r.sandbox.clone_from(&mine.sandbox);
+                r.sandbox_stopped = false;
+            }
+            if r.token_id.is_none() && mine.token_id.is_some() {
+                r.token_id.clone_from(&mine.token_id);
+                r.token_revoked = false;
+            }
+        });
+        match added.and_then(|_| state::lease_clean_up(project, mine)) {
+            Ok(Some(r)) if !r.state.live() => r,
+            _ => return Vec::new(),
+        }
+    } else {
+        mine.clone()
+    };
+    if todo.clean() {
+        return Vec::new();
+    }
+    let left = clean_up(project, p, &mut todo);
+    if ours && let Err(e) = state::merge_clean_up(project, &todo) {
+        return vec![format!("could not save the state: {e:#}")];
+    }
+    left
+}
+
+/// Has someone else changed the run (it is another one now, or not live)?
+fn still_mine(project: &str, mine: &Run) -> Result<()> {
+    match state::read(project)?.remove(&mine.epic) {
+        Some(r) if r.id == mine.id && r.state.live() => Ok(()),
+        Some(r) => Err(state::Gone(r).into()),
+        None => Err(state::Gone(mine.clone()).into()),
     }
 }
 
@@ -497,7 +610,9 @@ fn first_check() -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
-/// From the reservation to a running coordinator.
+/// From the reservation to a running coordinator. Every write re-reads the
+/// run under the lock, stops with [`state::Gone`] if it is no longer this
+/// one, and writes only the fields it changed.
 #[allow(clippy::too_many_arguments)]
 fn start(
     project: &str,
@@ -523,8 +638,8 @@ fn start(
     )
     .context("could not make the coordinator token")?;
     run.token_id = Some(minted.id.clone());
-    let snapshot = run.clone();
-    state::update(project, &run.epic, |r| *r = snapshot)?;
+    let token_id = minted.id.clone();
+    state::update_own(project, run, |r| r.token_id = Some(token_id))?;
     say(&format!(
         "token {} made: coordinator of {}, writer {}",
         minted.id, run.name, minted.writer
@@ -532,7 +647,8 @@ fn start(
 
     // Everything the sandbox gets as a file: the secrets, the prompts (the
     // service keeps every command line, so they never go in one) and the
-    // runner. Each local copy goes when this function returns.
+    // runner. Each local copy goes when this function returns, or on a
+    // signal.
     let dir = state::dir(project)?;
     let repo_dir = s.repo_dir.clone().unwrap_or_default();
     let token_file = TmpFile::write(&dir, "token", &minted.token)?;
@@ -562,6 +678,7 @@ fn start(
             repo_url: s.repo_url.clone(),
         }),
     )?;
+    guard::checkpoint(project, "files");
     let spec = NewSandbox {
         name: run.sandbox_name.clone(),
         environment: s.environment.clone(),
@@ -584,22 +701,25 @@ fn start(
         Ok(id) => id,
         Err(f) => {
             if let Some(id) = f.id.clone() {
-                run.sandbox = Some(id);
+                run.sandbox = Some(id.clone());
+                let _ = state::update_own(project, run, |r| r.sandbox = Some(id));
             }
             return Err(anyhow::Error::new(f));
         }
     };
     run.sandbox = Some(id.clone());
-    let snapshot = run.clone();
-    state::update(project, &run.epic, |r| *r = snapshot)?;
+    let sid = id.clone();
+    state::update_own(project, run, |r| r.sandbox = Some(sid))?;
     say(&format!(
         "sandbox {id} ({}) made with {}; waiting for its start script",
         run.sandbox_name, s.service
     ));
 
-    // The start script runs in the background: wait for it.
+    // The start script runs in the background: wait for it, as long as the
+    // run is still this one (a stop or the watcher may end it meanwhile).
     let until = now_ms() + SETUP_LIMIT_MS;
     loop {
+        still_mine(project, run)?;
         match prov.setup(&id)? {
             provider::Setup::Done => break,
             provider::Setup::Failed(why) => {
@@ -615,16 +735,25 @@ fn start(
     say("start script done: kontext, the project and the repo's clone are set up in the sandbox");
 
     // The coordinator's first turn: Claude Code, headless, in the sandbox.
-    run.state = RunState::Running;
+    // The run stays `starting` until the turn's process id is saved, so a
+    // watcher that finds it so (this process died) starts the turn again;
+    // the runner never runs a turn twice.
     run.turns = 1;
     run.session = Some(turn::new_session()?);
-    run.turn_pid = None;
-    let snapshot = run.clone();
-    state::update(project, &run.epic, |r| *r = snapshot)?;
+    let session = run.session.clone();
+    state::update_own(project, run, |r| {
+        r.turns = 1;
+        r.session = session;
+        r.turn_pid = None;
+    })?;
     let pid = turn::start(prov, run, 1)?;
+    guard::checkpoint(project, "turn");
     run.turn_pid = Some(pid);
-    let snapshot = run.clone();
-    state::update(project, &run.epic, |r| *r = snapshot)?;
+    run.state = RunState::Running;
+    state::update_own(project, run, |r| {
+        r.turn_pid = Some(pid);
+        r.state = RunState::Running;
+    })?;
 
     // A turn that cannot start (no login, no claude, no clone) fails within
     // seconds: then the dispatch fails, and everything goes.
@@ -634,7 +763,9 @@ fn start(
             turn::TurnState::Failed(why) => {
                 anyhow::bail!("the coordinator did not start: {why}")
             }
-            turn::TurnState::Ended | turn::TurnState::Lost(_) => break,
+            turn::TurnState::Ended | turn::TurnState::Lost(_) | turn::TurnState::Adopt(_) => {
+                break;
+            }
             turn::TurnState::Running | turn::TurnState::NoAnswer(_) => {
                 if std::time::Instant::now() >= until {
                     break;
@@ -649,23 +780,10 @@ fn start(
         s.model, run.name
     ));
     let w = config::resolve_project(Some(project))?.writer;
-    record(home, &w, start_entry(run, s))?;
-    // The watcher follows it from here; the sandbox does not depend on it.
-    match watch::ensure(project) {
-        Ok(true) => say(&format!(
-            "watcher running (pid {}): it stops the sandbox when the epic closes",
-            watch::pid(project)
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "?".into())
-        )),
-        Ok(false) => say(&format!(
-            "warning: the watcher did not start; start it with `{}`",
-            watch::restart_command(project)
-        )),
-        Err(e) => say(&format!(
-            "warning: could not start the watcher ({e:#}); start it with `{}`",
-            watch::restart_command(project)
-        )),
+    if let Err(e) = record(home, &w, start_entry(run, s)) {
+        say(&format!(
+            "warning: could not write the dispatch's journal entry ({e:#}); the sandbox runs"
+        ));
     }
     Ok(())
 }
@@ -835,7 +953,10 @@ fn left_text(run: &Run) -> String {
 // ------------------------------------------------------------ stop
 
 /// The run of `epic` (an id, `epic:<name>` or a name) on this machine.
-fn find_run<'a>(runs: &'a std::collections::BTreeMap<String, Run>, epic: &str) -> Option<&'a Run> {
+pub fn find_run<'a>(
+    runs: &'a std::collections::BTreeMap<String, Run>,
+    epic: &str,
+) -> Option<&'a Run> {
     let e = epic.trim();
     let name = e.strip_prefix("epic:").unwrap_or(e);
     runs.get(e)
@@ -846,37 +967,73 @@ fn find_run<'a>(runs: &'a std::collections::BTreeMap<String, Run>, epic: &str) -
         })
 }
 
-/// `kontext dispatch stop <epic>`: stops its sandbox and revokes its token.
-/// A run that already ended but was not fully cleaned up is cleaned up again.
+/// `kontext dispatch stop <epic>`: ends its turn, removes the credential,
+/// stops its sandbox and revokes its token. A run that already ended but
+/// was not fully cleaned up is cleaned up again. The run is marked stopped
+/// under the state lock first; the service is called without the lock.
 pub fn stop(project: &str, epic: &str) -> Result<(Run, Vec<String>)> {
     let resolved = config::resolve_project(Some(project))?;
-    let mut l = state::lock(project)?;
-    let Some(found) = find_run(&l.runs, epic).cloned() else {
-        return refused(format!(
-            "epic {epic} was not dispatched from this machine (`kontext dispatch status`)"
-        ));
+    guard::sweep(project);
+    let claimed = {
+        let mut l = state::lock(project)?;
+        let Some(found) = find_run(&l.runs, epic).cloned() else {
+            return refused(format!(
+                "epic {epic} was not dispatched from this machine (`kontext dispatch status`)"
+            ));
+        };
+        if !found.state.live() && found.clean() {
+            return refused(format!(
+                "epic {}'s sandbox already stopped ({})",
+                found.name,
+                found.state.label()
+            ));
+        }
+        let mut run = found;
+        if run.being_cleaned() {
+            return refused(format!(
+                "epic {}'s sandbox is being cleaned up right now; `kontext dispatch status` shows                  how it ends",
+                run.name
+            ));
+        }
+        if run.state.live() {
+            run.state = RunState::Stopped;
+            run.ended = Some(now_ms());
+            run.end_pending = true;
+        }
+        run.lease();
+        run.updated = now_ms();
+        l.runs.insert(run.epic.clone(), run.clone());
+        l.save()?;
+        run
     };
-    if !found.state.live() && found.clean() {
-        return refused(format!(
-            "epic {}'s sandbox already stopped ({})",
-            found.name,
-            found.state.label()
+    let prov = provider::of(&claimed.service)?;
+    let mut run = claimed;
+    let mut failed = Vec::new();
+    // A dispatch killed while the service made the sandbox left only its name.
+    if run.sandbox.is_none()
+        && run.token_id.is_some()
+        && let Err(e) = locate(project, prov.as_ref(), &mut run)
+    {
+        failed.push(format!(
+            "could not look for a sandbox named {} ({e:#})",
+            run.sandbox_name
         ));
     }
-    let prov = provider::of(&found.service)?;
-    let mut run = found.clone();
-    let failed = clean_up(project, prov.as_ref(), &mut run);
-    let was_live = run.state.live();
-    if was_live {
-        run.state = RunState::Stopped;
-        run.ended = Some(now_ms());
+    failed.extend(clean_up(project, prov.as_ref(), &mut run));
+    if let Some(saved) = state::merge_clean_up(project, &run)? {
+        run = saved;
     }
-    run.updated = now_ms();
-    l.runs.insert(run.epic.clone(), run.clone());
-    l.save()?;
-    drop(l);
-    if was_live {
-        record(&resolved.home, &resolved.writer, end_entry(&run))?;
+    if run.end_pending {
+        match record(&resolved.home, &resolved.writer, end_entry(&run)) {
+            Ok(_) => {
+                if let Some(saved) = state::update_id(project, &run, |r| r.end_pending = false)? {
+                    run = saved;
+                }
+            }
+            Err(e) => failed.push(format!(
+                "could not write the end entry ({e:#}); the watcher tries again"
+            )),
+        }
     }
     Ok((run, failed))
 }

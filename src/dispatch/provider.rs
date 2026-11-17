@@ -4,10 +4,13 @@
 //!
 //! [`Boat`] runs the `boat` CLI (`$KONTEXT_BOAT`, or `boat` on the `PATH`):
 //! the tests point it at a fake. It never passes a secret in an argument or a
-//! variable: a secret goes as a file (`--file`).
+//! variable: a secret goes as a file (`--file`). Every call has a time limit
+//! (`KONTEXT_BOAT_TIMEOUT_MS` replaces them all, for the tests), after which
+//! the `boat` process is killed and the call is an error.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -81,6 +84,9 @@ pub trait Provider {
     fn create(&self, s: &NewSandbox) -> std::result::Result<String, CreateFailed>;
     /// Stops it, keeping its data.
     fn stop(&self, id: &str) -> Result<()>;
+    /// A running (or starting) sandbox with this name, if there is one: a
+    /// dispatch killed while the service made its sandbox left no id.
+    fn find(&self, name: &str) -> Result<Option<String>>;
     /// How its start script went.
     fn setup(&self, id: &str) -> Result<Setup>;
     /// Runs a short command in the sandbox and returns what it printed
@@ -134,10 +140,73 @@ impl Boat {
     }
 
     fn run(&self, args: &[String]) -> Result<Output> {
-        self.command(args)
-            .output()
+        let limit = std::env::var("KONTEXT_BOAT_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| limit_of(args));
+        run_with_limit(self.command(args), limit)
             .with_context(|| format!("could not run {} (is Boat's CLI installed?)", self.bin))
+            .and_then(|o| {
+                o.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "boat {} did not answer in {} s",
+                        args.first().map(String::as_str).unwrap_or(""),
+                        limit.as_secs()
+                    )
+                })
+            })
     }
+}
+
+/// How long a `boat` command may take: `new` waits for a machine, `stop`
+/// for a snapshot, the rest are quick.
+fn limit_of(args: &[String]) -> Duration {
+    match args.first().map(String::as_str) {
+        Some("new") => Duration::from_secs(15 * 60),
+        Some("stop") => Duration::from_secs(5 * 60),
+        _ => Duration::from_secs(120),
+    }
+}
+
+/// Runs `c` and returns its output, or `None` if it did not end within
+/// `limit` (it is killed then).
+pub(crate) fn run_with_limit(mut c: Command, limit: Duration) -> std::io::Result<Option<Output>> {
+    use std::io::Read;
+    let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut out = child.stdout.take().unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let o = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out.read_to_end(&mut b);
+        b
+    });
+    let e = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err.read_to_end(&mut b);
+        b
+    });
+    let until = Instant::now() + limit;
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break Some(s);
+        }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let Some(status) = status else {
+        // Whatever it started may still hold the pipes: do not wait for them.
+        return Ok(None);
+    };
+    Ok(Some(Output {
+        status,
+        stdout: o.join().unwrap_or_default(),
+        stderr: e.join().unwrap_or_default(),
+    }))
 }
 
 /// The JSON objects of a JSON Lines output (other lines are skipped).
@@ -235,6 +304,28 @@ impl Provider for Boat {
         Ok(())
     }
 
+    fn find(&self, name: &str) -> Result<Option<String>> {
+        let o = self.run(&[
+            "list".into(),
+            "--filter".into(),
+            "rp".into(),
+            "--json".into(),
+        ])?;
+        if !o.status.success() {
+            bail!("{}", failure("boat list", &o));
+        }
+        let text = String::from_utf8_lossy(&o.stdout);
+        let mut values: Vec<Value> = json_lines(&o.stdout);
+        if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
+            values.push(v);
+        }
+        let mut found = None;
+        for v in &values {
+            find_named(v, name, &mut found);
+        }
+        Ok(found)
+    }
+
     fn inspect_hint(&self, id: &str) -> String {
         format!(
             "`boat events {id}` shows what the coordinator did; `boat resume {id}` brings the \
@@ -319,6 +410,23 @@ impl Provider for Boat {
             bail!("{}", failure(&format!("boat exec {id} --kill {pid}"), &o));
         }
         Ok(())
+    }
+}
+
+/// The last object anywhere in `v` with this `name` and an `id`.
+/// `boat list --json`'s shape is not pinned, so it looks at every object.
+fn find_named(v: &Value, name: &str, found: &mut Option<String>) {
+    match v {
+        Value::Array(a) => a.iter().for_each(|x| find_named(x, name, found)),
+        Value::Object(o) => {
+            if o.get("name").and_then(Value::as_str) == Some(name)
+                && let Some(id) = o.get("id").and_then(Value::as_str)
+            {
+                *found = Some(id.to_string());
+            }
+            o.values().for_each(|x| find_named(x, name, found));
+        }
+        _ => {}
     }
 }
 
@@ -439,6 +547,34 @@ mod tests {
             setup_of(&json!({"setupStatus": "weird"})),
             Setup::Failed(w) if w.contains("weird")
         ));
+    }
+
+    #[test]
+    fn a_sandbox_is_found_by_name_in_any_shape() {
+        let mut f = None;
+        find_named(
+            &json!({"sandboxes": [{"id": "bx_a", "name": "x"}, {"sandbox": {"id": "bx_b", "name": "kx"}}]}),
+            "kx",
+            &mut f,
+        );
+        assert_eq!(f.as_deref(), Some("bx_b"));
+    }
+
+    #[test]
+    fn a_command_past_its_limit_is_killed() {
+        let mut c = Command::new("sleep");
+        c.arg("5");
+        let t = Instant::now();
+        assert!(
+            run_with_limit(c, Duration::from_millis(200))
+                .unwrap()
+                .is_none()
+        );
+        assert!(t.elapsed() < Duration::from_secs(3));
+        let mut c = Command::new("echo");
+        c.arg("hi");
+        let o = run_with_limit(c, Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(o.stdout, b"hi\n");
     }
 
     /// The shapes `boat exec` printed in the probe of 2026-11-16 (CLI 1.0.100).

@@ -33,6 +33,10 @@ pub enum TurnState {
     /// The service could not be asked, or what the turn left could not be
     /// read this time. Ask again later.
     NoAnswer(String),
+    /// The turn was started twice (a dispatch or watcher died between
+    /// starting it and saving its process id): the runner refused the second
+    /// start, and this is the process that runs it. Follow that one.
+    Adopt(u32),
 }
 
 /// A new session id for Claude Code (a random uuid, version 4).
@@ -185,10 +189,13 @@ pub fn state(prov: &dyn Provider, run: &Run) -> TurnState {
             o.code,
             one_line(&o.stderr, 200)
         ))),
-        Ok(_) if code == ALREADY_STARTED => TurnState::Lost(format!(
-            "turn {} was started twice; process {pid} did not run it",
-            run.turns
-        )),
+        Ok(o) if code == ALREADY_STARTED => match parse_summary(&o.stdout).pid {
+            Some(p) if p != pid => TurnState::Adopt(p),
+            _ => TurnState::Lost(format!(
+                "turn {} was started twice; process {pid} did not run it",
+                run.turns
+            )),
+        },
         Ok(o) => verdict(&parse_summary(&o.stdout), code),
     }
 }
