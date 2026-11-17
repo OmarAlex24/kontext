@@ -315,7 +315,7 @@ fn cloudflare_token() -> Result<String> {
 
 /// One line typed on the terminal after `prompt` (on stderr), without echo if
 /// `secret`. `None` if nobody typed one within [`crate::human::prompt_wait`].
-fn read_tty_line(prompt: &str, secret: bool) -> Result<Option<String>> {
+pub(crate) fn read_tty_line(prompt: &str, secret: bool) -> Result<Option<String>> {
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
     if secret {

@@ -155,6 +155,20 @@ pub struct TreeEpic {
     /// Epics of its wave that touch the same paths (as `kontext plan` says).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overlaps: Vec<plan::Overlap>,
+    /// It runs in a sandbox of `kontext dispatch` since that day ("Nov 16"):
+    /// its last dispatch journal entry is a start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_since: Option<String>,
+}
+
+/// The day an epic was dispatched, if its last dispatch record (a journal
+/// entry with `fields.dispatch`, DESIGN §12.5) is a start.
+fn sandbox_since(st: &State, epic: &str) -> Option<String> {
+    let last = st
+        .of_kind("journal")
+        .filter(|e| field(e, "epic") == Some(epic) && field(e, "dispatch").is_some())
+        .last()?;
+    (field(last, "dispatch") == Some("start")).then(|| crate::scope::day(&last.hlc))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -320,6 +334,11 @@ fn epic_node(st: &State, n: &Node, waiting: &BTreeSet<String>, marks: &Marks) ->
         reason: None,
         scope: marks.mark(&n.id),
         overlaps: Vec::new(),
+        sandbox_since: if closed {
+            None
+        } else {
+            sandbox_since(st, &n.id)
+        },
     }
 }
 
@@ -448,6 +467,9 @@ fn epic_lines(e: &TreeEpic, indent: &str, last: bool, out: &mut Vec<Line>) {
         ("├─ ", "│   ")
     };
     let mut right = epic_count(e);
+    if let Some(d) = &e.sandbox_since {
+        right.push_str(&format!(" · in a sandbox since {d}"));
+    }
     if let Some(m) = e.scope {
         right.push_str(&format!(" · {}", m.label()));
     }

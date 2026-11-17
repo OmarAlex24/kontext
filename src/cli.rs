@@ -10,7 +10,7 @@
 //! human can do, such as a Cloudflare API token: [`crate::human`]).
 
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -365,6 +365,25 @@ pub enum Cmd {
     Server {
         #[command(subcommand)]
         cmd: ServerCmd,
+    },
+    /// Gives an open epic of a ready wave its own sandbox with Claude Code as its coordinator
+    /// (DESIGN §12.5).
+    ///
+    /// It refuses (exit 2, one line) unless the project syncs through a kontext server, the agent
+    /// credential is set (`kontext dispatch credential set`), the plan is signed, the epic is open
+    /// and every epic it comes after is closed (as `kontext plan` computes it), the epic has no
+    /// sandbox yet (nor one not cleaned up), and fewer than [dispatch] max_sandboxes are running.
+    /// Then it makes a coordinator token for the epic and a sandbox that gets the token and the
+    /// credential as files; its start script clones the repo and sets kontext up; and it starts
+    /// Claude Code there (`claude -p` through `boat exec`, with every permission inside the
+    /// sandbox). `kontext dispatch status` and `kontext dispatch stop <epic>` follow it. An epic
+    /// named like a subcommand goes by its id or as epic:<name>
+    #[command(args_conflicts_with_subcommands = true)]
+    Dispatch {
+        #[command(subcommand)]
+        cmd: Option<DispatchCmd>,
+        /// The epic: E-…, epic:<name> or <name>
+        epic: Option<String>,
     },
     /// Tokens for the project's kontext server (an owner's): one per machine, person or sandbox,
     /// each bound to a role and its own writer
@@ -929,6 +948,51 @@ pub enum Cmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum DispatchCmd {
+    /// Which epic runs in which sandbox on this machine, since when, its progress and its state
+    /// (starting, running, resumed, overdue, stuck, closed, stopped), and the agent credential
+    Status,
+    /// Ends the coordinator's turn, removes the credential from the sandbox, stops the sandbox
+    /// (its data is kept) and revokes its token. Exits non-zero while the clean-up is not
+    /// complete (run it again to retry), and when the credential could not be removed (replace
+    /// it then)
+    Stop {
+        /// The epic: E-…, epic:<name> or <name>
+        epic: String,
+        /// For a run that already ended and whose clean-up can never finish (Boat keeps refusing
+        /// the stop): counts it as cleaned up, tries the token's revoke once more, writes its end
+        /// entry and says what kontext did not verify. It stops nothing
+        #[arg(long)]
+        forget: bool,
+    },
+    /// Follows this project's live sandboxes until none is left: stops one when its epic closes
+    /// in the ledger, resumes a coordinator once when its turn ends with the epic open, and marks
+    /// it stuck (a question to the pm, the sandbox stopped, the token revoked) when it stops
+    /// again, its turn fails or its time runs out. `dispatch` starts it; this starts it again (after the machine
+    /// slept, say), and it picks up from the saved state
+    Watch {
+        /// Start it in the background and return
+        #[arg(long)]
+        detach: bool,
+    },
+    /// The coordinator agent's credential on this machine (a Claude Code OAuth token from
+    /// `claude setup-token`, or an Anthropic API key). It is kept in the kontext config folder,
+    /// mode 0600, never synced, and reaches each sandbox only as a file
+    Credential {
+        #[command(subcommand)]
+        cmd: CredentialCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CredentialCmd {
+    /// Saves it, read from stdin (or typed, hidden, on a terminal); never from an argument
+    Set,
+    /// Removes it
+    Rm,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum TokenCmd {
     /// Makes a token and prints it once, with the variables a sandbox needs (KONTEXT_SERVER,
     /// KONTEXT_PROJECT, KONTEXT_TOKEN, and its actor and role). The server refuses what the
@@ -1363,6 +1427,11 @@ fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
         | Cmd::Ui { .. } => return None,
         Cmd::Install {
             skills_only: true, ..
+        } => return None,
+        // The watcher syncs on its own; the credential is this machine's.
+        Cmd::Dispatch {
+            cmd: Some(DispatchCmd::Credential { .. } | DispatchCmd::Watch { .. }),
+            ..
         } => return None,
         _ => {}
     }
@@ -2212,6 +2281,7 @@ fn run_cmd(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Dispatch { cmd, epic } => cx.dispatch(cmd, epic),
         Cmd::Token { cmd } => {
             let p = config::resolve_project(project)?;
             match cmd {
@@ -2355,6 +2425,193 @@ pub(crate) fn print_json(v: &impl serde::Serialize) -> Result<()> {
 }
 
 impl Ctx<'_> {
+    /// `kontext dispatch`.
+    fn dispatch(&self, cmd: Option<DispatchCmd>, epic: Option<String>) -> Result<ExitCode> {
+        if let Some(DispatchCmd::Credential { cmd }) = cmd {
+            return self.dispatch_credential(cmd);
+        }
+        let p = config::resolve_project(self.project)?;
+        match (cmd, epic) {
+            (Some(DispatchCmd::Credential { .. }), _) => unreachable!(),
+            (Some(DispatchCmd::Watch { detach: false }), _) => {
+                crate::dispatch::watch::run(&p.name)?;
+            }
+            (Some(DispatchCmd::Watch { detach: true }), _) => {
+                if crate::dispatch::watch::ensure(&p.name)? {
+                    match crate::dispatch::watch::pid(&p.name) {
+                        Some(pid) => println!("The watcher of {} runs (pid {pid}).", p.name),
+                        // It did what there was to do and left: nothing is live.
+                        None => println!(
+                            "The watcher of {} ran and stopped: no sandbox is live now.",
+                            p.name
+                        ),
+                    }
+                } else {
+                    bail!("the watcher did not start: see the dispatch folder's watcher.log");
+                }
+            }
+            (Some(DispatchCmd::Status), _) => {
+                let r = crate::dispatch::status(&p.name)?;
+                if self.json {
+                    print_json(&r)?;
+                } else {
+                    print!("{}", r.text());
+                }
+            }
+            (Some(DispatchCmd::Stop { epic, forget: true }), _) => {
+                let (run, unverified) = crate::dispatch::forget(&p.name, &epic)?;
+                if self.json {
+                    print_json(&serde_json::json!({ "run": run, "not_verified": unverified }))?;
+                } else {
+                    println!(
+                        "Epic {}: its run is forgotten and counts as cleaned up; nothing was \
+                         stopped.",
+                        run.name
+                    );
+                    if unverified.is_empty() {
+                        println!("Nothing was left to verify.");
+                    } else {
+                        println!("kontext did not verify:");
+                        for u in &unverified {
+                            println!("- {u}");
+                        }
+                    }
+                }
+            }
+            (Some(DispatchCmd::Stop { epic, .. }), _) => {
+                let (run, failed) = crate::dispatch::stop(&p.name, &epic)?;
+                for f in &failed {
+                    eprintln!("kontext: warning: {f}");
+                }
+                let left = !run.clean();
+                if self.json {
+                    print_json(&run)?;
+                } else {
+                    println!(
+                        "Epic {}: sandbox {} stopped and its token revoked{}",
+                        run.name,
+                        run.sandbox.as_deref().unwrap_or("(none)"),
+                        if left {
+                            ", except for what is above"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                if run.credential_left && !self.json {
+                    eprintln!(
+                        "kontext: the agent's credential could not be removed from {} before it \
+                         stopped, and may be in its saved state: {}",
+                        run.sandbox.as_deref().unwrap_or("its sandbox"),
+                        crate::dispatch::REPLACE_CREDENTIAL
+                    );
+                }
+                if left || run.credential_left {
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            (None, Some(epic)) => {
+                let json = self.json;
+                let mut say = |l: &str| {
+                    if json {
+                        eprintln!("kontext: {l}");
+                    } else {
+                        println!("{l}");
+                    }
+                };
+                let run_of = || {
+                    crate::dispatch::state::read(&p.name)
+                        .ok()
+                        .and_then(|runs| crate::dispatch::find_run(&runs, &epic).cloned())
+                };
+                let before = run_of().map(|r| r.id);
+                let run = match crate::dispatch::dispatch(&p.name, &epic, &mut say) {
+                    Ok(run) => run,
+                    Err(e) => {
+                        // With --json, a failed dispatch says why on stdout too,
+                        // with the run it left (never a secret): none when it
+                        // failed before it reserved one.
+                        if json && e.downcast_ref::<crate::store::Refused>().is_none() {
+                            let run = run_of().filter(|r| Some(&r.id) != before.as_ref());
+                            let mut out = serde_json::json!({
+                                "error": crate::dispatch::credential::redact(&format!("{e:#}")),
+                                "run": run,
+                            });
+                            if let Some(f) = e.downcast_ref::<crate::dispatch::SetupFailed>() {
+                                out["detail"] = serde_json::Value::String(f.full.clone());
+                            }
+                            print_json(&out)?;
+                        }
+                        return Err(e);
+                    }
+                };
+                if json {
+                    print_json(&run)?;
+                } else {
+                    println!(
+                        "Epic {} runs in sandbox {} ({}); `kontext dispatch status` follows it",
+                        run.name,
+                        run.sandbox.as_deref().unwrap_or("?"),
+                        run.state.label()
+                    );
+                }
+            }
+            (None, None) => bail!("name the epic: kontext dispatch <epic> (or status, stop)"),
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// `kontext dispatch credential set|rm`.
+    fn dispatch_credential(&self, cmd: CredentialCmd) -> Result<ExitCode> {
+        use crate::dispatch::credential;
+        match cmd {
+            CredentialCmd::Set => {
+                let value = if std::io::stdin().is_terminal() {
+                    if crate::human::no_prompt() {
+                        return Err(crate::store::Refused(
+                            "no credential on stdin: pipe it in (`kontext dispatch credential set \
+                             < file`)"
+                                .into(),
+                        )
+                        .into());
+                    }
+                    eprintln!(
+                        "Paste the token `claude setup-token` printed (or an Anthropic API key). \
+                         It is kept on this machine only, mode 0600."
+                    );
+                    crate::server::read_tty_line("Agent credential: ", true)?.unwrap_or_default()
+                } else {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut s)
+                        .context("could not read stdin")?;
+                    s
+                };
+                let kind = credential::set(&value)?;
+                if self.json {
+                    print_json(&serde_json::json!({ "set": true, "kind": kind }))?;
+                } else {
+                    println!(
+                        "Agent credential saved ({}): each dispatched sandbox gets it as a file, \
+                         as {}.",
+                        kind.label(),
+                        kind.var()
+                    );
+                }
+            }
+            CredentialCmd::Rm => {
+                let had = credential::rm()?;
+                if self.json {
+                    print_json(&serde_json::json!({ "removed": had }))?;
+                } else if had {
+                    println!("Agent credential removed from this machine.");
+                } else {
+                    println!("There was no agent credential on this machine.");
+                }
+            }
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
     /// Who writes: `--actor`, `--role` and `--model`, or the variables.
     fn who(&self) -> Result<Actor> {
         Actor::resolve_with(self.actor, self.role, self.model)

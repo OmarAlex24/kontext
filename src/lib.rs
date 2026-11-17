@@ -10,6 +10,7 @@ pub mod changelog;
 pub mod cli;
 pub mod config;
 pub mod cursor;
+pub mod dispatch;
 pub mod distill;
 pub mod doctor;
 pub mod epics;

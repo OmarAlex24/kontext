@@ -320,7 +320,7 @@ kontext standup             # what's closed, with its evidence
 
 ## Orchestrating several agents
 
-kontext doesn't launch agents: the skill `kontext-orchestrate` (installed by `kontext install`, next to the `kontext` one) tells the agent how much structure to set up and how to do it with what its harness has. It is triggered by big tasks, projects from scratch, or "this is a lot of work". It measures the size (S–M, L, XL, XXL) with fixed criteria, sets up PM → one coordinator per epic → scouts, implementers and testers, shows you the structure and the cost (model per level and how many agents), and waits for your yes before launching anything XL or XXL. On a greenfield project it goes in waves, with a `standup` with you at each boundary. The details are in [DESIGN.md §12.1](./DESIGN.md).
+kontext doesn't decide what runs: the skill `kontext-orchestrate` (installed by `kontext install`, next to the `kontext` one) tells the agent how much structure to set up and how to do it with what its harness has. It is triggered by big tasks, projects from scratch, or "this is a lot of work". It measures the size (S–M, L, XL, XXL) with fixed criteria, sets up PM → one coordinator per epic → scouts, implementers and testers, shows you the structure and the cost (model per level and how many agents), and waits for your yes before launching anything XL or XXL. On a greenfield project it goes in waves, with a `standup` with you at each boundary. The details are in [DESIGN.md §12.1](./DESIGN.md).
 
 | Command | What it does |
 |---|---|
@@ -356,6 +356,53 @@ kontext plan        # exits with 1: base is left with no wave, and Problems says
 ```
 
 The agent files follow the wave protocol: the coordinator doesn't talk to the user (it escalates with `kontext ask --to pm`), it closes the epic once all its tasks are closed with evidence, and it tells the pm with a `kontext log` and its report; implementers and testers only ask their coordinator.
+
+### One epic, one sandbox: `kontext dispatch`
+
+With the project on a kontext server and the plan signed, the pm can give each epic of a ready wave a sandbox of its own (Boat, for now), with Claude Code in it as the epic's coordinator. kontext uses no model for this: the checks, and when a sandbox stops, come from the ledger. The details are in [DESIGN.md §12.5](./DESIGN.md).
+
+Once, on your machine: make a long-lived Claude Code token and give it to kontext. Nothing is connected on Boat's Agents page; kontext runs Claude Code in the sandbox itself, with this credential. Also give Boat's GitHub app access to the code repo: the sandbox's GitHub login reaches only the repos where that app is installed, and without it the clone fails with 403 and no pull request can be opened.
+
+```sh
+claude setup-token                 # prints sk-ant-oat01-…
+kontext dispatch credential set    # paste it (hidden), or pipe it on stdin; never as an argument
+kontext dispatch credential rm     # forgets it
+```
+
+```sh
+kontext dispatch payments          # refuses (exit 2, one line) unless a credential is set, the plan is signed,
+                                   # payments is open, every epic it comes after is closed, it has no sandbox
+                                   # and fewer than 3 run
+#   token tok_… made: coordinator of payments, writer omar.coordinator.payments.…@kontext
+#   sandbox bx_… (kontext-billing-payments) made with boat; waiting for its start script
+#   start script done: kontext, the project and the repo's clone are set up in the sandbox
+#   coordinator started: Claude Code claude-opus-5-5 in bx_…, turn 1 (process 1234), with every permission inside the sandbox (`kontext brief payments`)
+#   watcher running (pid 4242): it stops the sandbox when the epic closes
+kontext dispatch status            # which epic runs where, since when, its progress, its state, the watcher, the credential
+kontext dispatch stop payments     # ends the turn, stops the sandbox (its data is kept) and revokes the token
+kontext dispatch stop payments --forget   # gives up on a clean-up that can never finish, and lists what it did not verify
+kontext dispatch watch --detach    # starts the watcher again (after the Mac slept, say)
+```
+
+- **What the coordinator can do:** it runs as `claude -p` with every permission (`--dangerously-skip-permissions`) inside its sandbox, with your Claude credential and your GitHub login (the one Boat's environment brings), so its commits and PRs are yours. The sandbox is the boundary: give it an environment with only what an epic needs.
+- **The secrets** (the epic's coordinator token, made with `kontext token create`'s machinery and living two hours longer than the epic's limit, and your Claude credential) reach the sandbox only as files: never in an argument, a variable, the output or a log. The token is read into one command and its file removed (`kontext clone` keeps it in the sandbox's kontext config, and it is revoked at clean-up); the credential is kept for the coordinator's turns in `/dev/shm` (else a 0600 file in the sandbox's home) and removed before kontext stops the sandbox. Boat's stop keeps `/dev/shm` in the saved sandbox like its disk, so that removal is what keeps the credential out: a stop Boat makes itself (its time limit, a manual `boat stop`) keeps it in that sandbox's saved state, and when the removal fails `dispatch stop` exits non-zero and tells you to replace the credential (`claude setup-token`, then `kontext dispatch credential set`). On your machine the credential lives in `~/.config/kontext/dispatch/.agent-credential`, mode 0600, never synced.
+- **The start script** installs the same kontext release (pinned), sets the project up from the server, clones the repo (the first `[[repos]]` remote; one that is not on GitHub is cloned as written) unless Boat already did, sets the git author from your GitHub login, installs `gh stack` when the sandbox lacks it (not fatal), and runs `kontext install --local` in the clone, kept out of git (`info/exclude`). It stops at the first step that fails, and the reason `dispatch` gives is the script's last line about it (`--json` adds all it printed). The coordinator gets a short prompt pointing at `kontext brief <epic>`, and is asked for the epic's work as one PR stack. If its first turn fails at once (a refused credential, say), `dispatch` fails and cleans up. `dispatch` waits for the start script, so it can hold the terminal for about 20 minutes; if it is killed meanwhile, the watcher finishes the start.
+- **The watcher** runs on your machine and decides by the ledger, never by what the agent says. The epic closes: the turn is ended, the sandbox stops and the token is revoked. The coordinator's turn ends with the epic open: it is resumed once, in the same session; if it stops again, its turn fails, or its time runs out (8 hours), it is stuck: a question to the pm from `agent:dispatcher`, then stop and revoke. When the time runs out while the ledger cannot be pulled, the sandbox stops all the same and the run is `overdue` until a fresh pull says closed or stuck. If the watcher dies or the Mac sleeps, the sandboxes keep working, and `dispatch status` says how to start the watcher again; it picks up from where it was, and finishes or ends a dispatch that was killed midway.
+- **What is left billing is said, and retried:** a run whose clean-up failed still holds its epic and counts toward the 3, and the watcher retries it (`dispatch stop` retries it too, and exits non-zero until it is done); so does a sandbox `boat new` made without giving its id, until Boat's list shows it (then it is stopped) or shows it is not there. Every call to Boat has a time limit. A turn Boat no longer knows is read from what it left in the sandbox, and one that cannot be followed for 10 minutes makes the run stuck. If Boat can never stop a sandbox (archived, say), `dispatch stop <epic> --forget` lets the epic go and lists what kontext did not verify.
+- **Small work gets no sandbox:** an epic with a single open task gets a warning (`dispatch` goes on; the pm does not dispatch it).
+- **What is where:** the mapping of epic to sandbox, Claude Code session, turn and token id lives in `~/.config/kontext/dispatch/<project>/` (this machine only). The ledger gets a journal entry when an epic is dispatched and when its sandbox stops, and `kontext tree` says "in a sandbox since …".
+
+```toml
+# project.toml; every key is optional
+[dispatch]
+max_sandboxes = 3
+hours = 8
+environment = "my-env"      # Boat's named environment: your GitHub login (Boat's default if not set)
+provider = "claude"         # the coordinator: Claude Code, the only one
+model = "claude-opus-5-5"   # its model (`claude --model`)
+machine = "default"         # Boat's machine type
+repo_dir = "/home/user/shop"   # where the repo is cloned (default: /home/user/<first [[repos]]>)
+```
 
 ## The PM's memory of your ideas (`.pm/`)
 
@@ -658,7 +705,8 @@ kontext invite                                  # owner by default; --role, --pe
 #     curl -fsSL https://raw.githubusercontent.com/OmarAlex24/kontext/main/install.sh | sh -s -- kxj1.…
 
 # A sandbox for a coordinator: set the printed variables in its environment;
-# its first kontext command sets the project up there
+# its first kontext command sets the project up there (`kontext dispatch <epic>`
+# does all of it with a Boat sandbox: "One epic, one sandbox" above)
 kontext token create --role coordinator --epic payments --ttl 8h
 kontext token list
 kontext token revoke tok_…
@@ -780,6 +828,8 @@ Releases: `.github/workflows/release.yml` builds `aarch64-apple-darwin`, `x86_64
 The `kontext ui` tests start the server on a free port against the project from `examples/demo.sh` (they need `bash` and `git`). The harness tests don't run from `cargo test`: they are skipped if they can't find the `kontext` binary.
 
 The golden-query test for `find` copies the docs of a fictitious web shop (`tests/fixtures/find-docs`) into a temporary git repo, configures it with `examples/find-repo.toml` and `examples/find-synonyms.toml`, and checks the top results and their status (in force, proposed or historical) for a handful of queries, plus `--check`. The distill tests use a fake model (a shell script); they never call a real model.
+
+The `kontext dispatch` tests use a fake `boat` (`tests/fixtures/fake-boat.sh`, through `KONTEXT_BOAT`) and the local server; they never reach Boat or Claude. Some run the start script and the turn's runner in a home of their own, with a fake `curl` whose install script copies the test's binary and fake `claude` and `gh`; others kill `dispatch` at a named step (`KONTEXT_DISPATCH_TEST_PAUSE`) to check that nothing is left running or on disk.
 
 The `sync` tests use a "bare" repo in a temporary folder as the remote, a separate git config for each "machine" (`GIT_CONFIG_GLOBAL`), and disposable SSH keys (`ssh-keygen -N ""` in the temporary folder); they never touch a real remote or `~/.ssh`.
 
