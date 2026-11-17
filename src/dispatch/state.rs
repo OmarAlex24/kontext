@@ -114,13 +114,44 @@ pub struct Run {
     /// after it stopped. It expires, in case that process died.
     #[serde(default)]
     pub cleaning_until: Option<i64>,
+    /// `boat new` was asked at this time (wall-clock ms) and gave no id
+    /// yet: a sandbox may exist under `sandbox_name`. It is cleared when the
+    /// id is known or when a look-up by name says there is none, and until
+    /// then the run is not clean.
+    #[serde(default)]
+    pub sandbox_pending: Option<i64>,
+    /// The agent's credential could not be removed from the sandbox before
+    /// it stopped: it may be in the sandbox's saved state, so the owner must
+    /// replace it.
+    #[serde(default)]
+    pub credential_left: bool,
+    /// The owner gave up on its clean-up (`dispatch stop --forget`): it
+    /// counts as clean, though nobody saw its sandbox stop.
+    #[serde(default)]
+    pub forgotten: bool,
+    /// The `sandbox_pending` mark a clean-up found no sandbox for (in memory
+    /// only): merging that clean-up clears this mark and no later one.
+    #[serde(skip)]
+    pub looked: Option<i64>,
 }
 
 impl Run {
     /// Its sandbox and token are gone, or there is nothing to clean up.
     pub fn clean(&self) -> bool {
-        (self.sandbox.is_none() || self.sandbox_stopped)
-            && (self.token_id.is_none() || self.token_revoked)
+        self.forgotten
+            || (((self.sandbox.is_none() && self.sandbox_pending.is_none())
+                || self.sandbox_stopped)
+                && (self.token_id.is_none() || self.token_revoked))
+    }
+
+    /// The key the watcher keeps per run: its id, or its epic for a run
+    /// written by an older kontext (no id).
+    pub fn key(&self) -> String {
+        if self.id.is_empty() {
+            format!("epic:{}", self.epic)
+        } else {
+            self.id.clone()
+        }
     }
 
     /// Its sandbox may still be running (or its token valid): it counts
@@ -297,15 +328,18 @@ pub fn update_id(project: &str, mine: &Run, f: impl FnOnce(&mut Run)) -> Result<
 }
 
 /// The wall clock in ms (not `KONTEXT_NOW`: leases are between processes).
-fn wall_ms() -> i64 {
+pub fn wall_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-/// How long a clean-up lease lasts: longer than a `boat stop` may take.
-const LEASE_MS: i64 = 6 * 60_000;
+/// How long a clean-up lease lasts: longer than a whole clean-up may take,
+/// each call at its time limit (a look-up by name, `--status`, `--kill`
+/// and the credential's `rm` at 2 minutes each, `stop` at 5: 13 minutes,
+/// and the token's revoke).
+const LEASE_MS: i64 = 20 * 60_000;
 
 impl Run {
     /// Someone else is cleaning it up right now.
@@ -341,11 +375,20 @@ pub fn lease_clean_up(project: &str, mine: &Run) -> Result<Option<Run>> {
 pub fn merge_clean_up(project: &str, done: &Run) -> Result<Option<Run>> {
     update_id(project, done, |r| {
         r.cleaning_until = None;
-        if r.sandbox.is_none() {
+        if r.sandbox.is_none() && done.sandbox.is_some() {
             r.sandbox.clone_from(&done.sandbox);
+            r.sandbox_stopped = false;
+        }
+        // The id was found, or a look-up by name said there is none for
+        // the mark it looked at (a later one, set meanwhile, stays).
+        if r.sandbox.is_some() || (done.looked.is_some() && r.sandbox_pending == done.looked) {
+            r.sandbox_pending = None;
         }
         if done.sandbox_stopped && r.sandbox == done.sandbox {
             r.sandbox_stopped = true;
+        }
+        if done.credential_left {
+            r.credential_left = true;
         }
         if r.token_id.is_none() {
             r.token_id.clone_from(&done.token_id);
@@ -354,4 +397,37 @@ pub fn merge_clean_up(project: &str, done: &Run) -> Result<Option<Run>> {
             r.token_revoked = true;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The review's finding 9: the lease outlasts the slowest clean-up
+    /// (each `boat` call at its limit), so nobody else takes it meanwhile.
+    #[test]
+    fn the_lease_outlasts_a_whole_clean_up() {
+        let worst = ["list", "exec", "exec", "exec", "stop"]
+            .iter()
+            .map(|c| super::super::provider::limit_of(&[c.to_string()]).as_millis() as i64)
+            .sum::<i64>();
+        assert_eq!(worst, 13 * 60_000);
+        assert!(LEASE_MS >= worst + 5 * 60_000, "{LEASE_MS} < {worst}");
+    }
+
+    #[test]
+    fn a_pending_sandbox_or_a_forgotten_run() {
+        let mut r: Run = serde_json::from_str(
+            r#"{"epic":"E-1","name":"x","service":"boat","sandbox":null,"sandbox_name":"n",
+                "token_id":"tok_1","token_revoked":true,"state":"stuck","started":0,
+                "updated":0,"deadline":0}"#,
+        )
+        .unwrap();
+        assert!(r.clean());
+        r.sandbox_pending = Some(1);
+        assert!(!r.clean() && r.billing());
+        r.forgotten = true;
+        assert!(r.clean() && r.settled());
+        assert_eq!(r.key(), "epic:E-1");
+    }
 }

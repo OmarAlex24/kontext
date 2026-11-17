@@ -83,7 +83,8 @@ pub fn path() -> Result<PathBuf> {
 pub const MISSING: &str = "no agent credential on this machine: make one with `claude setup-token` \
      and save it with `kontext dispatch credential set` (it reads it from stdin)";
 
-/// Checks a value: one line, no spaces, a known prefix.
+/// Checks a value: one line, no spaces or control bytes, a known prefix,
+/// and more than the prefix.
 pub fn check(value: &str) -> Result<Kind> {
     let v = value.trim();
     if v.is_empty() {
@@ -94,14 +95,27 @@ pub fn check(value: &str) -> Result<Kind> {
             Refused("the credential is one word with no spaces or line breaks".into()).into(),
         );
     }
-    Kind::of(v).ok_or_else(|| {
+    // A NUL would be lost on the way to Claude Code, which would get another
+    // value; an escape byte is no part of a credential either.
+    if v.chars().any(char::is_control) {
+        return Err(Refused("the credential has a control character in it".into()).into());
+    }
+    let kind = Kind::of(v).ok_or_else(|| {
         Refused(
             "that is not a Claude Code OAuth token (sk-ant-oat…, from `claude setup-token`) or an \
              Anthropic API key (sk-ant-api…)"
                 .into(),
         )
-        .into()
-    })
+    })?;
+    // `sk-ant-oat`, `sk-ant-oat01-`: only the prefix and its version.
+    let rest = &v["sk-ant-oat".len()..];
+    if !rest.chars().any(|c| c.is_ascii_alphabetic()) {
+        return Err(Refused(
+            "that is only the start of a credential: paste the whole of it".into(),
+        )
+        .into());
+    }
+    Ok(kind)
 }
 
 /// Saves it (mode 0600, replacing the one there was).
@@ -184,6 +198,13 @@ mod tests {
         assert!(check("ghp_abc").is_err());
         assert!(check("sk-ant-oat01 abc").is_err());
         assert!(check("").is_err());
+        // The review of #61 and #62, finding 12: a bare prefix, a NUL, an
+        // escape byte.
+        assert!(check("sk-ant-oat").is_err());
+        assert!(check("sk-ant-oat01-").is_err());
+        assert!(check("sk-ant-api03-123").is_err());
+        assert!(check("sk-ant-oat01-ab\0cd").is_err());
+        assert!(check("sk-ant-oat01-ab\x1bcd").is_err());
         assert_eq!(Kind::OauthToken.var(), "CLAUDE_CODE_OAUTH_TOKEN");
     }
 

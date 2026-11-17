@@ -2,12 +2,16 @@
 # A fake `boat` CLI for the `kontext dispatch` tests (KONTEXT_BOAT points at
 # a copy of it). It never talks to Boat. Its output follows what Boat's CLI
 # 1.0.100 printed on 2026-11-16 (`boat exec` sync, --detach, --status and
-# --kill). Everything it is asked goes in $FAKE_BOAT_DIR/calls.log, one line
-# per call, so a test can check that no secret was ever in an argument.
+# --kill; `list --json`; `exec` on a stopped sandbox, refused with
+# machine_not_running; `stop` of a stopped one, which exits 0). Everything
+# it is asked goes in $FAKE_BOAT_DIR/calls.log, one line per call, so a test
+# can check that no secret was ever in an argument.
 # Files under $FAKE_BOAT_DIR steer it:
 #
 #   fail-new          `new` fails before making a sandbox
 #   fail-new-late     `new` makes a sandbox, then fails
+#   fail-new-silent   `new` makes a sandbox, then fails without printing its id
+#   list-more         `list` says more pages follow, and shows none on its own
 #   fail-stop         `stop` fails
 #   fail-detach       `exec --detach` fails
 #   fail-status       `exec --status` fails (the CLI could not ask)
@@ -18,10 +22,14 @@
 #                       empty           Claude Code ended the turn (exit 0)
 #                       error:<text>    Claude Code failed with <text> (exit 1)
 #                       exit:<code>     the runner exited <code>, no result
-#   lost-<id>-<n>     `--status` does not know turn n's process
+#   lost-<id>-<n>     `--status` does not know turn n's process (the runner's
+#                     `read` still says how it stands)
+#   gone-<id>-<n>     the runner left no trace of turn n (`read`: no pid)
 #   hang-new          `new` makes the sandbox, then waits (until release-new
 #                     exists, 60 s at most) before it says it is ready
 #   hang-stop         `stop` waits the same way (until release-stop)
+#   hang-detach       `exec --detach` starts the turn, then waits (until
+#                     release-detach) before it answers
 #
 # A second `exec --detach` of a turn already started gets a process that
 # exits 90 at once, as the runner does when it refuses to run a turn twice.
@@ -77,7 +85,7 @@ new)
         exit 1
     fi
     id=$(next_id)
-    echo "{\"event\":\"created\",\"id\":\"$id\"}"
+    [ -e "$D/fail-new-silent" ] || echo "{\"event\":\"created\",\"id\":\"$id\"}"
     printf '%s' "${name:-}" >"$D/$id.name"
     printf '%s' "$envs" >"$D/$id.env"
     printf '%s' "$files" | while IFS= read -r f; do
@@ -87,7 +95,7 @@ new)
         cp "$here" "$D/files/$(basename "$there")"
     done
     if [ -n "$setup" ]; then cp "$setup" "$D/$id.setup-file"; fi
-    if [ -e "$D/fail-new-late" ]; then
+    if [ -e "$D/fail-new-late" ] || [ -e "$D/fail-new-silent" ]; then
         echo '{"event":"error","error":"the machine went away","code":"lost"}'
         exit 1
     fi
@@ -98,8 +106,12 @@ new)
 info)
     id=$1
     status=$(cat "$D/$id.setup" 2>/dev/null || echo done)
-    err=$(cat "$D/$id.setup-error" 2>/dev/null || echo "")
-    echo "{\"id\":\"$id\",\"state\":\"running\",\"setupStatus\":\"$status\",\"setupError\":\"$err\"}"
+    # JSON-escaped: a real setupError has many lines.
+    err=""
+    if [ -e "$D/$id.setup-error" ]; then
+        err=$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' "$D/$id.setup-error" | awk '{ printf "%s\\n", $0 }')
+    fi
+    printf '%s\n' "{\"id\":\"$id\",\"state\":\"running\",\"setupStatus\":\"$status\",\"setupError\":\"$err\"}"
     ;;
 stop)
     id=$1
@@ -112,16 +124,20 @@ stop)
     echo "{\"id\":\"$id\",\"state\":\"stopping\"}"
     ;;
 list)
-    printf '['
+    if [ -e "$D/list-more" ]; then
+        echo '{"pageInfo":{"hasMore":true,"limit":200,"nextCursor":"c_1"},"sandboxes":[]}'
+        exit 0
+    fi
+    printf '{"pageInfo":{"hasMore":false,"limit":200,"nextCursor":null},"sandboxes":['
     sep=""
     for f in "$D"/bx_fake*.name; do
         [ -e "$f" ] || continue
         id=$(basename "$f" .name)
         [ -e "$D/$id.stopped" ] && continue
-        printf '%s{"id":"%s","name":"%s","state":"ready"}' "$sep" "$id" "$(cat "$f")"
+        printf '%s{"id":"%s","name":"%s","state":"idle","setupStatus":"done"}' "$sep" "$id" "$(cat "$f")"
         sep=","
     done
-    echo ']'
+    echo ']}'
     ;;
 exec)
     id=$1
@@ -140,6 +156,11 @@ exec)
         esac
     done
     line="$*"
+    # Boat refuses any exec on a stopped sandbox, and does not wake it.
+    if [ -e "$D/$id.stopped" ]; then
+        echo "{\"code\":\"machine_not_running\",\"error\":\"Sandbox $id is stopped. Run \`boat resume $id\`, then retry.\",\"event\":\"error\",\"status\":409}"
+        exit 1
+    fi
     # How turn n (of sandbox $1) ended: sets `how` to ended, error:<text>,
     # exit:<code> or running.
     turn_end() {
@@ -167,6 +188,7 @@ exec)
             : >"$D/dup-$p"
         fi
         echo "$id ${n:-0} ${sid:-none}" >"$D/pid-$p"
+        hang detach
         echo "{\"command\":\"x\",\"commandId\":\"cmd_$p\",\"logPath\":\"/home/user/.ascii/processes/$p.log\",\"pid\":$p,\"processId\":$p,\"success\":true}"
         ;;
     status)
@@ -196,6 +218,16 @@ exec)
         fi
         ;;
     kill)
+        how=gone
+        if [ -e "$D/pid-$pid" ] && [ ! -e "$D/killed-$pid" ] && [ ! -e "$D/dup-$pid" ]; then
+            read -r sid_ n _ <"$D/pid-$pid"
+            turn_end "$sid_" "$n"
+        fi
+        if [ "$how" != running ]; then
+            # Already exited: nothing to signal.
+            echo "{\"command\":null,\"processId\":$pid,\"running\":false,\"signaled\":false}"
+            exit 0
+        fi
         : >"$D/killed-$pid"
         echo "{\"running\":false,\"signaled\":true,\"command\":{\"status\":\"killed\",\"exitCode\":143,\"signal\":\"SIGTERM\"},\"pid\":$pid}"
         ;;
@@ -208,13 +240,16 @@ exec)
             p=$(grep -l "^$id $n " "$D"/pid-* 2>/dev/null | head -n 1 | sed 's/.*pid-//')
             turn_end "$id" "$n"
             [ -n "$p" ] && [ -e "$D/killed-$p" ] && how=killed
+            [ -e "$D/gone-$id-$n" ] && { p=""; how=gone; }
+            alive=0
+            [ "$how" = running ] && alive=1
             case "$how" in
-            ended) out="pid=$p\\nexit=0\\nflag=\\\"is_error\\\":false\\n--- result\\n{\\\"type\\\":\\\"result\\\",\\\"is_error\\\":false,\\\"result\\\":\\\"done\\\"}\\n--- stderr\\n\\n" ;;
+            ended) out="pid=$p\\nalive=0\\nexit=0\\nflag=\\\"is_error\\\":false\\n--- result\\n{\\\"type\\\":\\\"result\\\",\\\"is_error\\\":false,\\\"result\\\":\\\"done\\\"}\\n--- stderr\\n\\n" ;;
             error:*)
                 t=$(printf '%s' "${how#error:}" | sed 's/["\\]/ /g')
-                out="pid=$p\\nexit=1\\nflag=\\\"is_error\\\":true\\n--- result\\n{\\\"type\\\":\\\"result\\\",\\\"is_error\\\":true,\\\"result\\\":\\\"$t\\\"}\\n--- stderr\\n\\n" ;;
-            exit:*) out="pid=$p\\nexit=${how#exit:}\\nflag=\\n--- result\\n\\n--- stderr\\nkontext-dispatch: the runner failed\\n" ;;
-            *) out="pid=$p\\nexit=\\nflag=\\n--- result\\n\\n--- stderr\\n\\n" ;;
+                out="pid=$p\\nalive=0\\nexit=1\\nflag=\\\"is_error\\\":true\\n--- result\\n{\\\"type\\\":\\\"result\\\",\\\"is_error\\\":true,\\\"result\\\":\\\"$t\\\"}\\n--- stderr\\n\\n" ;;
+            exit:*) out="pid=$p\\nalive=0\\nexit=${how#exit:}\\nflag=\\n--- result\\n\\n--- stderr\\nkontext-dispatch: the runner failed\\n" ;;
+            *) out="pid=$p\\nalive=$alive\\nexit=\\nflag=\\n--- result\\n\\n--- stderr\\n\\n" ;;
             esac
             ;;
         *"rm -f"*)

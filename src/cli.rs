@@ -954,10 +954,16 @@ pub enum DispatchCmd {
     Status,
     /// Ends the coordinator's turn, removes the credential from the sandbox, stops the sandbox
     /// (its data is kept) and revokes its token. Exits non-zero while the clean-up is not
-    /// complete; run it again to retry
+    /// complete (run it again to retry), and when the credential could not be removed (replace
+    /// it then)
     Stop {
         /// The epic: E-…, epic:<name> or <name>
         epic: String,
+        /// For a run that already ended and whose clean-up can never finish (Boat keeps refusing
+        /// the stop): counts it as cleaned up, tries the token's revoke once more, writes its end
+        /// entry and says what kontext did not verify. It stops nothing
+        #[arg(long)]
+        forget: bool,
     },
     /// Follows this project's live sandboxes until none is left: stops one when its epic closes
     /// in the ledger, resumes a coordinator once when its turn ends with the epic open, and marks
@@ -2452,7 +2458,27 @@ impl Ctx<'_> {
                     print!("{}", r.text());
                 }
             }
-            (Some(DispatchCmd::Stop { epic }), _) => {
+            (Some(DispatchCmd::Stop { epic, forget: true }), _) => {
+                let (run, unverified) = crate::dispatch::forget(&p.name, &epic)?;
+                if self.json {
+                    print_json(&serde_json::json!({ "run": run, "not_verified": unverified }))?;
+                } else {
+                    println!(
+                        "Epic {}: its run is forgotten and counts as cleaned up; nothing was \
+                         stopped.",
+                        run.name
+                    );
+                    if unverified.is_empty() {
+                        println!("Nothing was left to verify.");
+                    } else {
+                        println!("kontext did not verify:");
+                        for u in &unverified {
+                            println!("- {u}");
+                        }
+                    }
+                }
+            }
+            (Some(DispatchCmd::Stop { epic, .. }), _) => {
                 let (run, failed) = crate::dispatch::stop(&p.name, &epic)?;
                 for f in &failed {
                     eprintln!("kontext: warning: {f}");
@@ -2472,7 +2498,15 @@ impl Ctx<'_> {
                         }
                     );
                 }
-                if left {
+                if run.credential_left && !self.json {
+                    eprintln!(
+                        "kontext: the agent's credential could not be removed from {} before it \
+                         stopped, and may be in its saved state: {}",
+                        run.sandbox.as_deref().unwrap_or("its sandbox"),
+                        crate::dispatch::REPLACE_CREDENTIAL
+                    );
+                }
+                if left || run.credential_left {
                     return Ok(ExitCode::FAILURE);
                 }
             }
@@ -2485,19 +2519,28 @@ impl Ctx<'_> {
                         println!("{l}");
                     }
                 };
+                let run_of = || {
+                    crate::dispatch::state::read(&p.name)
+                        .ok()
+                        .and_then(|runs| crate::dispatch::find_run(&runs, &epic).cloned())
+                };
+                let before = run_of().map(|r| r.id);
                 let run = match crate::dispatch::dispatch(&p.name, &epic, &mut say) {
                     Ok(run) => run,
                     Err(e) => {
                         // With --json, a failed dispatch says why on stdout too,
-                        // with the run as it was left (never a secret).
+                        // with the run it left (never a secret): none when it
+                        // failed before it reserved one.
                         if json && e.downcast_ref::<crate::store::Refused>().is_none() {
-                            let run = crate::dispatch::state::read(&p.name)
-                                .ok()
-                                .and_then(|runs| crate::dispatch::find_run(&runs, &epic).cloned());
-                            print_json(&serde_json::json!({
+                            let run = run_of().filter(|r| Some(&r.id) != before.as_ref());
+                            let mut out = serde_json::json!({
                                 "error": crate::dispatch::credential::redact(&format!("{e:#}")),
                                 "run": run,
-                            }))?;
+                            });
+                            if let Some(f) = e.downcast_ref::<crate::dispatch::SetupFailed>() {
+                                out["detail"] = serde_json::Value::String(f.full.clone());
+                            }
+                            print_json(&out)?;
                         }
                         return Err(e);
                     }

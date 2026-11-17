@@ -25,10 +25,11 @@ pub enum TurnState {
     /// what follows.
     Ended,
     /// Claude Code said it failed, or the turn left no result or a non-zero
-    /// exit code. Another turn would fail the same way.
+    /// exit code, or never ran. Every failure counts as final.
     Failed(String),
-    /// The service does not know the process: the turn cannot be followed.
-    /// Neither a resume nor stuck follow from this.
+    /// The turn cannot be followed (no process id, or a start the runner
+    /// refused with nothing to follow instead). The watcher gives it 10
+    /// minutes, as [`TurnState::NoAnswer`].
     Lost(String),
     /// The service could not be asked, or what the turn left could not be
     /// read this time. Ask again later.
@@ -95,6 +96,9 @@ pub struct Summary {
     pub flag: Option<bool>,
     /// The result, when what was read of it is whole JSON.
     pub result: Option<Value>,
+    /// Whether the turn's process (its `pid` file) still runs in the
+    /// sandbox, as the runner saw it.
+    pub alive: Option<bool>,
     pub stderr: String,
 }
 
@@ -107,6 +111,12 @@ pub fn parse_summary(out: &str) -> Summary {
             s.pid = v.trim().parse().ok();
         } else if let Some(v) = l.strip_prefix("exit=") {
             s.exit = v.trim().parse().ok();
+        } else if let Some(v) = l.strip_prefix("alive=") {
+            s.alive = match v.trim() {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            };
         } else if let Some(v) = l.strip_prefix("flag=") {
             s.flag = match v.trim() {
                 "\"is_error\":true" => Some(true),
@@ -172,14 +182,15 @@ pub fn state(prov: &dyn Provider, run: &Run) -> TurnState {
         return TurnState::Lost("its process id was never saved".into());
     };
     let code = match prov.process(sandbox, pid) {
+        Err(e) if super::provider::not_running(&e) => {
+            return TurnState::Failed(redact(&format!(
+                "its sandbox {sandbox} is not running (stopped by Boat's time limit or by hand): \
+                 {e:#}"
+            )));
+        }
         Err(e) => return TurnState::NoAnswer(redact(&format!("{e:#}"))),
         Ok(Process::Running) => return TurnState::Running,
-        Ok(Process::Unknown) => {
-            return TurnState::Lost(format!(
-                "{} does not know process {pid} in {sandbox}",
-                prov.service()
-            ));
-        }
+        Ok(Process::Unknown) => return forgotten(prov, run, sandbox, pid),
         Ok(Process::Exited(c)) => c,
     };
     match prov.exec(sandbox, &read_command(run.turns)) {
@@ -197,6 +208,54 @@ pub fn state(prov: &dyn Provider, run: &Run) -> TurnState {
             )),
         },
         Ok(o) => verdict(&parse_summary(&o.stdout), code),
+    }
+}
+
+/// The service no longer knows the turn's process (the sandbox restarted, or
+/// it forgot it): what the runner left in the sandbox decides. An `exit`
+/// file gives the verdict; no `pid` file means the turn never ran; a `pid`
+/// whose process still runs is followed by reading again.
+fn forgotten(prov: &dyn Provider, run: &Run, sandbox: &str, pid: u32) -> TurnState {
+    let n = run.turns;
+    let o = match prov.exec(sandbox, &read_command(n)) {
+        Err(e) => {
+            return TurnState::NoAnswer(redact(&format!(
+                "{} does not know process {pid} in {sandbox}, and what turn {n} left could not \
+                 be read: {e:#}",
+                prov.service()
+            )));
+        }
+        Ok(o) if o.code != 0 => {
+            return TurnState::NoAnswer(redact(&format!(
+                "{} does not know process {pid} in {sandbox}, and what turn {n} left could not \
+                 be read (exit code {}): {}",
+                prov.service(),
+                o.code,
+                one_line(&o.stderr, 200)
+            )));
+        }
+        Ok(o) => o,
+    };
+    let s = parse_summary(&o.stdout);
+    match (s.exit, s.pid, s.alive) {
+        (Some(code), _, _) => verdict(&s, code),
+        (None, None, _) => TurnState::Failed(format!(
+            "turn {n} never ran: {} does not know process {pid} in {sandbox}, and the runner left \
+             no trace of it",
+            prov.service()
+        )),
+        (None, Some(q), _) if q != pid => TurnState::Adopt(q),
+        (None, Some(_), Some(true)) => TurnState::Running,
+        (None, Some(_), Some(false)) => TurnState::Failed(format!(
+            "its process ended without saying how the turn went ({} no longer knows process \
+             {pid}, and it no longer runs in {sandbox})",
+            prov.service()
+        )),
+        (None, Some(_), None) => TurnState::Lost(format!(
+            "{} does not know process {pid} in {sandbox}, and the runner did not say whether it \
+             still runs",
+            prov.service()
+        )),
     }
 }
 

@@ -9,7 +9,8 @@
 //! the `boat` process is killed and the call is an error.
 
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -76,6 +77,24 @@ impl std::fmt::Display for CreateFailed {
 
 impl std::error::Error for CreateFailed {}
 
+/// The service refused a command because the sandbox is not running (Boat:
+/// `machine_not_running`, for a stopped sandbox; it does not wake it).
+#[derive(Debug)]
+pub struct NotRunning(pub String);
+
+impl std::fmt::Display for NotRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotRunning {}
+
+/// Is this error the service saying the sandbox is not running?
+pub fn not_running(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<NotRunning>().is_some()
+}
+
 /// A sandbox service.
 pub trait Provider {
     /// Its name in `[dispatch] service` and in the state.
@@ -86,6 +105,8 @@ pub trait Provider {
     fn stop(&self, id: &str) -> Result<()>;
     /// A running (or starting) sandbox with this name, if there is one: a
     /// dispatch killed while the service made its sandbox left no id.
+    /// `Ok(None)` only when the service's whole answer says there is none;
+    /// an answer that may be partial is an error.
     fn find(&self, name: &str) -> Result<Option<String>>;
     /// How its start script went.
     fn setup(&self, id: &str) -> Result<Setup>;
@@ -101,8 +122,10 @@ pub trait Provider {
     fn process(&self, id: &str, pid: u32) -> Result<Process>;
     /// Ends that process and every process it started.
     fn kill(&self, id: &str, pid: u32) -> Result<()>;
-    /// How a person looks at what happened in a stopped sandbox (one line).
-    fn inspect_hint(&self, id: &str) -> String;
+    /// How a person looks at what happened in a stopped sandbox (one
+    /// line). `resume` is false when bringing it back is not safe (the
+    /// agent's credential may still be in it).
+    fn inspect_hint(&self, id: &str, resume: bool) -> String;
 }
 
 /// The provider for `[dispatch] service`.
@@ -139,29 +162,38 @@ impl Boat {
         c
     }
 
-    fn run(&self, args: &[String]) -> Result<Output> {
-        let limit = std::env::var("KONTEXT_BOAT_TIMEOUT_MS")
+    fn limit(args: &[String]) -> Duration {
+        std::env::var("KONTEXT_BOAT_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(Duration::from_millis)
-            .unwrap_or_else(|| limit_of(args));
-        run_with_limit(self.command(args), limit)
-            .with_context(|| format!("could not run {} (is Boat's CLI installed?)", self.bin))
-            .and_then(|o| {
-                o.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "boat {} did not answer in {} s",
-                        args.first().map(String::as_str).unwrap_or(""),
-                        limit.as_secs()
-                    )
-                })
-            })
+            .unwrap_or_else(|| limit_of(args))
     }
+
+    /// Runs `boat`, and keeps what it printed even when it did not end in
+    /// time (`status: None`).
+    fn run_partial(&self, args: &[String]) -> Result<Ran> {
+        run_with_limit(self.command(args), Boat::limit(args))
+            .with_context(|| format!("could not run {} (is Boat's CLI installed?)", self.bin))
+    }
+
+    fn run(&self, args: &[String]) -> Result<Output> {
+        let r = self.run_partial(args)?;
+        r.output().ok_or_else(|| timed_out(args))
+    }
+}
+
+fn timed_out(args: &[String]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "boat {} did not answer in {} s",
+        args.first().map(String::as_str).unwrap_or(""),
+        Boat::limit(args).as_secs()
+    )
 }
 
 /// How long a `boat` command may take: `new` waits for a machine, `stop`
 /// for a snapshot, the rest are quick.
-fn limit_of(args: &[String]) -> Duration {
+pub(crate) fn limit_of(args: &[String]) -> Duration {
     match args.first().map(String::as_str) {
         Some("new") => Duration::from_secs(15 * 60),
         Some("stop") => Duration::from_secs(5 * 60),
@@ -169,23 +201,56 @@ fn limit_of(args: &[String]) -> Duration {
     }
 }
 
-/// Runs `c` and returns its output, or `None` if it did not end within
-/// `limit` (it is killed then).
-pub(crate) fn run_with_limit(mut c: Command, limit: Duration) -> std::io::Result<Option<Output>> {
-    use std::io::Read;
+/// What a command printed, and how it ended (`None`: it did not end within
+/// its limit and was killed; what it printed until then is kept).
+pub(crate) struct Ran {
+    pub status: Option<ExitStatus>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl Ran {
+    fn output(self) -> Option<Output> {
+        Some(Output {
+            status: self.status?,
+            stdout: self.stdout,
+            stderr: self.stderr,
+        })
+    }
+}
+
+/// Reads `r` into a shared buffer as it comes, so what was printed before a
+/// kill can be taken without waiting for the pipe to close.
+fn drain(
+    mut r: impl std::io::Read + Send + 'static,
+) -> (Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<()>) {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let b = buf.clone();
+    let h = std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => b
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (buf, h)
+}
+
+fn take(b: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Runs `c` and returns what it printed and how it ended. Past `limit` it
+/// is killed, and what it printed until then is returned with no status.
+pub(crate) fn run_with_limit(mut c: Command, limit: Duration) -> std::io::Result<Ran> {
     let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let mut out = child.stdout.take().unwrap();
-    let mut err = child.stderr.take().unwrap();
-    let o = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = out.read_to_end(&mut b);
-        b
-    });
-    let e = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = err.read_to_end(&mut b);
-        b
-    });
+    let (o, oh) = drain(child.stdout.take().unwrap());
+    let (e, eh) = drain(child.stderr.take().unwrap());
     let until = Instant::now() + limit;
     let status = loop {
         if let Some(s) = child.try_wait()? {
@@ -198,15 +263,47 @@ pub(crate) fn run_with_limit(mut c: Command, limit: Duration) -> std::io::Result
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let Some(status) = status else {
-        // Whatever it started may still hold the pipes: do not wait for them.
-        return Ok(None);
-    };
-    Ok(Some(Output {
+    if status.is_some() {
+        let _ = oh.join();
+        let _ = eh.join();
+    } else {
+        // Whatever it started may still hold the pipes: wait a little for
+        // the last of its output, never for the pipes to close.
+        let t = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < t && !(oh.is_finished() && eh.is_finished()) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Ok(Ran {
         status,
-        stdout: o.join().unwrap_or_default(),
-        stderr: e.join().unwrap_or_default(),
-    }))
+        stdout: take(&o),
+        stderr: take(&e),
+    })
+}
+
+/// Did `boat` answer that the sandbox is not running (`machine_not_running`)?
+fn machine_not_running(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    json_lines(stdout)
+        .into_iter()
+        .chain(json_lines(stderr))
+        .find(|v| v.get("code").and_then(Value::as_str) == Some("machine_not_running"))
+        .map(|v| {
+            v.get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("the sandbox is not running")
+                .to_string()
+        })
+}
+
+/// The output of a `boat exec` call, or [`NotRunning`] when Boat refused it
+/// because the sandbox is stopped.
+fn exec_answer(o: Output) -> Result<Output> {
+    if !o.status.success()
+        && let Some(why) = machine_not_running(&o.stdout, &o.stderr)
+    {
+        return Err(NotRunning(why).into());
+    }
+    Ok(o)
 }
 
 /// The JSON objects of a JSON Lines output (other lines are skipped).
@@ -279,11 +376,19 @@ impl Provider for Boat {
         if let Some(f) = &s.setup {
             a.extend(["--setup-file".into(), f.display().to_string()]);
         }
-        let o = self.run(&a).map_err(|e| CreateFailed {
+        let r = self.run_partial(&a).map_err(|e| CreateFailed {
             id: None,
             why: format!("{e:#}"),
         })?;
-        let id = new_sandbox_id(&json_lines(&o.stdout));
+        // Cut off by its limit: the `created` line it printed may say which
+        // sandbox Boat made.
+        let id = new_sandbox_id(&json_lines(&r.stdout));
+        let Some(o) = r.output() else {
+            return Err(CreateFailed {
+                id,
+                why: format!("{:#}", timed_out(&a)),
+            });
+        };
         if !o.status.success() {
             return Err(CreateFailed {
                 id,
@@ -314,23 +419,26 @@ impl Provider for Boat {
         if !o.status.success() {
             bail!("{}", failure("boat list", &o));
         }
-        let text = String::from_utf8_lossy(&o.stdout);
-        let mut values: Vec<Value> = json_lines(&o.stdout);
-        if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
-            values.push(v);
-        }
-        let mut found = None;
-        for v in &values {
-            find_named(v, name, &mut found);
-        }
-        Ok(found)
+        list_lookup(&String::from_utf8_lossy(&o.stdout), name)
     }
 
-    fn inspect_hint(&self, id: &str) -> String {
-        format!(
-            "`boat events {id}` shows what the coordinator did; `boat resume {id}` brings the \
-             sandbox back (its data is kept 14 days)"
-        )
+    fn inspect_hint(&self, id: &str, resume: bool) -> String {
+        let look = format!(
+            "`boat history {id}` lists the commands run in it, and each of the coordinator's \
+             turns left its result in ~/.kontext-dispatch/turn-<n>/ there"
+        );
+        if resume {
+            format!(
+                "{look}; `boat resume {id}` brings the sandbox back to look inside (its data is \
+                 kept 14 days; a resume does not bring the agent's credential back)"
+            )
+        } else {
+            format!(
+                "{look}; do not resume it before the agent's credential is replaced (`claude \
+                 setup-token`, then `kontext dispatch credential set`): it could not be removed \
+                 and may still be in the sandbox's saved state"
+            )
+        }
     }
 
     fn setup(&self, id: &str) -> Result<Setup> {
@@ -355,7 +463,7 @@ impl Provider for Boat {
             "--".into(),
         ];
         a.extend(cmd.iter().cloned());
-        let o = self.run(&a)?;
+        let o = exec_answer(self.run(&a)?)?;
         let v = json_lines(&o.stdout).into_iter().last();
         match v {
             Some(v) if v.get("exitCode").is_some() || v.get("stdout").is_some() => exec_out(&v),
@@ -372,7 +480,7 @@ impl Provider for Boat {
             "--".into(),
         ];
         a.extend(cmd.iter().cloned());
-        let o = self.run(&a)?;
+        let o = exec_answer(self.run(&a)?)?;
         let pid = json_lines(&o.stdout)
             .into_iter()
             .rev()
@@ -384,13 +492,13 @@ impl Provider for Boat {
     }
 
     fn process(&self, id: &str, pid: u32) -> Result<Process> {
-        let o = self.run(&[
+        let o = exec_answer(self.run(&[
             "exec".into(),
             id.into(),
             "--status".into(),
             pid.to_string(),
             "--json".into(),
-        ])?;
+        ])?)?;
         let v = json_lines(&o.stdout).into_iter().last();
         match v.as_ref().and_then(process_of) {
             Some(p) => Ok(p),
@@ -399,13 +507,13 @@ impl Provider for Boat {
     }
 
     fn kill(&self, id: &str, pid: u32) -> Result<()> {
-        let o = self.run(&[
+        let o = exec_answer(self.run(&[
             "exec".into(),
             id.into(),
             "--kill".into(),
             pid.to_string(),
             "--json".into(),
-        ])?;
+        ])?)?;
         if !o.status.success() {
             bail!("{}", failure(&format!("boat exec {id} --kill {pid}"), &o));
         }
@@ -413,8 +521,39 @@ impl Provider for Boat {
     }
 }
 
+/// The sandbox named `name` in `boat list --json`'s answer: one document
+/// `{"pageInfo":{"hasMore":…},"sandboxes":[…]}` (Boat CLI 1.0.100), or a
+/// bare list. Not found on a page that says more follow (the CLI has no
+/// option to ask for them) is not known yet: an error, as is an answer of
+/// another shape.
+pub(crate) fn list_lookup(text: &str, name: &str) -> Result<Option<String>> {
+    let v: Value = serde_json::from_str(text.trim())
+        .ok()
+        .or_else(|| json_lines(text.as_bytes()).into_iter().last())
+        .context("boat list printed nothing this kontext can read")?;
+    let (list, more) = match &v {
+        Value::Array(_) => (&v, false),
+        Value::Object(o) => match o.get("sandboxes") {
+            Some(l @ Value::Array(_)) => (
+                l,
+                v.pointer("/pageInfo/hasMore").and_then(Value::as_bool) == Some(true),
+            ),
+            _ => bail!("boat list printed no list of sandboxes"),
+        },
+        _ => bail!("boat list printed no list of sandboxes"),
+    };
+    let mut found = None;
+    find_named(list, name, &mut found);
+    if found.is_none() && more {
+        bail!(
+            "boat list shows only its first page of sandboxes, and {name} is not on it: whether \
+             it exists is not known yet"
+        );
+    }
+    Ok(found)
+}
+
 /// The last object anywhere in `v` with this `name` and an `id`.
-/// `boat list --json`'s shape is not pinned, so it looks at every object.
 fn find_named(v: &Value, name: &str, found: &mut Option<String>) {
     match v {
         Value::Array(a) => a.iter().for_each(|x| find_named(x, name, found)),
@@ -561,20 +700,67 @@ mod tests {
     }
 
     #[test]
-    fn a_command_past_its_limit_is_killed() {
-        let mut c = Command::new("sleep");
-        c.arg("5");
+    fn a_command_past_its_limit_is_killed_and_what_it_printed_is_kept() {
+        let mut c = Command::new("sh");
+        c.args([
+            "-c",
+            "echo '{\"event\":\"created\",\"id\":\"bx_a\"}'; sleep 5",
+        ]);
         let t = Instant::now();
-        assert!(
-            run_with_limit(c, Duration::from_millis(200))
-                .unwrap()
-                .is_none()
-        );
+        let r = run_with_limit(c, Duration::from_millis(500)).unwrap();
+        assert!(r.status.is_none());
         assert!(t.elapsed() < Duration::from_secs(3));
+        // The review's finding 1: the id of the sandbox Boat made survives.
+        assert_eq!(
+            new_sandbox_id(&json_lines(&r.stdout)).as_deref(),
+            Some("bx_a")
+        );
         let mut c = Command::new("echo");
         c.arg("hi");
-        let o = run_with_limit(c, Duration::from_secs(5)).unwrap().unwrap();
+        let o = run_with_limit(c, Duration::from_secs(5))
+            .unwrap()
+            .output()
+            .unwrap();
         assert_eq!(o.stdout, b"hi\n");
+    }
+
+    /// `boat list --filter rp --json` as Boat CLI 1.0.100 printed it.
+    #[test]
+    fn list_lookups() {
+        let page = |more: bool, names: &[&str]| {
+            json!({"pageInfo": {"hasMore": more, "limit": 200, "nextCursor": null},
+                "sandboxes": names.iter().enumerate()
+                    .map(|(i, n)| json!({"id": format!("bx_{i}"), "name": n, "state": "idle"}))
+                    .collect::<Vec<_>>()})
+            .to_string()
+        };
+        assert_eq!(
+            list_lookup(&page(false, &["a", "kx"]), "kx")
+                .unwrap()
+                .as_deref(),
+            Some("bx_1")
+        );
+        assert_eq!(list_lookup(&page(false, &["a"]), "kx").unwrap(), None);
+        // More pages, and not on this one: not known.
+        assert!(list_lookup(&page(true, &["a"]), "kx").is_err());
+        assert_eq!(
+            list_lookup(&page(true, &["kx"]), "kx").unwrap().as_deref(),
+            Some("bx_0")
+        );
+        // Nothing readable is not "none".
+        assert!(list_lookup("", "kx").is_err());
+        assert!(list_lookup("{\"error\":\"x\"}", "kx").is_err());
+    }
+
+    #[test]
+    fn a_stopped_sandbox_is_not_running() {
+        let out = br#"{"code":"machine_not_running","error":"Sandbox bx_a is stopped. Run `boat resume bx_a`, then retry.","event":"error","status":409}"#;
+        assert!(
+            machine_not_running(out, b"")
+                .unwrap()
+                .contains("is stopped")
+        );
+        assert!(machine_not_running(b"{\"code\":\"x\"}", b"").is_none());
     }
 
     /// The shapes `boat exec` printed in the probe of 2026-11-16 (CLI 1.0.100).

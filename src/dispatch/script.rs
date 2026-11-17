@@ -3,9 +3,10 @@
 //!
 //! **The start script** (`boat new --setup-file`), in order: the agent's
 //! credential (a file Boat writes with mode 644) is set to 0600 at once and
-//! moved to memory-backed storage (`/dev/shm`, when it is there and
-//! writable; else a 0600 file in `~/.kontext-dispatch/`), because a stopped
-//! sandbox's disk is kept for days; kontext is installed at the pinned
+//! moved to `/dev/shm` (when it is there and writable; else a 0600 file in
+//! `~/.kontext-dispatch/`). Boat's stop keeps `/dev/shm` in the sandbox's
+//! saved state too: what keeps the credential out of a stopped sandbox is
+//! its removal before kontext stops it; kontext is installed at the pinned
 //! release (the installer is downloaded to a file and checked, and so is
 //! `kontext --version` after it); the project is set up from the server with
 //! the token from its file (read only into the environment of that one
@@ -13,7 +14,8 @@
 //! repo is the service's clone if it shows up within half a minute, else the
 //! script clones it from `[[repos]]`' remote with the sandbox's GitHub login;
 //! git gets an author in that clone when it has none (the GitHub login and
-//! its noreply address); and `kontext install --local` runs there, with what
+//! its noreply address); `gh stack` is installed when gh lacks it (a failure
+//! is said and not fatal); and `kontext install --local` runs there, with what
 //! it wrote kept out of git's way (`info/exclude`).
 //!
 //! **The runner** (`~/.kontext-dispatch-turn.sh`, sent as a file): `start
@@ -23,7 +25,8 @@
 //! code in `~/.kontext-dispatch/turn-<n>/`. It refuses to start a turn
 //! twice. The credential goes only into the environment of the `claude`
 //! process (the processes its tools start do not see it). `read <n>` prints
-//! what a turn left, small enough for one `boat exec`.
+//! what a turn left, and whether its process still runs (for a turn the
+//! service no longer knows).
 
 /// Where things are in the sandbox. Relative paths start in the sandbox
 /// user's home, which is where `--file` puts them.
@@ -108,8 +111,8 @@ SHM=${{KONTEXT_DISPATCH_SHM:-/dev/shm}}
 trap 'rm -f "$TOKEN_FILE"' EXIT
 say() {{ printf 'kontext-dispatch: %s\n' "$*" >&2; }}
 
-# 0. The agent's credential: 0600 at once, then to memory-backed storage (a
-#    stopped sandbox's disk is kept for days), else a 0600 file in $D.
+# 0. The agent's credential: 0600 at once, then to /dev/shm, else a 0600 file
+#    in $D. kontext removes it before it stops the sandbox.
 mkdir -p "$D"
 chmod 700 "$D"
 if [ -f "$CRED_IN" ]; then
@@ -205,7 +208,15 @@ if [ -z "$(git config user.email 2>/dev/null || true)" ]; then
     git config user.email "$uid+$login@users.noreply.github.com"
 fi
 
-# 5. The hooks, skills and agent files, kept out of git's way so they never
+# 5. gh stack, which the coordinator is asked to deliver with: a Boat sandbox
+#    does not have the extension. Not having it does not stop the script.
+if ! gh extension list 2>/dev/null | grep -q 'gh-stack'; then
+    if ! gh extension install github/gh-stack >/dev/null 2>&1; then
+        say "could not install gh stack (gh extension install github/gh-stack); the coordinator goes on without it"
+    fi
+fi
+
+# 6. The hooks, skills and agent files, kept out of git's way so they never
 #    reach a commit.
 kontext --project "$PROJECT" --role coordinator install --local
 exclude="$(git rev-parse --git-path info/exclude)"
@@ -309,7 +320,24 @@ start)
     exit "$code"
     ;;
 read)
-    printf 'pid=%s\n' "$(cat "$T/pid" 2>/dev/null || true)"
+    p=$(cat "$T/pid" 2>/dev/null || true)
+    alive=0
+    case "$p" in
+    '' | *[!0-9]*) ;;
+    *)
+        if kill -0 "$p" 2>/dev/null; then
+            if [ -r "/proc/$p/cmdline" ]; then
+                if tr '\000' ' ' <"/proc/$p/cmdline" | grep -q 'kontext-dispatch-turn'; then
+                    alive=1
+                fi
+            else
+                alive=1
+            fi
+        fi
+        ;;
+    esac
+    printf 'pid=%s\n' "$p"
+    printf 'alive=%s\n' "$alive"
     printf 'exit=%s\n' "$(cat "$T/exit" 2>/dev/null || true)"
     printf 'flag=%s\n' "$(grep -o '"is_error":[a-z]*' "$T/result.json" 2>/dev/null | head -n 1 || true)"
     echo '--- result'

@@ -8,12 +8,14 @@
 //!   revoke the token.
 //! - **The coordinator's turn ended with the epic open**: one more turn in
 //!   the same Claude Code session; if that turn ends too with the epic open,
-//!   it is stuck. A turn that cannot be followed ([`TurnState::Lost`])
-//!   decides nothing, and neither does a turn whose end was seen while the
-//!   pull failed: the ledger may already say the epic closed.
+//!   it is stuck. A turn whose end or failure was seen while the pull
+//!   failed decides nothing yet: the ledger may already say the epic closed.
 //! - **The coordinator's turn failed** (Claude Code said so, or it left no
-//!   result): stuck at once, with the reason (another turn would fail the
-//!   same way).
+//!   result): stuck, with the reason. Every failure counts as final, a
+//!   transient one (an overloaded API, a usage limit) too.
+//! - **A turn that cannot be followed** (the service cannot be asked, or
+//!   does not know it and what it left cannot be read) decides nothing for
+//!   10 minutes in a row; then it is stuck, with the reason.
 //! - **The time limit passed** (`[dispatch] hours`): stuck, on a fresh
 //!   pull. While the pull fails (for less than 30 minutes) the sandbox is
 //!   stopped anyway and the run is `overdue` until a pull says closed or
@@ -45,8 +47,8 @@ use anyhow::{Context, Result};
 
 use super::state::{self, Run, RunState};
 use super::turn::{self, TurnState};
-use super::{ACTOR, clean_up, config_of, end_entry, provider, record};
-use crate::config::Project;
+use super::{ACTOR, clean_up, config_of, end_entry, new_grace_ms, provider, record};
+use crate::config::{Machine, Project};
 use crate::model::Actor;
 use crate::plan;
 use crate::remote::{self, Link, Options};
@@ -170,23 +172,41 @@ pub fn run(project: &str) -> Result<()> {
         noted: BTreeSet::new(),
         pull_failing_since: None,
         retry: BTreeMap::new(),
+        unfollowed: BTreeMap::new(),
     };
     loop {
-        if config_of(project).is_err() {
-            log(&format!(
-                "project {project} is no longer on this machine: the watcher stops"
-            ));
-            return Ok(());
+        match registered(project) {
+            Ok(true) => {}
+            Ok(false) => {
+                log(&format!(
+                    "project {project} is no longer on this machine: the watcher stops"
+                ));
+                return Ok(());
+            }
+            // An unreadable projects.toml (being written, say) is tried
+            // again: the sandboxes still need a watcher.
+            Err(e) => log(&format!("error: {e:#}")),
         }
         if let Err(e) = w.tick() {
             log(&format!("error: {e:#}"));
         }
-        if w.done()? {
-            log("nothing is live or left to clean up: the watcher stops");
-            return Ok(());
+        match w.done() {
+            Ok(true) => {
+                log("nothing is live or left to clean up: the watcher stops");
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => log(&format!("error: {e:#}")),
         }
         std::thread::sleep(super::poll());
     }
+}
+
+/// Is the project still registered on this machine? Only that ends the
+/// watcher: a `project.toml` that cannot be read for a moment does not. A
+/// config folder that is gone has no projects.
+fn registered(project: &str) -> Result<bool> {
+    Ok(Machine::load()?.projects.contains_key(project))
 }
 
 /// What to do with a live run.
@@ -217,14 +237,16 @@ fn stale_pull_limit() -> Duration {
     )
 }
 
-/// How long a killed dispatch's run may have a token and no sandbox before
-/// it is ended: the service may still be making it (2 minutes;
-/// `KONTEXT_DISPATCH_NEW_GRACE_MS` in the tests).
-fn new_grace_ms() -> i64 {
-    std::env::var("KONTEXT_DISPATCH_NEW_GRACE_MS")
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(120_000)
+/// How long a turn may go unfollowed (the service cannot be asked, or what
+/// the turn left cannot be read) before the run is stuck (10 minutes;
+/// `KONTEXT_DISPATCH_NO_ANSWER_MS` in the tests).
+fn no_answer_limit() -> Duration {
+    Duration::from_millis(
+        std::env::var("KONTEXT_DISPATCH_NO_ANSWER_MS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(10 * 60_000),
+    )
 }
 
 struct Watcher {
@@ -237,6 +259,8 @@ struct Watcher {
     pull_failing_since: Option<Instant>,
     /// When a failed clean-up is tried next, and the wait after that.
     retry: BTreeMap<String, (Instant, Duration)>,
+    /// Since when a run's turn (run key, turn) could not be followed.
+    unfollowed: BTreeMap<(String, u32), Instant>,
 }
 
 impl Watcher {
@@ -322,7 +346,15 @@ impl Watcher {
         if !run.state.live() {
             return self.after(run, closed, fresh);
         }
-        let action = if closed {
+        let action = if run.id.is_empty() {
+            // Written by a kontext from before run ids and turn processes:
+            // its sandbox has no runner to follow, so it is ended.
+            Some(Action::Stuck(
+                "it was dispatched by an older kontext, which this one cannot follow; its sandbox \
+                 was stopped"
+                    .into(),
+            ))
+        } else if closed {
             Some(Action::Close)
         } else if now > run.deadline {
             let why = format!("its time limit ({}h) passed", settings.hours);
@@ -356,8 +388,13 @@ impl Watcher {
 
     /// What the current turn says.
     fn follow(&mut self, run: &Run, prov: &dyn provider::Provider, fresh: bool) -> Option<Action> {
-        match turn::state(prov, run) {
-            TurnState::Ended if !fresh => {
+        let key = (run.key(), run.turns);
+        let ts = turn::state(prov, run);
+        if !matches!(ts, TurnState::Lost(_) | TurnState::NoAnswer(_)) {
+            self.unfollowed.remove(&key);
+        }
+        match ts {
+            TurnState::Ended | TurnState::Failed(_) if !fresh => {
                 log(&format!(
                     "{}: the turn ended but the pull failed; deciding on the next tick",
                     run.name
@@ -373,28 +410,30 @@ impl Watcher {
                 run.turns
             ))),
             TurnState::Adopt(pid) => Some(Action::Adopt(pid)),
-            TurnState::Lost(why) => {
-                if self.noted.insert((run.id.clone(), run.turns, "lost")) {
-                    log(&format!(
-                        "{}: turn {} cannot be followed ({why}); only the ledger and the time \
-                         limit decide now",
-                        run.name, run.turns
-                    ));
+            TurnState::Lost(why) | TurnState::NoAnswer(why) => {
+                let since = *self.unfollowed.entry(key).or_insert_with(Instant::now);
+                let limit = no_answer_limit();
+                if since.elapsed() >= limit && fresh {
+                    return Some(Action::Stuck(format!(
+                        "for {} minutes kontext could not tell how its coordinator's turn {} \
+                         stands: {why}",
+                        (limit.as_secs() / 60).max(1),
+                        run.turns
+                    )));
                 }
-                None
-            }
-            TurnState::NoAnswer(why) => {
-                if self.noted.insert((run.id.clone(), run.turns, "no answer")) {
+                if self.noted.insert((run.key(), run.turns, "no answer")) {
                     log(&format!(
-                        "{}: could not ask how turn {} stands ({why}); asking again on the next \
-                         ticks",
-                        run.name, run.turns
+                        "{}: could not tell how turn {} stands ({why}); asking again on the next \
+                         ticks, and stuck if it lasts {} minutes",
+                        run.name,
+                        run.turns,
+                        (limit.as_secs() / 60).max(1)
                     ));
                 }
                 None
             }
             TurnState::Running => {
-                self.noted.remove(&(run.id.clone(), run.turns, "no answer"));
+                self.noted.remove(&(run.key(), run.turns, "no answer"));
                 None
             }
         }
@@ -403,7 +442,7 @@ impl Watcher {
     /// A `starting` run whose dispatch process is gone: finish the start,
     /// or end it when it cannot be finished.
     fn take_over(&mut self, run: &Run, now: i64) -> Result<Option<Action>> {
-        if self.noted.insert((run.id.clone(), 0, "take over")) {
+        if self.noted.insert((run.key(), 0, "take over")) {
             log(&format!(
                 "{}: its dispatch stopped midway; the watcher takes the start over",
                 run.name
@@ -416,13 +455,21 @@ impl Watcher {
                     "its dispatch stopped before it made anything".into(),
                 )));
             }
+            let Some(asked) = run.sandbox_pending else {
+                return Ok(Some(Action::Stuck(
+                    "its dispatch stopped before it asked for a sandbox".into(),
+                )));
+            };
             return Ok(match prov.find(&run.sandbox_name) {
                 Ok(Some(id)) => Some(Action::Found(id)),
-                Ok(None) if now - run.updated > new_grace_ms() => Some(Action::Stuck(format!(
-                    "its dispatch stopped while the sandbox was being made, and no sandbox named \
-                     {} is running",
-                    run.sandbox_name
-                ))),
+                // `boat new` may still be at work after its dispatch died.
+                Ok(None) if state::wall_ms() - asked > new_grace_ms() => {
+                    Some(Action::Stuck(format!(
+                        "its dispatch stopped while the sandbox was being made, and no sandbox \
+                         named {} is running",
+                        run.sandbox_name
+                    )))
+                }
                 Ok(None) => None,
                 Err(e) => {
                     log(&format!(
@@ -438,9 +485,14 @@ impl Watcher {
         }
         Ok(match prov.setup(id) {
             Ok(provider::Setup::Done) => Some(Action::StartTurn(1)),
-            Ok(provider::Setup::Failed(why)) => Some(Action::Stuck(format!(
-                "the sandbox's start script failed: {why}"
-            ))),
+            Ok(provider::Setup::Failed(why)) => {
+                let f = super::SetupFailed::of(&why);
+                log(&format!(
+                    "{}: its start script failed; all it printed:\n{}",
+                    run.name, f.full
+                ));
+                Some(Action::Stuck(f.to_string()))
+            }
             Ok(provider::Setup::Pending) if now > run.started + super::SETUP_LIMIT_MS => {
                 Some(Action::Stuck(format!(
                     "the sandbox's start script did not finish in {} minutes",
@@ -479,6 +531,7 @@ impl Watcher {
                 state::update_own(&self.project, seen, |r| {
                     if r.sandbox.is_none() {
                         r.sandbox = Some(id);
+                        r.sandbox_pending = None;
                     }
                 })?;
                 Ok(false)
@@ -556,9 +609,6 @@ impl Watcher {
                     )),
                 }
                 // The sandbox stops first, whatever happens to the ledger.
-                if run.sandbox.is_none() && run.token_id.is_some() {
-                    let _ = super::locate(&self.project, prov.as_ref(), &mut run);
-                }
                 for f in clean_up(&self.project, prov.as_ref(), &mut run) {
                     log(&format!("{}: {f}", run.name));
                 }
@@ -598,14 +648,28 @@ impl Watcher {
         let n = run.turns;
         match turn::start(prov, run, n) {
             Ok(pid) => {
-                state::update_own(&self.project, run, |r| {
+                let saved = state::update_own(&self.project, run, |r| {
                     if r.turns == n {
                         r.turn_pid = Some(pid);
                         if r.state == RunState::Starting {
                             r.state = RunState::Running;
                         }
                     }
-                })?;
+                });
+                if let Err(e) = saved {
+                    // Stopped or ended while the turn was on its way.
+                    if e.downcast_ref::<state::Gone>().is_some()
+                        && let Some(id) = run.sandbox.as_deref()
+                    {
+                        log(&format!(
+                            "{}: it was ended while its turn {n} started; ending that turn and \
+                             stopping {id} again",
+                            run.name
+                        ));
+                        super::end_stray_turn(prov, id, pid);
+                    }
+                    return Err(e);
+                }
                 Ok(false)
             }
             Err(e) => {
@@ -626,6 +690,11 @@ impl Watcher {
     /// to the pm, its end entry, a clean-up, the verdict of an overdue one).
     fn after(&mut self, seen: &Run, closed: bool, fresh: bool) -> Result<bool> {
         let mut wrote = false;
+        // Someone (a `stop`, a failed dispatch) is cleaning it up: its end
+        // entry and question wait until they are done.
+        if seen.being_cleaned() {
+            return Ok(false);
+        }
         if seen.state == RunState::Overdue && (fresh || self.stale_too_long()) {
             let hours = config_of(&self.project)?.0.hours;
             let why = format!("its time limit ({hours}h) passed");
@@ -674,7 +743,7 @@ impl Watcher {
         if run.pm_pending {
             let prov = provider::of(&run.service);
             let hint = match (run.sandbox.as_deref(), prov) {
-                (Some(id), Ok(p)) => p.inspect_hint(id),
+                (Some(id), Ok(p)) => p.inspect_hint(id, !run.credential_left),
                 _ => "It has no sandbox".into(),
             };
             match self.tell_pm(&resolved, run, hint) {
@@ -688,7 +757,8 @@ impl Watcher {
                 )),
             }
         }
-        if run.end_pending {
+        // The end entry says the sandbox stopped: only once it did.
+        if run.end_pending && run.clean() {
             match record(&resolved.home, &resolved.writer, end_entry(run)) {
                 Ok(_) => {
                     wrote = true;
@@ -733,7 +803,8 @@ impl Watcher {
     /// A run that ended but whose sandbox or token is still there: tried
     /// again with a growing wait (5 s up to 5 minutes).
     fn retry_clean_up(&mut self, seen: &Run) -> Result<()> {
-        if let Some((at, _)) = self.retry.get(&seen.id)
+        let key = seen.key();
+        if let Some((at, _)) = self.retry.get(&key)
             && Instant::now() < *at
         {
             return Ok(());
@@ -745,19 +816,21 @@ impl Watcher {
         let failed = clean_up(&self.project, prov.as_ref(), &mut run);
         state::merge_clean_up(&self.project, &run)?;
         if run.clean() {
+            for f in &failed {
+                log(&format!("{}: {f}", run.name));
+            }
             log(&format!("{}: cleaned up", run.name));
-            self.retry.remove(&seen.id);
+            self.retry.remove(&key);
         } else {
             for f in &failed {
                 log(&format!("{}: {f}", run.name));
             }
             let wait = self
                 .retry
-                .get(&seen.id)
+                .get(&key)
                 .map(|(_, w)| (*w * 2).min(Duration::from_secs(300)))
                 .unwrap_or(super::poll());
-            self.retry
-                .insert(seen.id.clone(), (Instant::now() + wait, wait));
+            self.retry.insert(key, (Instant::now() + wait, wait));
         }
         Ok(())
     }

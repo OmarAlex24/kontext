@@ -116,6 +116,59 @@ pub fn config_of(project: &str) -> Result<(Settings, config::Resolved)> {
 /// How long the start script may take.
 pub(crate) const SETUP_LIMIT_MS: i64 = 20 * 60_000;
 
+/// How long after `boat new` was asked a sandbox may still show up under
+/// its name: longer than `boat new` may take (its limit and a minute more;
+/// `KONTEXT_DISPATCH_NEW_GRACE_MS` in the tests).
+pub(crate) fn new_grace_ms() -> i64 {
+    std::env::var("KONTEXT_DISPATCH_NEW_GRACE_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or_else(|| provider::limit_of(&["new".into()]).as_millis() as i64 + 60_000)
+}
+
+/// The one line that says why a start script failed, from all it printed
+/// (Boat's `setupError` is the script's whole stderr, installer chatter
+/// included): its last `kontext-dispatch:` line, else its last line.
+pub fn failure_line(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .rev()
+        .find(|l| l.starts_with("kontext-dispatch:"))
+        .or(lines.last())
+        .map(|l| credential::redact(l))
+        .unwrap_or_else(|| "the start script failed".into())
+}
+
+/// The start script failed: one line for the reason, and all it printed.
+#[derive(Debug)]
+pub struct SetupFailed {
+    pub line: String,
+    /// Everything the script printed, redacted.
+    pub full: String,
+}
+
+impl std::fmt::Display for SetupFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the sandbox's start script failed: {}", self.line)
+    }
+}
+
+impl std::error::Error for SetupFailed {}
+
+impl SetupFailed {
+    pub fn of(text: &str) -> SetupFailed {
+        SetupFailed {
+            line: failure_line(text),
+            full: credential::redact(text.trim()),
+        }
+    }
+}
+
 /// How often the dispatcher asks the service (5 s; `KONTEXT_DISPATCH_POLL_MS`
 /// in the tests).
 pub fn poll() -> std::time::Duration {
@@ -283,52 +336,121 @@ pub fn end_entry(run: &Run) -> RawEntry {
             run.reason.as_deref().unwrap_or("no reason recorded")
         ),
     };
-    let mut r = journal(
-        run,
+    let title = if run.forgotten {
+        format!(
+            "Epic {}: its run was forgotten by the owner, so kontext did not see its sandbox ({}) \
+             stop; {what}",
+            run.name,
+            run.sandbox.as_deref().unwrap_or("?")
+        )
+    } else {
         format!(
             "Epic {}: its sandbox ({}) stopped, {what}",
             run.name,
             run.sandbox.as_deref().unwrap_or("?")
-        ),
-        "end",
-    );
+        )
+    };
+    let mut r = journal(run, title, "end");
     r.fields.insert("outcome".into(), json!(run.state.label()));
+    if run.forgotten {
+        r.fields.insert("forgotten".into(), json!(true));
+    }
     r
 }
 
+/// What to tell the owner when the agent's credential could not be removed.
+pub const REPLACE_CREDENTIAL: &str = "replace the agent's credential: `claude setup-token`, then \
+     `kontext dispatch credential set`";
+
 /// Ends the run's sandbox and revokes its token, as far as each is not done
-/// yet: a turn still running is ended, the agent's credential is removed
-/// from the sandbox (and the sandbox stopped anyway if that fails), the
-/// sandbox is stopped, the token revoked. Nothing runs in a sandbox already
-/// stopped. Returns what went wrong, to say (the run keeps saying what is
-/// left; [`Run::clean`]).
+/// yet: a sandbox `boat new` made without saying its id is looked up by
+/// name, a turn still running is ended, the agent's credential is removed
+/// from the sandbox (and the sandbox stopped anyway if that fails, which the
+/// run records), the sandbox is stopped, the token revoked. Nothing runs in
+/// a sandbox already stopped, and a sandbox the service says is not running
+/// has nothing to end or remove. Returns what went wrong, to say (the run
+/// keeps saying what is left; [`Run::clean`]).
 pub fn clean_up(project: &str, p: &dyn Provider, run: &mut Run) -> Vec<String> {
     let mut failed = Vec::new();
+    if run.sandbox.is_none()
+        && let Some(asked) = run.sandbox_pending
+    {
+        match p.find(&run.sandbox_name) {
+            Ok(Some(id)) => {
+                run.sandbox = Some(id);
+                run.sandbox_stopped = false;
+                run.sandbox_pending = None;
+            }
+            // None shows up: nobody is still waiting on `boat new` for it
+            // (this run's dispatch is at work and sees what it returns, or
+            // more time passed than `boat new` may take).
+            Ok(None)
+                if guard::dispatching(project, &run.epic)
+                    || state::wall_ms() - asked > new_grace_ms() =>
+            {
+                run.looked = Some(asked);
+                run.sandbox_pending = None;
+            }
+            Ok(None) => failed.push(format!(
+                "no sandbox named {} shows up yet, but Boat may still be making it; it is looked \
+                 for again",
+                run.sandbox_name
+            )),
+            Err(e) => failed.push(format!(
+                "could not tell whether a sandbox named {} exists ({e:#}); the run stays open \
+                 until Boat says",
+                run.sandbox_name
+            )),
+        }
+    }
     if let Some(id) = run.sandbox.clone()
         && !run.sandbox_stopped
     {
-        if let Some(pid) = run.turn_pid
-            && !matches!(
-                p.process(&id, pid),
-                Ok(provider::Process::Exited(_) | provider::Process::Unknown)
-            )
-            && let Err(e) = p.kill(&id, pid)
-        {
-            failed.push(format!(
-                "could not end the coordinator's turn in {id} ({e:#}); stopping the sandbox \
-                 ends it"
-            ));
+        // Boat refuses `exec` on a stopped sandbox (and does not wake it):
+        // then there is nothing to end or remove in it.
+        let mut down = false;
+        if let Some(pid) = run.turn_pid {
+            let ask = p.process(&id, pid);
+            match ask {
+                Ok(provider::Process::Exited(_) | provider::Process::Unknown) => {}
+                Err(e) if provider::not_running(&e) => down = true,
+                _ => match p.kill(&id, pid) {
+                    Ok(()) => {}
+                    Err(e) if provider::not_running(&e) => down = true,
+                    Err(e) => failed.push(format!(
+                        "could not end the coordinator's turn in {id} ({e:#}); stopping the \
+                         sandbox ends it"
+                    )),
+                },
+            }
         }
-        match p.exec(&id, &script::remove_credential_command()) {
-            Ok(o) if o.code == 0 => {}
-            Ok(o) => failed.push(format!(
-                "could not remove the agent's credential from {id} (exit code {}); stopping it \
-                 anyway",
-                o.code
-            )),
-            Err(e) => failed.push(format!(
-                "could not remove the agent's credential from {id} ({e:#}); stopping it anyway"
-            )),
+        if !down {
+            match p.exec(&id, &script::remove_credential_command()) {
+                Ok(o) if o.code == 0 => {}
+                Err(e) if provider::not_running(&e) => down = true,
+                Ok(o) => {
+                    run.credential_left = true;
+                    failed.push(format!(
+                        "could not remove the agent's credential from {id} (exit code {}); \
+                         stopping it anyway, so {REPLACE_CREDENTIAL}",
+                        o.code
+                    ));
+                }
+                Err(e) => {
+                    run.credential_left = true;
+                    failed.push(format!(
+                        "could not remove the agent's credential from {id} ({e:#}); stopping it \
+                         anyway, so {REPLACE_CREDENTIAL}"
+                    ));
+                }
+            }
+        }
+        if down {
+            failed.push(format!(
+                "{id} was already stopped (by Boat's time limit or by hand), so nothing ran in it; \
+                 a stop kontext did not make keeps the agent's credential in the sandbox's saved \
+                 state"
+            ));
         }
         match p.stop(&id) {
             Ok(()) => run.sandbox_stopped = true,
@@ -348,26 +470,6 @@ pub fn clean_up(project: &str, p: &dyn Provider, run: &mut Run) -> Vec<String> {
 
 /// What `dispatch` prints as it goes.
 pub type Say<'a> = &'a mut dyn FnMut(&str);
-
-/// Finds a sandbox the service made under the run's name before its id was
-/// saved (a dispatch killed during `boat new`), and records it.
-pub fn locate(project: &str, p: &dyn Provider, run: &mut Run) -> Result<bool> {
-    if run.sandbox.is_some() {
-        return Ok(true);
-    }
-    let Some(id) = p.find(&run.sandbox_name)? else {
-        return Ok(false);
-    };
-    run.sandbox = Some(id.clone());
-    run.sandbox_stopped = false;
-    state::update_id(project, run, |r| {
-        if r.sandbox.is_none() {
-            r.sandbox = Some(id);
-            r.sandbox_stopped = false;
-        }
-    })?;
-    Ok(true)
-}
 
 /// `kontext dispatch <epic>`.
 pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
@@ -421,9 +523,11 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
             if r.state == RunState::Overdue {
                 return refused(format!(
                     "epic {}'s last sandbox ({}) ran out of time while the ledger could not be \
-                     pulled; the watcher decides whether it closed or is stuck once it can",
+                     pulled; the watcher decides whether it closed or is stuck once it can (if \
+                     `kontext dispatch status` says it is not running: `{}`)",
                     ready.name,
-                    r.sandbox.as_deref().unwrap_or("?")
+                    r.sandbox.as_deref().unwrap_or("?"),
+                    watch::restart_command(project)
                 ));
             }
             if !r.clean() {
@@ -468,6 +572,10 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
             pm_pending: false,
             end_pending: false,
             cleaning_until: None,
+            sandbox_pending: None,
+            credential_left: false,
+            forgotten: false,
+            looked: None,
         };
         l.runs.insert(ready.epic.clone(), run.clone());
         l.save()?;
@@ -573,6 +681,13 @@ fn give_up(project: &str, p: &dyn Provider, mine: &Run, now: Option<&Run>) -> Ve
                 r.token_id.clone_from(&mine.token_id);
                 r.token_revoked = false;
             }
+            // `boat new` failed or was cut off without an id after someone
+            // else looked: the sandbox may exist, so it is looked up again.
+            // A new mark, so a clean-up that looked before does not clear it.
+            if r.sandbox.is_none() && mine.sandbox.is_none() && mine.sandbox_pending.is_some() {
+                r.sandbox_pending =
+                    Some(state::wall_ms().max(mine.sandbox_pending.unwrap_or(0) + 1));
+            }
         });
         match added.and_then(|_| state::lease_clean_up(project, mine)) {
             Ok(Some(r)) if !r.state.live() => r,
@@ -589,6 +704,15 @@ fn give_up(project: &str, p: &dyn Provider, mine: &Run, now: Option<&Run>) -> Ve
         return vec![format!("could not save the state: {e:#}")];
     }
     left
+}
+
+/// A turn started while someone stopped or ended the run (its start was
+/// already on its way to the sandbox): it is ended and the sandbox stopped
+/// again, as far as the service lets (both best effort; Boat refuses `exec`
+/// on a stopped sandbox, and a second stop of a stopped one does nothing).
+pub(crate) fn end_stray_turn(p: &dyn Provider, id: &str, pid: u32) {
+    let _ = p.kill(id, pid);
+    let _ = p.stop(id);
 }
 
 /// Has someone else changed the run (it is another one now, or not live)?
@@ -679,6 +803,12 @@ fn start(
         }),
     )?;
     guard::checkpoint(project, "files");
+    // From here a sandbox may exist before its id is known: the run says
+    // so, and stays unsettled until the id is known or a look-up by name
+    // says there is none.
+    let asked = state::wall_ms();
+    run.sandbox_pending = Some(asked);
+    state::update_own(project, run, |r| r.sandbox_pending = Some(asked))?;
     let spec = NewSandbox {
         name: run.sandbox_name.clone(),
         environment: s.environment.clone(),
@@ -702,14 +832,22 @@ fn start(
         Err(f) => {
             if let Some(id) = f.id.clone() {
                 run.sandbox = Some(id.clone());
-                let _ = state::update_own(project, run, |r| r.sandbox = Some(id));
+                run.sandbox_pending = None;
+                let _ = state::update_own(project, run, |r| {
+                    r.sandbox = Some(id);
+                    r.sandbox_pending = None;
+                });
             }
             return Err(anyhow::Error::new(f));
         }
     };
     run.sandbox = Some(id.clone());
+    run.sandbox_pending = None;
     let sid = id.clone();
-    state::update_own(project, run, |r| r.sandbox = Some(sid))?;
+    state::update_own(project, run, |r| {
+        r.sandbox = Some(sid);
+        r.sandbox_pending = None;
+    })?;
     say(&format!(
         "sandbox {id} ({}) made with {}; waiting for its start script",
         run.sandbox_name, s.service
@@ -723,7 +861,11 @@ fn start(
         match prov.setup(&id)? {
             provider::Setup::Done => break,
             provider::Setup::Failed(why) => {
-                anyhow::bail!("the sandbox's start script failed: {why}")
+                let f = SetupFailed::of(&why);
+                say(&format!(
+                    "the start script printed more: `boat info {id} --json` shows it (setupError)"
+                ));
+                return Err(anyhow::Error::new(f));
             }
             provider::Setup::Pending if now_ms() > until => anyhow::bail!(
                 "the sandbox's start script did not finish in {} minutes",
@@ -750,10 +892,15 @@ fn start(
     guard::checkpoint(project, "turn");
     run.turn_pid = Some(pid);
     run.state = RunState::Running;
-    state::update_own(project, run, |r| {
+    if let Err(e) = state::update_own(project, run, |r| {
         r.turn_pid = Some(pid);
         r.state = RunState::Running;
-    })?;
+    }) {
+        if e.downcast_ref::<state::Gone>().is_some() {
+            end_stray_turn(prov, &id, pid);
+        }
+        return Err(e);
+    }
 
     // A turn that cannot start (no login, no claude, no clone) fails within
     // seconds: then the dispatch fails, and everything goes.
@@ -893,10 +1040,11 @@ impl StatusReport {
         }
         match self.watcher {
             Some(p) => l.push(format!("The watcher runs (pid {p}).")),
-            None if self.live > 0 => l.push(format!(
+            None if self.runs.iter().any(|r| !r.run.settled()) => l.push(format!(
                 "The watcher is not running: the sandboxes keep working, but nothing stops them \
-                 when their epic closes, resumes them or marks them stuck. Start it again with \
-                 `{}`; it picks up from the saved state.",
+                 when their epic closes, resumes them, marks them stuck, decides an overdue one \
+                 or finishes a clean-up. Start it again with `{}`; it picks up from the saved \
+                 state.",
                 watch::restart_command(&self.project)
             )),
             None => {}
@@ -934,6 +1082,19 @@ impl StatusReport {
                     run.name
                 ));
             }
+            if run.credential_left {
+                l.push(format!(
+                    "    the agent's credential could not be removed from its sandbox before it \
+                     stopped: {REPLACE_CREDENTIAL}"
+                ));
+            }
+            if run.forgotten {
+                l.push(
+                    "    forgotten by the owner (`dispatch stop --forget`): kontext did not see \
+                     its sandbox stop"
+                        .into(),
+                );
+            }
         }
         l.join("\n") + "\n"
     }
@@ -942,10 +1103,16 @@ impl StatusReport {
 fn left_text(run: &Run) -> String {
     let mut left = Vec::new();
     if run.sandbox.is_some() && !run.sandbox_stopped {
-        left.push("the sandbox is not stopped");
+        left.push("the sandbox is not stopped".to_string());
+    }
+    if run.sandbox.is_none() && run.sandbox_pending.is_some() {
+        left.push(format!(
+            "boat new gave no id, and whether a sandbox named {} exists is not known yet",
+            run.sandbox_name
+        ));
     }
     if run.token_id.is_some() && !run.token_revoked {
-        left.push("the token is not revoked");
+        left.push("the token is not revoked".to_string());
     }
     left.join(", ")
 }
@@ -991,7 +1158,8 @@ pub fn stop(project: &str, epic: &str) -> Result<(Run, Vec<String>)> {
         let mut run = found;
         if run.being_cleaned() {
             return refused(format!(
-                "epic {}'s sandbox is being cleaned up right now; `kontext dispatch status` shows                  how it ends",
+                "epic {}'s sandbox is being cleaned up right now; `kontext dispatch status` shows \
+                 how it ends",
                 run.name
             ));
         }
@@ -1008,22 +1176,12 @@ pub fn stop(project: &str, epic: &str) -> Result<(Run, Vec<String>)> {
     };
     let prov = provider::of(&claimed.service)?;
     let mut run = claimed;
-    let mut failed = Vec::new();
-    // A dispatch killed while the service made the sandbox left only its name.
-    if run.sandbox.is_none()
-        && run.token_id.is_some()
-        && let Err(e) = locate(project, prov.as_ref(), &mut run)
-    {
-        failed.push(format!(
-            "could not look for a sandbox named {} ({e:#})",
-            run.sandbox_name
-        ));
-    }
-    failed.extend(clean_up(project, prov.as_ref(), &mut run));
+    let mut failed = clean_up(project, prov.as_ref(), &mut run);
     if let Some(saved) = state::merge_clean_up(project, &run)? {
         run = saved;
     }
-    if run.end_pending {
+    // The end entry says the sandbox stopped: only once it did.
+    if run.end_pending && run.clean() {
         match record(&resolved.home, &resolved.writer, end_entry(&run)) {
             Ok(_) => {
                 if let Some(saved) = state::update_id(project, &run, |r| r.end_pending = false)? {
@@ -1036,4 +1194,131 @@ pub fn stop(project: &str, epic: &str) -> Result<(Run, Vec<String>)> {
         }
     }
     Ok((run, failed))
+}
+
+/// `kontext dispatch stop <epic> --forget`: the owner's way out of a clean-up
+/// that can never finish. Only for a run that already ended and is not
+/// clean; the token's revoke is tried once more (it is kontext's own
+/// server), then the run counts as clean and its end entry is written.
+/// Returns the run and what kontext did not verify.
+pub fn forget(project: &str, epic: &str) -> Result<(Run, Vec<String>)> {
+    let resolved = config::resolve_project(Some(project))?;
+    let mut run = {
+        let mut l = state::lock(project)?;
+        let Some(found) = find_run(&l.runs, epic).cloned() else {
+            return refused(format!(
+                "epic {epic} was not dispatched from this machine (`kontext dispatch status`)"
+            ));
+        };
+        if found.state.live() {
+            return refused(format!(
+                "epic {}'s run is {}: `kontext dispatch stop {}` ends it; --forget is only for a \
+                 run whose clean-up cannot finish",
+                found.name,
+                found.state.label(),
+                found.name
+            ));
+        }
+        if found.clean() {
+            return refused(format!(
+                "epic {}'s run is already cleaned up: there is nothing to forget",
+                found.name
+            ));
+        }
+        if found.being_cleaned() {
+            return refused(format!(
+                "epic {}'s sandbox is being cleaned up right now; `kontext dispatch status` shows \
+                 how it ends",
+                found.name
+            ));
+        }
+        let mut run = found;
+        run.lease();
+        l.runs.insert(run.epic.clone(), run.clone());
+        l.save()?;
+        run
+    };
+    if let Some(t) = run.token_id.clone()
+        && !run.token_revoked
+        && crate::remote::token_revoke(project, &t).is_ok()
+    {
+        run.token_revoked = true;
+    }
+    let mut unverified = Vec::new();
+    if let Some(id) = run.sandbox.as_deref().filter(|_| !run.sandbox_stopped) {
+        unverified.push(format!(
+            "that sandbox {id} stopped (`boat list --all` shows it; `boat stop {id}` stops it)"
+        ));
+    }
+    if run.sandbox.is_none() && run.sandbox_pending.is_some() {
+        unverified.push(format!(
+            "whether a sandbox named {} exists (`boat list --all` shows it)",
+            run.sandbox_name
+        ));
+    }
+    if (run.sandbox.is_some() && !run.sandbox_stopped) || run.credential_left {
+        unverified.push(format!(
+            "that the agent's credential is out of it: to be sure, {REPLACE_CREDENTIAL}"
+        ));
+    }
+    if let Some(t) = run.token_id.as_deref().filter(|_| !run.token_revoked) {
+        unverified.push(format!(
+            "that token {t} is revoked (`kontext token revoke {t}`)"
+        ));
+    }
+    let revoked = run.token_revoked;
+    let mut run = state::update_id(project, &run, |r| {
+        r.forgotten = true;
+        r.cleaning_until = None;
+        r.token_revoked |= revoked;
+        r.end_pending = true;
+    })?
+    .context("the run changed meanwhile")?;
+    match record(&resolved.home, &resolved.writer, end_entry(&run)) {
+        Ok(_) => {
+            if let Some(saved) = state::update_id(project, &run, |r| r.end_pending = false)? {
+                run = saved;
+            }
+        }
+        Err(e) => unverified.push(format!(
+            "the end entry in the ledger ({e:#}); the watcher writes it later"
+        )),
+    }
+    Ok((run, unverified))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What real Boat's `setupError` looked like on 2026-11-16: the whole
+    /// stderr of the script.
+    #[test]
+    fn a_start_script_failure_is_one_line() {
+        let text = "Installing kontext v0.3.0…\ninstalled to /home/user/.local/bin\n\
+            kontext: GET http://x/whoami: io: Connection refused\n\
+            remote: Write access to repository not granted.\n\
+            fatal: unable to access 'https://github.com/a/b/': 403\n\
+            kontext-dispatch: could not clone https://github.com/a/b into /home/user/b\n";
+        assert_eq!(
+            failure_line(text),
+            "kontext-dispatch: could not clone https://github.com/a/b into /home/user/b"
+        );
+        assert_eq!(failure_line("one\ntwo\n\n"), "two");
+        assert_eq!(failure_line(""), "the start script failed");
+        assert_eq!(
+            failure_line("kontext-dispatch: key sk-ant-oat01-x"),
+            "kontext-dispatch: key [redacted]"
+        );
+    }
+
+    /// The review's finding 1: the watcher waits for a sandbox at least as
+    /// long as `boat new` may take.
+    #[test]
+    fn the_new_grace_outlasts_boat_new() {
+        if std::env::var("KONTEXT_DISPATCH_NEW_GRACE_MS").is_ok() {
+            return;
+        }
+        assert!(new_grace_ms() > provider::limit_of(&["new".into()]).as_millis() as i64);
+    }
 }

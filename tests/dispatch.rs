@@ -139,6 +139,7 @@ impl World {
             .env_remove("KONTEXT_DISPATCH_TEST_PAUSE")
             .env_remove("KONTEXT_BOAT_TIMEOUT_MS")
             .env_remove("KONTEXT_DISPATCH_STALE_PULL_MS")
+            .env_remove("KONTEXT_DISPATCH_NO_ANSWER_MS")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.dir.path().join("gitconfig"))
             .env_remove("KONTEXT_NOW")
@@ -259,7 +260,8 @@ impl World {
             let r = self.run_of(name);
             r["state"] == state
                 && (live
-                    || ((r["sandbox"].is_null() || r["sandbox_stopped"] == true)
+                    || (((r["sandbox"].is_null() && r["sandbox_pending"].is_null())
+                        || r["sandbox_stopped"] == true)
                         && (r["token_id"].is_null() || r["token_revoked"] == true)
                         && r["pm_pending"] != true
                         && r["end_pending"] != true))
@@ -795,21 +797,52 @@ fn stop_ends_the_turn_removes_the_credential_stops_and_revokes() {
     assert_ne!(run["turn_pid"].as_u64().unwrap(), pid);
 }
 
+/// The review of #61 and #62, finding 5 (this test asserted exit 0 before):
+/// a credential that cannot be removed does not keep the sandbox from
+/// stopping, but `stop` exits non-zero and says to replace it, the run
+/// records it, and the stuck question does not say to resume the sandbox.
 #[test]
-fn a_credential_that_cannot_be_removed_still_lets_the_sandbox_stop() {
+fn a_credential_that_cannot_be_removed_stops_the_sandbox_and_says_to_replace_it() {
     let Some(w) = World::new() else { return };
     w.plan(true);
     w.ok(&["dispatch", "foundations"]);
     fs::write(w.fake.join("fail-rm"), "").unwrap();
     let o = w.run(&["dispatch", "stop", "foundations"]);
-    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    let out = text(&o);
     assert!(
-        text(&o).contains("could not remove the agent's credential from bx_fake1"),
-        "{}",
-        text(&o)
+        out.contains("could not remove the agent's credential from bx_fake1"),
+        "{out}"
     );
-    assert!(text(&o).contains("stopping it anyway"), "{}", text(&o));
+    assert!(out.contains("stopping it anyway"), "{out}");
+    assert!(out.contains("claude setup-token"), "{out}");
+    assert!(out.contains("kontext dispatch credential set"), "{out}");
     assert!(w.fake.join("bx_fake1.stopped").exists());
+    let run = w.run_of("foundations");
+    assert_eq!(run["sandbox_stopped"], true);
+    assert_eq!(run["token_revoked"], true);
+    assert_eq!(run["credential_left"], true);
+    let status = w.ok(&["dispatch", "status"]);
+    assert!(
+        status.contains("credential could not be removed"),
+        "{status}"
+    );
+    // A stuck run whose credential stayed: the question to the pm says not
+    // to resume that sandbox.
+    w.ok(&["dispatch", "small"]);
+    fs::write(
+        w.fake.join("end-bx_fake2-1"),
+        "error:Failed to authenticate",
+    )
+    .unwrap();
+    w.wait_state("small", "stuck");
+    let ledger = fs::read_to_string(w.kx_home.join("ledger/omar@mac.jsonl")).unwrap();
+    let q = ledger
+        .lines()
+        .find(|l| l.contains("Epic small is stuck"))
+        .unwrap_or_else(|| panic!("no question in {ledger}"));
+    assert!(q.contains("do not resume it"), "{q}");
+    assert!(!q.contains("`boat resume"), "{q}");
 }
 
 #[test]
@@ -918,7 +951,10 @@ impl Sandbox {
         );
         script(
             "gh",
-            "#!/bin/sh\ncase \"$*\" in\n*.login*) echo octo ;;\n*.id*) echo 4242 ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$FAKE_BOAT_DIR/gh.log\"\ncase \"$*\" in\n\
+             *.login*) echo octo ;;\n*.id*) echo 4242 ;;\n'extension list') ;;\n\
+             'extension install'*) [ -z \"${FAKE_GH_INSTALL_FAIL:-}\" ] || exit 1 ;;\n\
+             *) exit 1 ;;\nesac\n",
         );
         // claude: says what it got (never the credential's value), and
         // answers as Claude Code does, or as when it is not logged in.
@@ -1109,11 +1145,25 @@ fn the_start_script_sets_the_sandbox_up_clones_the_repo_and_hides_the_secrets() 
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("Foundations"), "{}", text(&o));
 
+    // gh stack, which the coordinator is asked for and a Boat sandbox lacks.
+    let gh = fs::read_to_string(w.fake.join("gh.log")).unwrap();
+    assert!(gh.contains("extension install github/gh-stack"), "{gh}");
+
     // Run again with memory-backed storage (a sandbox restarted midway, the
-    // credential sent again): it moves there, and the disk copy goes.
+    // credential sent again): it moves there, and the disk copy goes. gh
+    // stack cannot be installed this time: said, and not fatal.
     fs::copy(w.fake.join("files/.kontext-agent-credential"), &cred_in).unwrap();
-    let o = sb.start_script().output().unwrap();
+    let o = sb
+        .start_script()
+        .env("FAKE_GH_INSTALL_FAIL", "1")
+        .output()
+        .unwrap();
     assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("could not install gh stack"),
+        "{}",
+        text(&o)
+    );
     let in_memory = sb.shm.join("kontext-dispatch-agent-credential");
     assert_eq!(fs::read_to_string(&in_memory).unwrap(), CRED);
     assert_eq!(mode(&in_memory), 0o600);
@@ -1327,26 +1377,69 @@ fn a_failed_turn_is_stuck_at_once_with_its_reason() {
         "--actor", "agent:pm", "--role", "pm", "resume", "--as", "pm",
     ]);
     assert!(pm.contains("Failed to authenticate"), "{pm}");
+    // What to look at: `boat events` prints nothing for a sandbox driven by
+    // `boat exec` (real run of 2026-11-16); `boat history` has the commands.
+    let ledger = fs::read_to_string(w.kx_home.join("ledger/omar@mac.jsonl")).unwrap();
+    let q = ledger
+        .lines()
+        .find(|l| l.contains("Epic foundations is stuck"))
+        .unwrap();
+    assert!(q.contains("boat history bx_fake1"), "{q}");
+    assert!(q.contains("~/.kontext-dispatch/turn-"), "{q}");
+    assert!(q.contains("boat resume bx_fake1"), "{q}");
+    assert!(!q.contains("boat events"), "{q}");
 }
 
+/// The review of #61 and #62, finding 3 (this test pinned "decides
+/// nothing" before): a turn Boat no longer knows is decided by what the
+/// runner left in the sandbox; one that cannot be followed at all ends the
+/// run after the limit (10 minutes; 1.5 s here); one that never ran is
+/// stuck at once.
 #[test]
-fn a_turn_that_cannot_be_followed_decides_nothing() {
+fn a_turn_boat_forgot_is_read_from_the_sandbox_and_an_unfollowed_one_ends() {
     let Some(w) = World::new() else { return };
     w.plan(true);
-    w.ok(&["dispatch", "foundations"]);
-    // Boat no longer knows the process; and then cannot be asked at all.
+    let envs = [("KONTEXT_DISPATCH_NO_ANSWER_MS", "1500")];
+    w.ok_env(&envs, &["dispatch", "foundations"]);
+    // Boat forgets the process; the runner says it still runs.
     fs::write(w.fake.join("lost-bx_fake1-1"), "").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    fs::write(w.fake.join("fail-status"), "").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(800));
     assert_eq!(w.run_of("foundations")["state"], "running");
     assert_eq!(w.turns().len(), 1);
-    assert!(!w.fake.join("bx_fake1.stopped").exists());
+    // It ends: what it left says so, and it is resumed.
+    fs::write(w.fake.join("end-bx_fake1-1"), "").unwrap();
+    w.wait_state("foundations", "resumed");
+    wait_for("the second turn's pid", || {
+        w.run_of("foundations")["turn_pid"].as_u64().is_some()
+    });
+    // Boat cannot be asked at all: nothing for a while, then stuck.
+    fs::write(w.fake.join("fail-status"), "").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(w.run_of("foundations")["state"], "resumed");
+    w.wait_state("foundations", "stuck");
+    let reason = w.run_of("foundations")["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        reason.contains("could not tell how its coordinator's turn 2 stands"),
+        "{reason}"
+    );
+    assert!(w.fake.join("bx_fake1.stopped").exists());
     let log = fs::read_to_string(w.config.join("dispatch/demo/watcher.log")).unwrap();
-    assert_eq!(log.matches("cannot be followed").count(), 1, "{log}");
-    assert_eq!(log.matches("could not ask").count(), 1, "{log}");
+    assert_eq!(
+        log.matches("could not tell how turn 2 stands").count(),
+        1,
+        "{log}"
+    );
     fs::remove_file(w.fake.join("fail-status")).unwrap();
-    w.ok(&["dispatch", "stop", "foundations"]);
+    // A turn Boat does not know and the runner left no trace of never ran.
+    w.ok_env(&envs, &["dispatch", "small"]);
+    fs::write(w.fake.join("gone-bx_fake2-1"), "").unwrap();
+    fs::write(w.fake.join("lost-bx_fake2-1"), "").unwrap();
+    w.wait_state("small", "stuck");
+    let reason = w.run_of("small")["reason"].as_str().unwrap().to_string();
+    assert!(reason.contains("turn 1 never ran"), "{reason}");
 }
 
 #[test]
@@ -1922,4 +2015,447 @@ fn an_empty_starting_run_is_ended_by_the_watcher() {
     w.wait_state("foundations", "stuck");
     let o = w.run(&["dispatch", "foundations"]);
     assert!(o.status.success(), "{}", text(&o));
+}
+
+// ------------------------------------------- the review of #61 and #62
+
+impl World {
+    /// Kills this world's watcher and waits for it to be gone.
+    fn kill_watcher(&self) {
+        let pid = self.status()["watcher"].as_u64().unwrap();
+        assert!(
+            Command::new("kill")
+                .arg(pid.to_string())
+                .status()
+                .unwrap()
+                .success()
+        );
+        wait_for("the watcher to be gone", || {
+            self.status()["watcher"].is_null()
+        });
+    }
+
+    /// Rewrites the epic's run in state.json.
+    fn edit_run(&self, name: &str, f: impl FnOnce(&mut Value)) {
+        let path = self.dispatch_dir().join("state.json");
+        let mut st: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let epic = self.run_of(name)["epic"].as_str().unwrap().to_string();
+        f(&mut st["runs"][&epic]);
+        fs::write(&path, serde_json::to_string_pretty(&st).unwrap()).unwrap();
+    }
+
+    /// `kontext <args>`, again while the watcher holds the run's clean-up
+    /// lease (it retries a failed clean-up on its own).
+    fn run_when_free(&self, args: &[&str]) -> Output {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let o = self.run(args);
+            if !text(&o).contains("being cleaned up right now") || std::time::Instant::now() > until
+            {
+                return o;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The end entries of an epic's runs in the ledger.
+    fn end_entries(&self, name: &str) -> usize {
+        fs::read_to_string(self.kx_home.join("ledger/omar@mac.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"dispatch\":\"end\"") && l.contains(&format!("Epic {name}:")))
+            .count()
+    }
+}
+
+/// Finding 1: `boat new` printed `created` and was then cut off by its time
+/// limit. What it printed is kept, so the sandbox is stopped, not orphaned.
+#[test]
+fn a_boat_new_cut_off_by_its_limit_still_stops_the_sandbox_it_made() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    fs::write(w.fake.join("hang-new"), "").unwrap();
+    let o = w
+        .cmd(&["dispatch", "foundations"])
+        .env("KONTEXT_BOAT_TIMEOUT_MS", "2000")
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("did not answer in 2 s"), "{}", text(&o));
+    let run = w.run_of("foundations");
+    assert_eq!(run["sandbox"], "bx_fake1", "{run}");
+    assert_eq!(run["sandbox_stopped"], true, "{run}");
+    assert_eq!(run["token_revoked"], true, "{run}");
+    assert!(w.fake.join("bx_fake1.stopped").exists());
+    fs::write(w.fake.join("release-new"), "").unwrap();
+    fs::remove_file(w.fake.join("hang-new")).unwrap();
+    // The epic gets one new sandbox, and only that one runs.
+    w.ok(&["dispatch", "foundations"]);
+    assert_eq!(w.run_of("foundations")["sandbox"], "bx_fake2");
+    assert!(!w.fake.join("bx_fake2.stopped").exists());
+}
+
+/// Finding 1: `boat new` made a sandbox and failed without its id. It is
+/// looked up by name; while Boat's list may be partial (more pages) the run
+/// stays unsettled and holds its epic; then it is found and stopped.
+#[test]
+fn a_boat_new_that_fails_without_an_id_is_looked_up_by_name() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    fs::write(w.fake.join("fail-new-silent"), "").unwrap();
+    fs::write(w.fake.join("list-more"), "").unwrap();
+    let o = w.run(&["dispatch", "foundations"]);
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    let run = w.run_of("foundations");
+    assert!(run["sandbox"].is_null(), "{run}");
+    assert!(run["sandbox_pending"].as_i64().is_some(), "{run}");
+    assert!(text(&o).contains("not known yet"), "{}", text(&o));
+    assert!(
+        w.calls().contains("list --filter rp --json"),
+        "{}",
+        w.calls()
+    );
+    let status = w.ok(&["dispatch", "status"]);
+    assert!(status.contains("not cleaned up yet"), "{status}");
+    // Not dispatched again over it, and `stop` says it is not done.
+    let o = w.run(&["dispatch", "foundations"]);
+    assert_eq!(code(&o), Some(2), "{}", text(&o));
+    assert!(text(&o).contains("not cleaned up yet"), "{}", text(&o));
+    let o = w.run_when_free(&["dispatch", "stop", "foundations"]);
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    // Boat's whole list: found by its name and stopped.
+    fs::remove_file(w.fake.join("list-more")).unwrap();
+    wait_for("the sandbox found and stopped", || {
+        let r = w.run_of("foundations");
+        r["sandbox"] == "bx_fake1" && r["sandbox_stopped"] == true && r["sandbox_pending"].is_null()
+    });
+    assert!(w.fake.join("bx_fake1.stopped").exists());
+    fs::remove_file(w.fake.join("fail-new-silent")).unwrap();
+    w.ok(&["dispatch", "foundations"]);
+}
+
+/// Finding 2: a `stop` while the first turn's `boat exec --detach` is on its
+/// way. The turn that reached the sandbox is ended and the sandbox stopped
+/// again.
+#[test]
+fn a_stop_while_the_turn_starts_ends_that_turn_and_stops_again() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    fs::write(w.fake.join("hang-detach"), "").unwrap();
+    let d = w.spawn(&[], &["dispatch", "foundations"]);
+    wait_for("the detach", || w.calls().contains(" --detach "));
+    let o = w.run(&["dispatch", "stop", "foundations"]);
+    assert!(o.status.success(), "{}", text(&o));
+    fs::write(w.fake.join("release-detach"), "").unwrap();
+    let o = d.wait_with_output().unwrap();
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("was stopped while dispatch was starting it"),
+        "{}",
+        text(&o)
+    );
+    let pid = fs::read_to_string(w.fake.join("pids")).unwrap();
+    let calls = w.calls();
+    let first_stop = w.call_at("stop bx_fake1");
+    let kill = w.call_at(&format!("exec bx_fake1 --kill {} --json", pid.trim()));
+    assert!(kill > first_stop, "{calls}");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|l| l.starts_with("stop bx_fake1"))
+            .count(),
+        2,
+        "{calls}"
+    );
+    assert_eq!(w.run_of("foundations")["state"], "stopped");
+}
+
+/// Finding 4: Boat stopped the sandbox itself (its time limit, or by hand).
+/// Boat refuses `exec` on it: there is nothing to end or remove, and the
+/// stop goes through without a failure.
+#[test]
+fn a_sandbox_boat_already_stopped_is_cleaned_up_without_a_failure() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    fs::write(w.fake.join("bx_fake1.stopped"), "").unwrap();
+    let o = w.run(&["dispatch", "stop", "foundations"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("bx_fake1 was already stopped"), "{out}");
+    assert!(!out.contains("could not remove"), "{out}");
+    assert!(!out.contains("could not end"), "{out}");
+    let run = w.run_of("foundations");
+    assert_eq!(run["state"], "stopped");
+    assert_eq!(run["sandbox_stopped"], true);
+    assert_eq!(run["token_revoked"], true);
+    assert_eq!(run["credential_left"], false);
+}
+
+/// Finding 4: the owner's way out of a clean-up that can never succeed.
+#[test]
+fn stop_forget_is_the_way_out_of_a_clean_up_that_never_finishes() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "small"]);
+    w.ok(&["dispatch", "foundations"]);
+    // Not for a live run.
+    let o = w.run(&["dispatch", "stop", "foundations", "--forget"]);
+    assert_eq!(code(&o), Some(2), "{}", text(&o));
+    assert_eq!(w.run_of("foundations")["state"], "running");
+    fs::write(w.fake.join("fail-stop"), "").unwrap();
+    let o = w.run_when_free(&["dispatch", "stop", "small"]);
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    let o = w.run_when_free(&["dispatch", "stop", "small", "--forget"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("kontext did not verify"), "{out}");
+    assert!(out.contains("boat stop bx_fake1"), "{out}");
+    let run = w.run_of("small");
+    assert_eq!(run["forgotten"], true);
+    assert_eq!(run["token_revoked"], true);
+    assert!(
+        w.ok(&["dispatch", "status"])
+            .contains("forgotten by the owner")
+    );
+    let ledger = fs::read_to_string(w.kx_home.join("ledger/omar@mac.jsonl")).unwrap();
+    assert!(
+        ledger.contains("its run was forgotten by the owner"),
+        "{ledger}"
+    );
+    // The epic is free again, and the watcher no longer retries it.
+    fs::remove_file(w.fake.join("fail-stop")).unwrap();
+    w.ok(&["dispatch", "small"]);
+    assert_eq!(w.run_of("small")["sandbox"], "bx_fake3");
+}
+
+/// Finding 6: a live run written by an older kontext (no run id, no turn
+/// process) is ended instead of getting a turn its sandbox cannot run.
+#[test]
+fn a_live_run_from_an_older_kontext_is_ended() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    w.kill_watcher();
+    w.edit_run("foundations", |r| {
+        r["id"] = "".into();
+        r["session"] = Value::Null;
+        r["turn_pid"] = Value::Null;
+        r["state"] = "running".into();
+        r["turns"] = 1.into();
+    });
+    w.ok(&["dispatch", "watch", "--detach"]);
+    w.wait_state("foundations", "stuck");
+    let run = w.run_of("foundations");
+    assert!(
+        run["reason"]
+            .as_str()
+            .unwrap()
+            .contains("dispatched by an older kontext"),
+        "{run}"
+    );
+    assert!(w.fake.join("bx_fake1.stopped").exists());
+    assert_eq!(w.turns().len(), 1, "a turn was started: {}", w.calls());
+}
+
+/// Finding 7: with no watcher, `status` says so whenever a run is not
+/// settled (an unwritten question, an overdue verdict), and the overdue
+/// refusal says how to start it.
+#[test]
+fn the_watcher_hint_shows_while_any_run_is_not_settled() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    w.kill_watcher();
+    w.edit_run("foundations", |r| {
+        r["state"] = "stuck".into();
+        r["pm_pending"] = true.into();
+        r["sandbox_stopped"] = true.into();
+        r["token_revoked"] = true.into();
+    });
+    let status = w.ok(&["dispatch", "status"]);
+    assert!(status.contains("The watcher is not running"), "{status}");
+    w.edit_run("foundations", |r| {
+        r["state"] = "overdue".into();
+        r["pm_pending"] = false.into();
+    });
+    let status = w.ok(&["dispatch", "status"]);
+    assert!(status.contains("The watcher is not running"), "{status}");
+    let o = w.run(&["dispatch", "foundations"]);
+    assert_eq!(code(&o), Some(2), "{}", text(&o));
+    assert!(
+        text(&o).contains("kontext --project demo dispatch watch --detach"),
+        "{}",
+        text(&o)
+    );
+}
+
+/// Finding 8: a `project.toml` that cannot be read for a moment does not end
+/// the watcher.
+#[test]
+fn a_moment_of_unreadable_project_toml_does_not_end_the_watcher() {
+    let Some(w) = World::new() else { return };
+    let tasks = w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    let pid = w.status()["watcher"].as_u64().unwrap();
+    let toml = w.kx_home.join("project.toml");
+    let good = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, format!("{good}max_sandboxes = = 2\n")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    fs::write(&toml, &good).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(
+        w.status()["watcher"].as_u64(),
+        Some(pid),
+        "the watcher left"
+    );
+    w.close_epic(&tasks, "foundations");
+    w.wait_state("foundations", "closed");
+}
+
+/// Findings 10 and 12: the watcher does not write the end entry while a
+/// `stop` is still stopping the sandbox, nor once a stop failed; a second
+/// `stop` meanwhile says so in one clean line.
+#[test]
+fn the_end_entry_waits_for_the_sandbox_to_stop() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    fs::write(w.fake.join("hang-stop"), "").unwrap();
+    let stop = w.spawn(&[], &["dispatch", "stop", "foundations"]);
+    wait_for("the hung stop", || w.calls().contains("stop bx_fake1"));
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert_eq!(w.end_entries("foundations"), 0, "written while stopping");
+    let o = w.run(&["dispatch", "stop", "foundations"]);
+    assert_eq!(code(&o), Some(2), "{}", text(&o));
+    assert!(
+        text(&o)
+            .contains("is being cleaned up right now; `kontext dispatch status` shows how it ends"),
+        "{}",
+        text(&o)
+    );
+    fs::write(w.fake.join("release-stop"), "").unwrap();
+    let o = stop.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    wait_for("one end entry", || w.end_entries("foundations") == 1);
+    // A stop that fails: no end entry, and the tree still says it runs.
+    fs::remove_file(w.fake.join("hang-stop")).unwrap();
+    w.ok(&["dispatch", "small"]);
+    fs::write(w.fake.join("fail-stop"), "").unwrap();
+    let o = w.run(&["dispatch", "stop", "small"]);
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    assert_eq!(w.end_entries("small"), 0);
+    assert!(w.ok(&["tree"]).contains("in a sandbox since"));
+    fs::remove_file(w.fake.join("fail-stop")).unwrap();
+    wait_for("the end entry once stopped", || w.end_entries("small") == 1);
+}
+
+/// Finding 11: a failed turn seen while the pull fails waits for a fresh
+/// pull, as an ended one does: the coordinator may have closed the epic.
+#[test]
+fn a_failed_turn_on_a_stale_ledger_waits_for_a_fresh_pull() {
+    let Some(mut w) = World::new() else { return };
+    w.plan(true);
+    w.ok(&["dispatch", "foundations"]);
+    w.server.stop();
+    // A tick that pulled just before the server stopped may decide on that
+    // pull: wait until a tick has seen the pull fail.
+    let failed_syncs = || {
+        fs::read_to_string(w.dispatch_dir().join("watcher.log"))
+            .unwrap_or_default()
+            .matches("sync failed")
+            .count()
+    };
+    let before = failed_syncs();
+    wait_for("a failed pull", || failed_syncs() > before);
+    fs::write(w.fake.join("end-bx_fake1-1"), "error:API Error: overloaded").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let log = fs::read_to_string(w.dispatch_dir().join("watcher.log")).unwrap_or_default();
+    assert_eq!(w.run_of("foundations")["state"], "running", "{log}");
+    assert!(!w.fake.join("bx_fake1.stopped").exists());
+    w.server.restart();
+    w.wait_state("foundations", "stuck");
+    let reason = w.run_of("foundations")["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains("overloaded"), "{reason}");
+}
+
+/// Finding 12: `credential set` refuses a bare prefix and control bytes.
+#[test]
+fn credential_set_refuses_a_bare_prefix_and_control_bytes() {
+    let Some(w) = World::bare() else { return };
+    for bad in [
+        "sk-ant-oat",
+        "sk-ant-oat01-",
+        "sk-ant-oat01-ab\0cd",
+        "sk-ant-oat01-ab\x1bcd",
+    ] {
+        let o = w.run_stdin(bad, &["dispatch", "credential", "set"]);
+        assert_eq!(code(&o), Some(2), "{bad:?}: {}", text(&o));
+        assert!(!w.config.join("dispatch/.agent-credential").exists());
+    }
+}
+
+/// Finding 12: with --json, an error before the reservation shows no run,
+/// not the epic's previous one.
+#[test]
+fn a_failed_dispatch_with_json_does_not_show_an_older_run() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    fs::write(w.fake.join("fail-new"), "").unwrap();
+    let o = w.run(&["dispatch", "foundations"]);
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    fs::remove_file(w.fake.join("fail-new")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let cred = w.config.join("dispatch/.agent-credential");
+    fs::set_permissions(&cred, fs::Permissions::from_mode(0o000)).unwrap();
+    let o = w.run(&["--json", "dispatch", "foundations"]);
+    fs::set_permissions(&cred, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("credential"), "{v}");
+    assert!(v["run"].is_null(), "{v}");
+}
+
+/// From the real run of 2026-11-16: Boat's `setupError` is the script's whole
+/// stderr. The reason is one line; the rest is in the --json output.
+#[test]
+fn a_failed_start_script_gives_one_line_and_keeps_the_rest() {
+    let Some(w) = World::new() else { return };
+    w.plan(true);
+    fs::write(w.fake.join("bx_fake1.setup"), "failed").unwrap();
+    fs::write(
+        w.fake.join("bx_fake1.setup-error"),
+        "Installing kontext v0.3.0\n\
+         kontext: GET http://127.0.0.1:1/whoami: io: Connection refused\n\
+         remote: Write access to repository not granted.\n\
+         fatal: unable to access 'https://github.com/acme/shop/': The requested URL returned error: 403\n\
+         kontext-dispatch: could not clone https://github.com/acme/shop into /home/user/shop\n",
+    )
+    .unwrap();
+    let o = w.run(&["--json", "dispatch", "foundations"]);
+    assert_eq!(code(&o), Some(1), "{}", text(&o));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(
+        v["error"],
+        "the sandbox's start script failed: kontext-dispatch: could not clone \
+         https://github.com/acme/shop into /home/user/shop",
+        "{v}"
+    );
+    assert!(
+        v["detail"].as_str().unwrap().contains("Installing kontext"),
+        "{v}"
+    );
+    let reason = w.run_of("foundations")["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !reason.contains('\n') && !reason.contains("Installing"),
+        "{reason}"
+    );
+    assert!(reason.contains("could not clone"), "{reason}");
 }
