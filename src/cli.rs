@@ -10,7 +10,7 @@
 //! human can do, such as a Cloudflare API token: [`crate::human`]).
 
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -963,14 +963,21 @@ pub enum DispatchCmd {
         #[arg(long)]
         detach: bool,
     },
-    /// Holds one turn of an epic's coordinator open until it ends (started by dispatch itself)
-    #[command(hide = true)]
-    Turn {
-        /// The epic's id
-        epic: String,
-        /// The turn's number
-        n: u32,
+    /// The coordinator agent's credential on this machine (a Claude Code OAuth token from
+    /// `claude setup-token`, or an Anthropic API key). It is kept in the kontext config folder,
+    /// mode 0600, never synced, and reaches each sandbox only as a file
+    Credential {
+        #[command(subcommand)]
+        cmd: CredentialCmd,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CredentialCmd {
+    /// Saves it, read from stdin (or typed, hidden, on a terminal); never from an argument
+    Set,
+    /// Removes it
+    Rm,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1409,10 +1416,9 @@ fn auto_sync_target(cli: &Cli) -> Option<(PathBuf, crate::remote::Remote)> {
         Cmd::Install {
             skills_only: true, ..
         } => return None,
-        // The turn's process only talks to the sandbox service; the watcher
-        // syncs on its own.
+        // The watcher syncs on its own; the credential is this machine's.
         Cmd::Dispatch {
-            cmd: Some(DispatchCmd::Turn { .. } | DispatchCmd::Watch { .. }),
+            cmd: Some(DispatchCmd::Credential { .. } | DispatchCmd::Watch { .. }),
             ..
         } => return None,
         _ => {}
@@ -2409,11 +2415,12 @@ pub(crate) fn print_json(v: &impl serde::Serialize) -> Result<()> {
 impl Ctx<'_> {
     /// `kontext dispatch`.
     fn dispatch(&self, cmd: Option<DispatchCmd>, epic: Option<String>) -> Result<ExitCode> {
+        if let Some(DispatchCmd::Credential { cmd }) = cmd {
+            return self.dispatch_credential(cmd);
+        }
         let p = config::resolve_project(self.project)?;
         match (cmd, epic) {
-            (Some(DispatchCmd::Turn { epic, n }), _) => {
-                crate::dispatch::turn::hold(&p.name, &epic, n)?;
-            }
+            (Some(DispatchCmd::Credential { .. }), _) => unreachable!(),
             (Some(DispatchCmd::Watch { detach: false }), _) => {
                 crate::dispatch::watch::run(&p.name)?;
             }
@@ -2444,6 +2451,7 @@ impl Ctx<'_> {
                 for f in &failed {
                     eprintln!("kontext: warning: {f}");
                 }
+                let left = !run.clean();
                 if self.json {
                     print_json(&run)?;
                 } else {
@@ -2451,14 +2459,14 @@ impl Ctx<'_> {
                         "Epic {}: sandbox {} stopped and its token revoked{}",
                         run.name,
                         run.sandbox.as_deref().unwrap_or("(none)"),
-                        if failed.is_empty() {
-                            ""
-                        } else {
+                        if left {
                             ", except for what is above"
+                        } else {
+                            ""
                         }
                     );
                 }
-                if !failed.is_empty() {
+                if left {
                     return Ok(ExitCode::FAILURE);
                 }
             }
@@ -2484,6 +2492,57 @@ impl Ctx<'_> {
                 }
             }
             (None, None) => bail!("name the epic: kontext dispatch <epic> (or status, stop)"),
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// `kontext dispatch credential set|rm`.
+    fn dispatch_credential(&self, cmd: CredentialCmd) -> Result<ExitCode> {
+        use crate::dispatch::credential;
+        match cmd {
+            CredentialCmd::Set => {
+                let value = if std::io::stdin().is_terminal() {
+                    if crate::human::no_prompt() {
+                        return Err(crate::store::Refused(
+                            "no credential on stdin: pipe it in (`kontext dispatch credential set \
+                             < file`)"
+                                .into(),
+                        )
+                        .into());
+                    }
+                    eprintln!(
+                        "Paste the token `claude setup-token` printed (or an Anthropic API key). \
+                         It is kept on this machine only, mode 0600."
+                    );
+                    crate::server::read_tty_line("Agent credential: ", true)?.unwrap_or_default()
+                } else {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut s)
+                        .context("could not read stdin")?;
+                    s
+                };
+                let kind = credential::set(&value)?;
+                if self.json {
+                    print_json(&serde_json::json!({ "set": true, "kind": kind }))?;
+                } else {
+                    println!(
+                        "Agent credential saved ({}): each dispatched sandbox gets it as a file, \
+                         as {}.",
+                        kind.label(),
+                        kind.var()
+                    );
+                }
+            }
+            CredentialCmd::Rm => {
+                let had = credential::rm()?;
+                if self.json {
+                    print_json(&serde_json::json!({ "removed": had }))?;
+                } else if had {
+                    println!("Agent credential removed from this machine.");
+                } else {
+                    println!("There was no agent credential on this machine.");
+                }
+            }
         }
         Ok(ExitCode::SUCCESS)
     }

@@ -1,21 +1,30 @@
 #!/bin/sh
 # A fake `boat` CLI for the `kontext dispatch` tests (KONTEXT_BOAT points at
-# a copy of it). It never talks to Boat. Everything it is asked goes in
-# $FAKE_BOAT_DIR/calls.log, one line per call, so a test can check that no
-# secret was ever in an argument. Files under $FAKE_BOAT_DIR steer it:
+# a copy of it). It never talks to Boat. Its output follows what Boat's CLI
+# 1.0.100 printed on 2026-11-16 (`boat exec` sync, --detach, --status and
+# --kill). Everything it is asked goes in $FAKE_BOAT_DIR/calls.log, one line
+# per call, so a test can check that no secret was ever in an argument.
+# Files under $FAKE_BOAT_DIR steer it:
 #
 #   fail-new          `new` fails before making a sandbox
 #   fail-new-late     `new` makes a sandbox, then fails
 #   fail-stop         `stop` fails
+#   fail-detach       `exec --detach` fails
+#   fail-status       `exec --status` fails (the CLI could not ask)
+#   fail-rm           the credential's `rm` fails in the sandbox
 #   <id>.setup        `info` says this setupStatus (default: done)
 #   <id>.setup-error  and this setupError
-#   end-<id>-<k>      ends the k-th prompt's turn on that sandbox, with the
-#                     exit code inside (empty: 0)
-#   end-all           ends every turn (the tests' clean-up)
+#   end-<id>-<n>      ends turn n on that sandbox. Its content says how:
+#                       empty           Claude Code ended the turn (exit 0)
+#                       error:<text>    Claude Code failed with <text> (exit 1)
+#                       exit:<code>     the runner exited <code>, no result
+#   lost-<id>-<n>     `--status` does not know turn n's process
+#   end-all           ends every turn as the first form does
 #
 # What it keeps: files/<name> for each --file (the file's base name),
-# <id>.setup-file for --setup-file, <id>.env with the -e values, and
-# <id>.stopped once stopped.
+# <id>.setup-file for --setup-file, <id>.env with the -e values, <id>.stopped
+# once stopped, pid-<pid> ("<id> <n> <session>") per detached turn and
+# killed-<pid> once killed.
 set -eu
 D=${FAKE_BOAT_DIR:?FAKE_BOAT_DIR is not set}
 mkdir -p "$D/files"
@@ -83,33 +92,103 @@ stop)
     : >"$D/$id.stopped"
     echo "{\"id\":\"$id\",\"state\":\"stopping\"}"
     ;;
-prompt)
+exec)
     id=$1
     shift
-    conv=""
+    mode=sync
+    pid=""
     while [ $# -gt 0 ]; do
         case "$1" in
-        --resume) conv=$2; shift 2 ;;
-        --provider | --model) shift 2 ;;
-        *) shift ;;
+        --detach) mode=detach; shift ;;
+        --status) mode=status; pid=$2; shift 2 ;;
+        --kill) mode=kill; pid=$2; shift 2 ;;
+        --json) shift ;;
+        --timeout | --cwd) shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
         esac
     done
-    k=$(cat "$D/$id.prompts" 2>/dev/null || echo 0)
-    k=$((k + 1))
-    echo "$k" >"$D/$id.prompts"
-    [ -n "$conv" ] || conv="cv_$id"
-    echo "{\"event\":\"queued\",\"conversationId\":\"$conv\"}"
-    # The turn lasts until the test ends it (10 minutes at most).
-    i=0
-    while [ ! -e "$D/end-$id-$k" ] && [ ! -e "$D/end-all" ]; do
-        i=$((i + 1))
-        # Gone with the test's folder, or 10 minutes: give up.
-        [ -d "$D" ] && [ "$i" -lt 6000 ] || exit 3
-        sleep 0.1
-    done
-    code=$(cat "$D/end-$id-$k" 2>/dev/null || true)
-    echo '{"event":"prompt","data":{"status":"finished"}}'
-    exit "${code:-0}"
+    line="$*"
+    # How turn n (of sandbox $1) ended: sets `how` to ended, error:<text>,
+    # exit:<code> or running.
+    turn_end() {
+        if [ -e "$D/end-$1-$2" ]; then
+            how=$(cat "$D/end-$1-$2")
+            [ -n "$how" ] || how=ended
+        elif [ -e "$D/end-all" ]; then
+            how=ended
+        else
+            how=running
+        fi
+    }
+    case "$mode" in
+    detach)
+        if [ -e "$D/fail-detach" ]; then
+            echo '{"event":"error","error":"exec failed","code":"x"}'
+            exit 1
+        fi
+        n=$(printf '%s' "$line" | sed -n 's/.* start \([0-9][0-9]*\) \([0-9a-f-]*\)$/\1/p')
+        sid=$(printf '%s' "$line" | sed -n 's/.* start \([0-9][0-9]*\) \([0-9a-f-]*\)$/\2/p')
+        p=$(cat "$D/pids" 2>/dev/null || echo 7200)
+        p=$((p + 1))
+        echo "$p" >"$D/pids"
+        echo "$id ${n:-0} ${sid:-none}" >"$D/pid-$p"
+        echo "{\"command\":\"x\",\"commandId\":\"cmd_$p\",\"logPath\":\"/home/user/.ascii/processes/$p.log\",\"pid\":$p,\"processId\":$p,\"success\":true}"
+        ;;
+    status)
+        if [ -e "$D/fail-status" ]; then
+            echo "error: the Boat API did not answer" >&2
+            exit 1
+        fi
+        if [ ! -e "$D/pid-$pid" ]; then
+            echo "{\"known\":false,\"running\":false,\"status\":\"lost\",\"pid\":$pid}"
+            exit 0
+        fi
+        read -r sid_ n _ <"$D/pid-$pid"
+        if [ -e "$D/lost-$sid_-$n" ]; then
+            echo "{\"known\":false,\"running\":false,\"status\":\"lost\",\"pid\":$pid}"
+        elif [ -e "$D/killed-$pid" ]; then
+            echo "{\"known\":true,\"running\":false,\"status\":\"exited\",\"exitCode\":143,\"signal\":\"SIGTERM\",\"pid\":$pid}"
+        else
+            turn_end "$sid_" "$n"
+            case "$how" in
+            running) echo "{\"known\":true,\"running\":true,\"status\":\"running\",\"exitCode\":null,\"signal\":null,\"pid\":$pid}" ;;
+            ended) echo "{\"known\":true,\"running\":false,\"status\":\"exited\",\"exitCode\":0,\"signal\":null,\"pid\":$pid}" ;;
+            error:*) echo "{\"known\":true,\"running\":false,\"status\":\"exited\",\"exitCode\":1,\"signal\":null,\"pid\":$pid}" ;;
+            exit:*) echo "{\"known\":true,\"running\":false,\"status\":\"exited\",\"exitCode\":${how#exit:},\"signal\":null,\"pid\":$pid}" ;;
+            esac
+        fi
+        ;;
+    kill)
+        : >"$D/killed-$pid"
+        echo "{\"running\":false,\"signaled\":true,\"command\":{\"status\":\"killed\",\"exitCode\":143,\"signal\":\"SIGTERM\"},\"pid\":$pid}"
+        ;;
+    sync)
+        out=""
+        code=0
+        case "$line" in
+        *" read "[0-9]*)
+            n=${line##* read }
+            p=$(grep -l "^$id $n " "$D"/pid-* 2>/dev/null | tail -n 1 | sed 's/.*pid-//')
+            turn_end "$id" "$n"
+            [ -n "$p" ] && [ -e "$D/killed-$p" ] && how=killed
+            case "$how" in
+            ended) out="pid=$p\\nexit=0\\nflag=\\\"is_error\\\":false\\n--- result\\n{\\\"type\\\":\\\"result\\\",\\\"is_error\\\":false,\\\"result\\\":\\\"done\\\"}\\n--- stderr\\n\\n" ;;
+            error:*)
+                t=$(printf '%s' "${how#error:}" | sed 's/["\\]/ /g')
+                out="pid=$p\\nexit=1\\nflag=\\\"is_error\\\":true\\n--- result\\n{\\\"type\\\":\\\"result\\\",\\\"is_error\\\":true,\\\"result\\\":\\\"$t\\\"}\\n--- stderr\\n\\n" ;;
+            exit:*) out="pid=$p\\nexit=${how#exit:}\\nflag=\\n--- result\\n\\n--- stderr\\nkontext-dispatch: the runner failed\\n" ;;
+            *) out="pid=$p\\nexit=\\nflag=\\n--- result\\n\\n--- stderr\\n\\n" ;;
+            esac
+            ;;
+        *"rm -f"*)
+            [ -e "$D/fail-rm" ] && code=1
+            : >"$D/$id.credential-removed"
+            ;;
+        esac
+        printf '%s\n' "{\"commandId\":\"cmd_s\",\"exitCode\":$code,\"stdout\":\"$out\",\"stderr\":\"\",\"stdoutTruncated\":false,\"stderrTruncated\":false,\"success\":true,\"timedOut\":false}"
+        ;;
+    esac
     ;;
 *)
     echo "fake boat: $cmd is not faked" >&2

@@ -1,5 +1,6 @@
 //! The dispatcher's machine-local state: which epic runs in which sandbox,
-//! its conversation, its token's id and its times. It lives in the config
+//! the coordinator's session and its turn's process there, its token's id
+//! and its times. It lives in the config
 //! folder (`<config>/dispatch/<project>/`), never in the kontext-home or the
 //! code repo, and is not synced: the ledger has the dispatch and its end
 //! (journal entries), and this file has what only this machine needs to stop
@@ -24,9 +25,9 @@ use crate::config;
 pub enum RunState {
     /// Being made: the token, the sandbox, its start script.
     Starting,
-    /// The coordinator was prompted.
+    /// The coordinator's first turn was started.
     Running,
-    /// Its turn ended with the epic open and it was prompted once more.
+    /// Its turn ended with the epic open and it was given one more.
     Resumed,
     /// It stopped again with the epic open, its time ran out, or the
     /// dispatch failed: the pm was told, the sandbox stopped.
@@ -68,7 +69,13 @@ pub struct Run {
     pub service: String,
     pub sandbox: Option<String>,
     pub sandbox_name: String,
-    pub conversation: Option<String>,
+    /// The coordinator's Claude Code session id (a uuid the dispatcher
+    /// picks: `--session-id` on the first turn, `--resume` after).
+    #[serde(default)]
+    pub session: Option<String>,
+    /// The process id, in the sandbox, of the current turn (`turns`).
+    #[serde(default)]
+    pub turn_pid: Option<u32>,
     /// The coordinator token's id (`tok_…`), never the token.
     pub token_id: Option<String>,
     pub state: RunState,
@@ -76,7 +83,7 @@ pub struct Run {
     pub started: i64,
     pub updated: i64,
     pub deadline: i64,
-    /// Turns the coordinator was given (the first prompt and the resume).
+    /// Turns the coordinator was given (the first and the resume).
     #[serde(default)]
     pub turns: u32,
     /// Why it is stuck, or what went wrong.

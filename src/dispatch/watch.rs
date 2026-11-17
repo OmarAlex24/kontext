@@ -4,17 +4,20 @@
 //!
 //! - **The epic closed** (as `kontext plan` computes it, after pulling from
 //!   the server): stop the sandbox, revoke the token.
-//! - **The coordinator's turn ended with the epic open**: prompt it once more
-//!   in the same conversation; if that turn ends too with the epic open, it
-//!   is stuck. A turn that could not be followed to its end ([`TurnState::Lost`])
+//! - **The coordinator's turn ended with the epic open**: one more turn in
+//!   the same Claude Code session; if that turn ends too with the epic open,
+//!   it is stuck. A turn that cannot be followed ([`TurnState::Lost`])
 //!   decides nothing, and neither does a turn whose end was seen while the
 //!   pull failed: the ledger may already say the epic closed.
+//! - **The coordinator's turn failed** (Claude Code said so, or it left no
+//!   result): stuck at once, with the reason (another turn would fail the
+//!   same way).
 //! - **The time limit passed** (`[dispatch] hours`): stuck.
 //! - **Stuck**: a question to the pm in the ledger, as `agent:dispatcher`,
 //!   then stop the sandbox and revoke the token.
 //!
 //! One watcher per project and machine (`watcher.lock`). Everything it
-//! needs is in the saved state and the turns' files, so a watcher started
+//! needs is in the saved state and the sandbox, so a watcher started
 //! again (after the Mac slept, or it died) picks up where the last one was;
 //! the sandboxes keep working meanwhile. It exits when no sandbox is live,
 //! deciding that under the state lock so a new dispatch is never missed.
@@ -23,7 +26,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -93,7 +96,12 @@ pub fn ensure(project: &str) -> Result<bool> {
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    turn::detach(&mut c);
+    {
+        // Its own process group: a Ctrl-C in the terminal that started it
+        // does not reach it.
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
     let mut child = c.spawn().context("could not start the watcher")?;
     let id = child.id();
     let until = Instant::now() + Duration::from_secs(5);
@@ -146,7 +154,6 @@ pub fn run(project: &str) -> Result<()> {
     let mut w = Watcher {
         project: project.to_string(),
         lock: Some(lock),
-        turns: Vec::new(),
         noted: BTreeSet::new(),
     };
     loop {
@@ -178,10 +185,9 @@ enum Action {
 struct Watcher {
     project: String,
     lock: Option<File>,
-    /// The turns' processes this watcher started (reaped as they end).
-    turns: Vec<Child>,
-    /// Lost turns already logged.
-    noted: BTreeSet<(String, u32)>,
+    /// What was already logged about a turn (epic, turn, what), so a turn
+    /// that cannot be followed is said once.
+    noted: BTreeSet<(String, u32, &'static str)>,
 }
 
 impl Watcher {
@@ -218,7 +224,6 @@ impl Watcher {
     }
 
     fn tick(&mut self) -> Result<()> {
-        self.turns.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
         let (settings, resolved) = config_of(&self.project)?;
         let fresh = self.sync(&resolved.home);
         let runs = state::read(&self.project)?;
@@ -246,7 +251,8 @@ impl Watcher {
             } else if run.turns == 0 {
                 None
             } else {
-                match turn::turn_state(&self.project, &run.epic, run.turns) {
+                let prov = provider::of(&run.service)?;
+                match turn::state(prov.as_ref(), run) {
                     TurnState::Ended if !fresh => {
                         log(&format!(
                             "{}: the turn ended but the pull failed; deciding on the next tick",
@@ -259,17 +265,38 @@ impl Watcher {
                         "its coordinator stopped again with the epic open, after being resumed"
                             .into(),
                     )),
+                    TurnState::Failed(why) => Some(Action::Stuck(format!(
+                        "its coordinator's turn {} failed: {why}",
+                        run.turns
+                    ))),
                     TurnState::Lost(why) => {
-                        if self.noted.insert((run.epic.clone(), run.turns)) {
+                        if self.noted.insert((run.epic.clone(), run.turns, "lost")) {
                             log(&format!(
-                                "{}: turn {} could not be followed ({why}); only the ledger and \
+                                "{}: turn {} cannot be followed ({why}); only the ledger and \
                                  the time limit decide now",
                                 run.name, run.turns
                             ));
                         }
                         None
                     }
-                    TurnState::Running => None,
+                    TurnState::NoAnswer(why) => {
+                        if self
+                            .noted
+                            .insert((run.epic.clone(), run.turns, "no answer"))
+                        {
+                            log(&format!(
+                                "{}: could not ask how turn {} stands ({why}); asking again on \
+                                 the next ticks",
+                                run.name, run.turns
+                            ));
+                        }
+                        None
+                    }
+                    TurnState::Running => {
+                        self.noted
+                            .remove(&(run.epic.clone(), run.turns, "no answer"));
+                        None
+                    }
                 }
             };
             if let Some(a) = action {
@@ -289,7 +316,7 @@ impl Watcher {
         let Some(run) = l.runs.get(&seen.epic).cloned() else {
             return Ok(false);
         };
-        if !run.state.live() || run.turns != seen.turns {
+        if !run.state.live() || run.turns != seen.turns || run.turn_pid != seen.turn_pid {
             return Ok(false);
         }
         let mut run = run;
@@ -299,6 +326,7 @@ impl Watcher {
             Action::Resume => {
                 run.turns += 1;
                 run.state = RunState::Resumed;
+                run.turn_pid = None;
                 run.updated = now_ms();
                 l.runs.insert(run.epic.clone(), run.clone());
                 l.save()?;
@@ -307,9 +335,24 @@ impl Watcher {
                     "{}: its turn ended with the epic open; resuming it once",
                     run.name
                 ));
-                self.turns
-                    .push(turn::launch(&self.project, &run.epic, run.turns)?);
-                Ok(false)
+                match turn::start(prov.as_ref(), &run, run.turns) {
+                    Ok(pid) => {
+                        let n = run.turns;
+                        state::update(&self.project, &run.epic, |r| {
+                            if r.turns == n && r.state.live() {
+                                r.turn_pid = Some(pid);
+                            }
+                        })?;
+                        Ok(false)
+                    }
+                    Err(e) => {
+                        let why = super::credential::redact(&format!("{e:#}"));
+                        self.act(
+                            &run,
+                            Action::Stuck(format!("it could not be resumed: {why}")),
+                        )
+                    }
+                }
             }
             Action::Close | Action::Stuck(_) => {
                 if let Action::Stuck(why) = &action {

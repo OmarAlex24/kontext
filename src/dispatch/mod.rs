@@ -5,14 +5,18 @@
 //!
 //! - [`dispatch`] checks (each refusal is exit 2 and one line), reserves the
 //!   epic under the state lock, makes the token, makes the sandbox with the
-//!   token as a file and its start script ([`script`]), waits for the script,
-//!   and prompts the coordinator in a process of its own ([`turn`]). Anything
-//!   that fails after the token stops the sandbox and revokes the token.
+//!   token, the agent's credential ([`credential`]), the prompts and the
+//!   runner as files and its start script ([`script`]), waits for the
+//!   script, starts the coordinator's first turn in the sandbox ([`turn`])
+//!   and checks for a short while that it did not fail at once. Anything that
+//!   fails after the token ends the turn, removes the credential, stops the
+//!   sandbox and revokes the token.
 //! - [`status`] and [`stop`].
 //! - The ledger gets a journal entry when an epic is dispatched and when its
 //!   sandbox stops (`fields.dispatch`: `start` or `end`), so `kontext tree`,
 //!   the epic's brief and the pm see them.
 
+pub mod credential;
 pub mod provider;
 pub mod script;
 pub mod state;
@@ -40,9 +44,6 @@ use state::{Run, RunState};
 
 /// Who writes the dispatcher's entries in the ledger.
 pub const ACTOR: &str = "dispatcher";
-/// Where the token file goes in the sandbox (relative paths start in the
-/// sandbox user's home).
-pub const TOKEN_PATH: &str = ".kontext-dispatch-token";
 
 /// `[dispatch]` with its defaults.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -55,6 +56,9 @@ pub struct Settings {
     pub model: String,
     pub machine: String,
     pub repo_dir: Option<String>,
+    /// Where the start script clones the code repo from when the service
+    /// did not (the first `[[repos]]`' remote, as an https URL).
+    pub repo_url: Option<String>,
     pub kontext_version: String,
 }
 
@@ -79,13 +83,19 @@ impl Settings {
             hours: d.hours.unwrap_or(8),
             environment: s(d.environment),
             provider: s(d.provider).unwrap_or_else(|| "claude".into()),
-            model: s(d.model).unwrap_or_else(|| "opus-5-5".into()),
+            model: s(d.model).unwrap_or_else(|| "claude-opus-5-5".into()),
             machine: s(d.machine).unwrap_or_else(|| "default".into()),
             repo_dir: s(d.repo_dir).or_else(|| {
                 p.repos
                     .first()
                     .map(|r| format!("/home/user/{}", repo_folder(r)))
             }),
+            repo_url: p
+                .repos
+                .first()
+                .and_then(|r| r.remote.as_deref())
+                .filter(|r| !r.trim().is_empty())
+                .map(script::clone_url),
             kontext_version: s(d.kontext_version)
                 .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION"))),
         }
@@ -226,30 +236,31 @@ pub fn sandbox_env(server: &str, project: &str, name: &str) -> Vec<(String, Stri
     ]
 }
 
-/// A local file with the token, readable only by this user, removed when
-/// dropped (on every path out of [`dispatch`]).
-struct TokenFile(PathBuf);
+/// A local file in the dispatch folder's `tmp/`, readable only by this
+/// user, removed when dropped (on every path out of [`dispatch`]): the
+/// token, the agent's credential, and the other files the sandbox gets.
+struct TmpFile(PathBuf);
 
-impl TokenFile {
-    fn write(dir: &Path, token: &str) -> Result<TokenFile> {
+impl TmpFile {
+    fn write(dir: &Path, prefix: &str, body: &str) -> Result<TmpFile> {
         use std::os::unix::fs::OpenOptionsExt;
         let tmp = dir.join("tmp");
         fs::create_dir_all(&tmp)?;
-        let path = tmp.join(format!("token-{}", config::random_hex(8)?));
+        let path = tmp.join(format!("{prefix}-{}", config::random_hex(8)?));
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&path)
-            .context("could not write the token file")?;
-        let t = TokenFile(path);
-        f.write_all(token.as_bytes())?;
+            .with_context(|| format!("could not write the {prefix} file"))?;
+        let t = TmpFile(path);
+        f.write_all(body.as_bytes())?;
         f.sync_all()?;
         Ok(t)
     }
 }
 
-impl Drop for TokenFile {
+impl Drop for TmpFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
@@ -315,13 +326,40 @@ pub fn end_entry(run: &Run) -> RawEntry {
     r
 }
 
-/// Stops the run's sandbox and revokes its token, as far as each is not
-/// done yet. Returns what failed (the run keeps saying what is left).
+/// Ends the run's sandbox and revokes its token, as far as each is not done
+/// yet: a turn still running is ended, the agent's credential is removed
+/// from the sandbox (and the sandbox stopped anyway if that fails), the
+/// sandbox is stopped, the token revoked. Nothing runs in a sandbox already
+/// stopped. Returns what went wrong, to say (the run keeps saying what is
+/// left; [`Run::clean`]).
 pub fn clean_up(project: &str, p: &dyn Provider, run: &mut Run) -> Vec<String> {
     let mut failed = Vec::new();
     if let Some(id) = run.sandbox.clone()
         && !run.sandbox_stopped
     {
+        if let Some(pid) = run.turn_pid
+            && !matches!(
+                p.process(&id, pid),
+                Ok(provider::Process::Exited(_) | provider::Process::Unknown)
+            )
+            && let Err(e) = p.kill(&id, pid)
+        {
+            failed.push(format!(
+                "could not end the coordinator's turn in {id} ({e:#}); stopping the sandbox \
+                 ends it"
+            ));
+        }
+        match p.exec(&id, &script::remove_credential_command()) {
+            Ok(o) if o.code == 0 => {}
+            Ok(o) => failed.push(format!(
+                "could not remove the agent's credential from {id} (exit code {}); stopping it \
+                 anyway",
+                o.code
+            )),
+            Err(e) => failed.push(format!(
+                "could not remove the agent's credential from {id} ({e:#}); stopping it anyway"
+            )),
+        }
         match p.stop(&id) {
             Ok(()) => run.sandbox_stopped = true,
             Err(e) => failed.push(format!("{e:#}")),
@@ -355,6 +393,16 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
              [dispatch] repo_dir",
         );
     }
+    if settings.provider != "claude" {
+        return refused(format!(
+            "[dispatch] provider = {:?}: the only coordinator agent is \"claude\" (Claude Code, \
+             run headless in the sandbox)",
+            settings.provider
+        ));
+    }
+    let Some(cred) = credential::load()? else {
+        return refused(credential::MISSING);
+    };
     let ready = {
         let mut store = Store::open(&home, &resolved.writer)?;
         let st = store.state()?;
@@ -391,7 +439,8 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
             service: prov.service().into(),
             sandbox: None,
             sandbox_name: sandbox_name(project, &ready.name),
-            conversation: None,
+            session: None,
+            turn_pid: None,
             token_id: None,
             state: RunState::Starting,
             started: now,
@@ -414,6 +463,7 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
         &remote,
         &settings,
         prov.as_ref(),
+        &cred,
         &mut run,
         say,
     ) {
@@ -437,13 +487,25 @@ pub fn dispatch(project: &str, epic: &str, say: Say) -> Result<Run> {
     }
 }
 
+/// How long `dispatch` watches the first turn before it leaves it to the
+/// watcher (15 s; `KONTEXT_DISPATCH_FIRST_CHECK_MS` in the tests).
+fn first_check() -> std::time::Duration {
+    let ms = std::env::var("KONTEXT_DISPATCH_FIRST_CHECK_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(15_000);
+    std::time::Duration::from_millis(ms)
+}
+
 /// From the reservation to a running coordinator.
+#[allow(clippy::too_many_arguments)]
 fn start(
     project: &str,
     home: &Path,
     remote: &Remote,
     s: &Settings,
     prov: &dyn Provider,
+    cred: &credential::Credential,
     run: &mut Run,
     say: Say,
 ) -> Result<()> {
@@ -468,20 +530,36 @@ fn start(
         minted.id, run.name, minted.writer
     ));
 
+    // Everything the sandbox gets as a file: the secrets, the prompts (the
+    // service keeps every command line, so they never go in one) and the
+    // runner. Each local copy goes when this function returns.
     let dir = state::dir(project)?;
-    let token_file = TokenFile::write(&dir, &minted.token)?;
+    let repo_dir = s.repo_dir.clone().unwrap_or_default();
+    let token_file = TmpFile::write(&dir, "token", &minted.token)?;
     drop(minted);
-    let script = dir
-        .join("tmp")
-        .join(format!("start-{}.sh", config::random_hex(4)?));
-    fs::write(
-        &script,
-        script::start_script(&script::ScriptArgs {
+    let cred_file = TmpFile::write(&dir, "credential", cred.value())?;
+    let first = TmpFile::write(&dir, "prompt", &turn::first_prompt(project, run, s))?;
+    let resume = TmpFile::write(&dir, "prompt", &turn::resume_prompt(run))?;
+    let runner = TmpFile::write(
+        &dir,
+        "runner",
+        &script::runner_script(&script::RunnerArgs {
+            epic: run.name.clone(),
+            repo_dir: repo_dir.clone(),
+            model: s.model.clone(),
+            credential_var: cred.kind.var(),
+        }),
+    )?;
+    let start_script = TmpFile::write(
+        &dir,
+        "start",
+        &script::start_script(&script::ScriptArgs {
             server: remote.url.clone(),
             project: project.into(),
             epic: run.name.clone(),
             version: s.kontext_version.clone(),
-            repo_dir: s.repo_dir.clone().unwrap_or_default(),
+            repo_dir,
+            repo_url: s.repo_url.clone(),
         }),
     )?;
     let spec = NewSandbox {
@@ -491,12 +569,17 @@ fn start(
         // On for the time limit and an hour more; the watcher stops it.
         ttl_secs: (s.hours + 1) * 3600,
         env: sandbox_env(&remote.url, project, &run.name),
-        files: vec![(TOKEN_PATH.into(), token_file.0.clone())],
-        setup: Some(script.clone()),
+        files: vec![
+            (script::TOKEN_PATH.into(), token_file.0.clone()),
+            (script::CREDENTIAL_PATH.into(), cred_file.0.clone()),
+            (script::RUNNER_PATH.into(), runner.0.clone()),
+            (script::PROMPT_FIRST_PATH.into(), first.0.clone()),
+            (script::PROMPT_RESUME_PATH.into(), resume.0.clone()),
+        ],
+        setup: Some(start_script.0.clone()),
     };
     let created = prov.create(&spec);
-    drop(token_file);
-    let _ = fs::remove_file(&script);
+    drop((token_file, cred_file, first, resume, runner, start_script));
     let id = match created {
         Ok(id) => id,
         Err(f) => {
@@ -529,17 +612,41 @@ fn start(
             provider::Setup::Pending => std::thread::sleep(poll()),
         }
     }
-    say("start script done: kontext and the project are set up in the sandbox");
+    say("start script done: kontext, the project and the repo's clone are set up in the sandbox");
 
-    // The coordinator's first turn, held by a process of its own.
+    // The coordinator's first turn: Claude Code, headless, in the sandbox.
     run.state = RunState::Running;
     run.turns = 1;
+    run.session = Some(turn::new_session()?);
+    run.turn_pid = None;
     let snapshot = run.clone();
     state::update(project, &run.epic, |r| *r = snapshot)?;
-    turn::launch(project, &run.epic, 1)?;
+    let pid = turn::start(prov, run, 1)?;
+    run.turn_pid = Some(pid);
+    let snapshot = run.clone();
+    state::update(project, &run.epic, |r| *r = snapshot)?;
+
+    // A turn that cannot start (no login, no claude, no clone) fails within
+    // seconds: then the dispatch fails, and everything goes.
+    let until = std::time::Instant::now() + first_check();
+    loop {
+        match turn::state(prov, run) {
+            turn::TurnState::Failed(why) => {
+                anyhow::bail!("the coordinator did not start: {why}")
+            }
+            turn::TurnState::Ended | turn::TurnState::Lost(_) => break,
+            turn::TurnState::Running | turn::TurnState::NoAnswer(_) => {
+                if std::time::Instant::now() >= until {
+                    break;
+                }
+                std::thread::sleep(poll());
+            }
+        }
+    }
     say(&format!(
-        "coordinator prompted: {} {} (`kontext brief {}`)",
-        s.provider, s.model, run.name
+        "coordinator started: Claude Code {} in {id}, turn 1 (process {pid}), with every \
+         permission inside the sandbox (`kontext brief {}`)",
+        s.model, run.name
     ));
     let w = config::resolve_project(Some(project))?.writer;
     record(home, &w, start_entry(run, s))?;
@@ -590,6 +697,8 @@ pub struct StatusReport {
     pub live: usize,
     /// The watcher's pid, if it runs on this machine.
     pub watcher: Option<u32>,
+    /// Which agent credential this machine has (never the credential).
+    pub credential: Option<credential::Kind>,
     pub runs: Vec<Row>,
 }
 
@@ -633,6 +742,7 @@ pub fn status(project: &str) -> Result<StatusReport> {
         project: project.into(),
         live: rows.iter().filter(|r| r.run.state.live()).count(),
         watcher: watch::pid(project).or_else(|| watch::alive(project).then_some(0)),
+        credential: credential::kind(),
         settings,
         runs: rows,
     })
@@ -650,6 +760,16 @@ impl StatusReport {
             self.settings.model,
             self.settings.hours
         )];
+        match self.credential {
+            Some(k) => l.push(format!("Agent credential: set ({}).", k.label())),
+            None => l.push(format!("Agent credential: not set. {}.", {
+                let m = credential::MISSING;
+                let mut c = m.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
+            })),
+        }
         if self.runs.is_empty() {
             l.push("No epic was dispatched from this machine.".into());
         }

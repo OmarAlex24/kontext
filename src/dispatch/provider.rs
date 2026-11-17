@@ -38,16 +38,23 @@ pub enum Setup {
     Failed(String),
 }
 
-/// A prompt for the coordinator.
-#[derive(Debug, Clone)]
-pub struct Turn<'a> {
-    pub sandbox: &'a str,
-    /// Continue this conversation; `None` starts a new one.
-    pub conversation: Option<&'a str>,
-    /// The agent and the model, as the service names them.
-    pub provider: &'a str,
-    pub model: &'a str,
-    pub text: &'a str,
+/// A process started in the sandbox with [`Provider::detach`], as the
+/// service says it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Process {
+    Running,
+    /// It ended, with this exit code (a signal's is 128 + the signal).
+    Exited(i32),
+    /// The service does not know it (`known: false`, or `lost`).
+    Unknown,
+}
+
+/// What a short command printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOut {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 /// `create` failed. If the service made the sandbox before failing, `id`
@@ -76,11 +83,18 @@ pub trait Provider {
     fn stop(&self, id: &str) -> Result<()>;
     /// How its start script went.
     fn setup(&self, id: &str) -> Result<Setup>;
-    /// Prompts the coordinator and returns when its turn ends: `Ok` only
-    /// when the service says the turn ended (a turn that cannot be followed
-    /// to its end, for a network failure say, is an error). Calls
-    /// `conversation` with the conversation's id as soon as it is known.
-    fn prompt(&self, t: &Turn, conversation: &mut dyn FnMut(&str)) -> Result<()>;
+    /// Runs a short command in the sandbox and returns what it printed
+    /// (an error when it could not be run or its output was cut). The
+    /// service may keep the command line: it never carries a secret.
+    fn exec(&self, id: &str, cmd: &[String]) -> Result<ExecOut>;
+    /// Starts a command in the sandbox in the background and returns its
+    /// process id there.
+    fn detach(&self, id: &str, cmd: &[String]) -> Result<u32>;
+    /// How a process started with [`Provider::detach`] stands (an error
+    /// when the service could not be asked).
+    fn process(&self, id: &str, pid: u32) -> Result<Process>;
+    /// Ends that process and every process it started.
+    fn kill(&self, id: &str, pid: u32) -> Result<()>;
     /// How a person looks at what happened in a stopped sandbox (one line).
     fn inspect_hint(&self, id: &str) -> String;
 }
@@ -240,65 +254,135 @@ impl Provider for Boat {
         Ok(setup_of(&v))
     }
 
-    fn prompt(&self, t: &Turn, conversation: &mut dyn FnMut(&str)) -> Result<()> {
-        use std::io::{BufRead, BufReader};
+    fn exec(&self, id: &str, cmd: &[String]) -> Result<ExecOut> {
         let mut a: Vec<String> = vec![
-            "prompt".into(),
-            t.sandbox.into(),
+            "exec".into(),
+            id.into(),
             "--json".into(),
-            "--provider".into(),
-            t.provider.into(),
-            "--model".into(),
-            t.model.into(),
+            "--timeout".into(),
+            "60".into(),
+            "--".into(),
         ];
-        match t.conversation {
-            Some(c) => a.extend(["--resume".into(), c.into()]),
-            None => a.push("--new".into()),
+        a.extend(cmd.iter().cloned());
+        let o = self.run(&a)?;
+        let v = json_lines(&o.stdout).into_iter().last();
+        match v {
+            Some(v) if v.get("exitCode").is_some() || v.get("stdout").is_some() => exec_out(&v),
+            _ => bail!("{}", failure(&format!("boat exec {id}"), &o)),
         }
-        a.push(t.text.into());
-        let mut child = self
-            .command(&a)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("could not run {}", self.bin))?;
-        let stderr = child.stderr.take().unwrap();
-        let errs = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut BufReader::new(stderr), &mut s);
-            s
-        });
-        let mut seen = false;
-        let mut last_error = None;
-        for line in BufReader::new(child.stdout.take().unwrap()).lines() {
-            let Ok(line) = line else { break };
-            let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            if !seen && let Some(c) = conversation_id(&v) {
-                seen = true;
-                conversation(&c);
-            }
-            if v.get("event").and_then(Value::as_str) == Some("error") {
-                last_error = v.get("error").and_then(Value::as_str).map(str::to_string);
-            }
+    }
+
+    fn detach(&self, id: &str, cmd: &[String]) -> Result<u32> {
+        let mut a: Vec<String> = vec![
+            "exec".into(),
+            id.into(),
+            "--detach".into(),
+            "--json".into(),
+            "--".into(),
+        ];
+        a.extend(cmd.iter().cloned());
+        let o = self.run(&a)?;
+        let pid = json_lines(&o.stdout)
+            .into_iter()
+            .rev()
+            .find_map(|v| pid_of(&v));
+        match pid {
+            Some(p) if o.status.success() => Ok(p),
+            _ => bail!("{}", failure(&format!("boat exec {id} --detach"), &o)),
         }
-        let status = child.wait()?;
-        let stderr = errs.join().unwrap_or_default();
-        if !status.success() {
-            let why = last_error
-                .or_else(|| {
-                    stderr
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .map(|l| l.trim().to_string())
-                })
-                .unwrap_or_else(|| format!("exit code {:?}", status.code()));
-            bail!("boat prompt failed: {why}");
+    }
+
+    fn process(&self, id: &str, pid: u32) -> Result<Process> {
+        let o = self.run(&[
+            "exec".into(),
+            id.into(),
+            "--status".into(),
+            pid.to_string(),
+            "--json".into(),
+        ])?;
+        let v = json_lines(&o.stdout).into_iter().last();
+        match v.as_ref().and_then(process_of) {
+            Some(p) => Ok(p),
+            None => bail!("{}", failure(&format!("boat exec {id} --status {pid}"), &o)),
+        }
+    }
+
+    fn kill(&self, id: &str, pid: u32) -> Result<()> {
+        let o = self.run(&[
+            "exec".into(),
+            id.into(),
+            "--kill".into(),
+            pid.to_string(),
+            "--json".into(),
+        ])?;
+        if !o.status.success() {
+            bail!("{}", failure(&format!("boat exec {id} --kill {pid}"), &o));
         }
         Ok(())
     }
+}
+
+/// `boat exec --json`: `exitCode`, `stdout`, `stderr`. A command that timed
+/// out or whose output was cut is an error, never a result.
+pub(crate) fn exec_out(v: &Value) -> Result<ExecOut> {
+    let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    if flag("timedOut") {
+        bail!("the command timed out in the sandbox");
+    }
+    if flag("stdoutTruncated") || flag("stderrTruncated") {
+        bail!("the command's output was cut");
+    }
+    if flag("launcherFailed") {
+        bail!("the sandbox could not start the command");
+    }
+    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    Ok(ExecOut {
+        code: v
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .map(|c| c as i32)
+            .unwrap_or(-1),
+        stdout: s("stdout"),
+        stderr: s("stderr"),
+    })
+}
+
+/// The process id in `boat exec --detach --json`: `pid`, else `processId`.
+pub(crate) fn pid_of(v: &Value) -> Option<u32> {
+    v.get("pid")
+        .or_else(|| v.get("processId"))
+        .and_then(Value::as_u64)
+        .and_then(|p| u32::try_from(p).ok())
+}
+
+/// `boat exec --status --json`: `known: false` or `status: lost` is a
+/// process the service does not know; `running: true` runs; otherwise it
+/// ended, with `exitCode` (or 128 + the signal's number, when only the
+/// signal is given). `None` when the object says none of that.
+pub(crate) fn process_of(v: &Value) -> Option<Process> {
+    let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+    if v.get("known").and_then(Value::as_bool) == Some(false) || status == "lost" {
+        return Some(Process::Unknown);
+    }
+    match v.get("running").and_then(Value::as_bool) {
+        Some(true) => return Some(Process::Running),
+        Some(false) => {}
+        None if status == "running" => return Some(Process::Running),
+        None if status.is_empty() => return None,
+        None => {}
+    }
+    let code = v
+        .get("exitCode")
+        .or_else(|| v.get("command").and_then(|c| c.get("exitCode")))
+        .and_then(Value::as_i64)
+        .map(|c| c as i32);
+    let signal = v.get("signal").and_then(Value::as_str).map(|s| match s {
+        "SIGKILL" => 137,
+        "SIGTERM" => 143,
+        "SIGINT" => 130,
+        _ => 128,
+    });
+    Some(Process::Exited(code.or(signal).unwrap_or(-1)))
 }
 
 /// `setupStatus` and `setupError` of `boat info --json`: `pending` and
@@ -324,16 +408,6 @@ pub(crate) fn setup_of(v: &Value) -> Setup {
     }
 }
 
-/// The conversation's id in a line of `boat prompt --json`: `conversationId`,
-/// at the top or under `data`.
-pub(crate) fn conversation_id(v: &Value) -> Option<String> {
-    v.get("conversationId")
-        .or_else(|| v.get("data").and_then(|d| d.get("conversationId")))
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_status_and_conversation_ids() {
+    fn setup_status() {
         assert_eq!(setup_of(&json!({"setupStatus": "running"})), Setup::Pending);
         assert_eq!(setup_of(&json!({"setupStatus": "done"})), Setup::Done);
         assert_eq!(
@@ -365,9 +439,33 @@ mod tests {
             setup_of(&json!({"setupStatus": "weird"})),
             Setup::Failed(w) if w.contains("weird")
         ));
-        let q = json!({"event": "queued", "conversationId": "cv_1"});
-        assert_eq!(conversation_id(&q).as_deref(), Some("cv_1"));
-        let d = json!({"event": "prompt", "data": {"conversationId": "cv_2"}});
-        assert_eq!(conversation_id(&d).as_deref(), Some("cv_2"));
+    }
+
+    /// The shapes `boat exec` printed in the probe of 2026-11-16 (CLI 1.0.100).
+    #[test]
+    fn exec_shapes_from_real_boat() {
+        let detach = json!({"command": "x", "commandId": "cmd_uzwf4xablasb", "pid": 7203,
+            "processId": 7203, "logPath": "/home/user/.ascii/processes/7203.log", "success": true});
+        assert_eq!(pid_of(&detach), Some(7203));
+        let running = json!({"known": true, "running": true, "status": "running",
+            "exitCode": null, "signal": null, "pid": 7203});
+        assert_eq!(process_of(&running), Some(Process::Running));
+        let exited = json!({"known": true, "running": false, "status": "exited",
+            "exitCode": 7, "signal": null});
+        assert_eq!(process_of(&exited), Some(Process::Exited(7)));
+        let killed = json!({"known": true, "running": false, "status": "exited",
+            "exitCode": 143, "signal": "SIGTERM"});
+        assert_eq!(process_of(&killed), Some(Process::Exited(143)));
+        let lost = json!({"known": false, "running": false, "status": "lost"});
+        assert_eq!(process_of(&lost), Some(Process::Unknown));
+        assert_eq!(process_of(&json!({"error": "x"})), None);
+        let sync = json!({"commandId": "cmd_y", "exitCode": 0, "stdout": "ok\n", "stderr": "",
+            "stdoutTruncated": false, "success": true, "timedOut": false});
+        let o = exec_out(&sync).unwrap();
+        assert_eq!((o.code, o.stdout.as_str()), (0, "ok\n"));
+        let cut = json!({"exitCode": 0, "stdout": "", "stdoutTruncated": true});
+        assert!(exec_out(&cut).is_err());
+        let slow = json!({"exitCode": null, "stdout": "", "timedOut": true});
+        assert!(exec_out(&slow).is_err());
     }
 }

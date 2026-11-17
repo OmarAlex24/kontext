@@ -1,80 +1,195 @@
-//! The coordinator's turns. Each turn is held by its own process, `kontext
-//! dispatch turn <epic> <n>` (hidden), started detached, so it outlives
-//! whoever started it: it prompts the coordinator through the provider,
-//! which returns when the turn ends, saves the conversation's id as soon as
-//! the provider says it, and leaves how the turn ended in a file. Whoever
-//! asks later, a restarted watcher included, reads the same answer from
-//! [`turn_state`], the one place that decides whether a turn ended.
-//!
-//! Files in `<config>/dispatch/<project>/turns/`, per epic id and turn:
-//! `<epic>-<n>.lock` (held while the turn runs), `<epic>-<n>.exit` (`ended`,
-//! or `lost: <why>`), `<epic>-<n>.log` (what the provider printed), and
-//! `<epic>-<n>.started` (when it was launched).
-
-use std::fs::{self, OpenOptions};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+//! The coordinator's turns. A turn is one process in the sandbox, the
+//! runner ([`super::script::runner_script`]) started with the service's
+//! detach (`boat exec --detach`), so nothing on the owner's machine holds it
+//! open. The run's state keeps the turn's process id; whoever asks (the
+//! watcher, a restarted watcher, `dispatch` itself) asks the service how
+//! that process stands and, once it exited, reads what the runner left.
+//! [`state`] is the one place that decides how a turn went.
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 
-use super::provider::{self, Turn};
-use super::state::{self, Run};
-use super::{Settings, config_of};
+use super::Settings;
+use super::credential::redact;
+use super::provider::{Process, Provider};
+use super::script::{ALREADY_STARTED, RUNNER_PATH};
+use super::state::Run;
 use crate::config;
-use crate::tasks::now_ms;
-
-/// How long a launched turn may take to take its lock before it counts as lost.
-const START_GRACE_MS: i64 = 30_000;
 
 /// How a turn stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnState {
-    /// Its process holds the turn open (or is just starting).
+    /// Its process runs.
     Running,
-    /// The provider said the turn ended.
+    /// Claude Code said the turn ended without an error: the ledger decides
+    /// what follows.
     Ended,
-    /// Nobody knows: the process died, or lost the turn (the network, the
-    /// Mac went to sleep). Neither a resume nor stuck follow from this.
+    /// Claude Code said it failed, or the turn left no result or a non-zero
+    /// exit code. Another turn would fail the same way.
+    Failed(String),
+    /// The service does not know the process: the turn cannot be followed.
+    /// Neither a resume nor stuck follow from this.
     Lost(String),
+    /// The service could not be asked, or what the turn left could not be
+    /// read this time. Ask again later.
+    NoAnswer(String),
 }
 
-fn turns_dir(project: &str) -> Result<PathBuf> {
-    Ok(state::dir(project)?.join("turns"))
+/// A new session id for Claude Code (a random uuid, version 4).
+pub fn new_session() -> Result<String> {
+    let h = config::random_hex(16)?;
+    let variant = u8::from_str_radix(&h[16..17], 16).context("bad random hex")? & 0x3 | 0x8;
+    Ok(format!(
+        "{}-{}-4{}-{:x}{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[13..16],
+        variant,
+        &h[17..20],
+        &h[20..32]
+    ))
 }
 
-fn file(dir: &Path, epic: &str, n: u32, ext: &str) -> PathBuf {
-    dir.join(format!("{epic}-{n}.{ext}"))
+/// The command that starts turn `n` in the background: a login shell, which
+/// has `claude` on its `PATH`, running the runner. It carries no secret and
+/// no prompt text (the service keeps every command line).
+pub fn start_command(n: u32, session: &str) -> Vec<String> {
+    vec![
+        "bash".into(),
+        "-lc".into(),
+        format!("exec sh \"$HOME/{RUNNER_PATH}\" start {n} {session}"),
+    ]
 }
 
-/// The one function that says whether the coordinator's turn `n` ended.
-pub fn turn_state(project: &str, epic: &str, n: u32) -> TurnState {
-    let Ok(dir) = turns_dir(project) else {
-        return TurnState::Lost("no dispatch folder".into());
-    };
-    if let Ok(s) = fs::read_to_string(file(&dir, epic, n, "exit")) {
-        let s = s.trim();
-        return if s == "ended" {
-            TurnState::Ended
-        } else {
-            TurnState::Lost(s.strip_prefix("lost: ").unwrap_or(s).to_string())
-        };
-    }
-    if let Ok(f) = OpenOptions::new()
-        .write(true)
-        .open(file(&dir, epic, n, "lock"))
-    {
-        if f.try_lock().is_err() {
-            return TurnState::Running;
+/// The command that prints what turn `n` left.
+pub fn read_command(n: u32) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        format!("exec sh \"$HOME/{RUNNER_PATH}\" read {n}"),
+    ]
+}
+
+/// Starts turn `n` of the run and returns its process id in the sandbox.
+pub fn start(prov: &dyn Provider, run: &Run, n: u32) -> Result<u32> {
+    let sandbox = run.sandbox.as_deref().context("the run has no sandbox")?;
+    let session = run
+        .session
+        .as_deref()
+        .context("the run has no Claude Code session id")?;
+    prov.detach(sandbox, &start_command(n, session))
+        .with_context(|| format!("could not start the coordinator's turn {n}"))
+}
+
+/// What `read` printed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Summary {
+    pub pid: Option<u32>,
+    /// The runner's exit code, once it wrote one.
+    pub exit: Option<i32>,
+    /// `"is_error":…` as grep found it in the result.
+    pub flag: Option<bool>,
+    /// The result, when what was read of it is whole JSON.
+    pub result: Option<Value>,
+    pub stderr: String,
+}
+
+pub fn parse_summary(out: &str) -> Summary {
+    let mut s = Summary::default();
+    let (head, rest) = out.split_once("--- result\n").unwrap_or((out, ""));
+    let (result, stderr) = rest.split_once("--- stderr\n").unwrap_or((rest, ""));
+    for l in head.lines() {
+        if let Some(v) = l.strip_prefix("pid=") {
+            s.pid = v.trim().parse().ok();
+        } else if let Some(v) = l.strip_prefix("exit=") {
+            s.exit = v.trim().parse().ok();
+        } else if let Some(v) = l.strip_prefix("flag=") {
+            s.flag = match v.trim() {
+                "\"is_error\":true" => Some(true),
+                "\"is_error\":false" => Some(false),
+                _ => None,
+            };
         }
-        return TurnState::Lost("its process ended without saying how the turn went".into());
     }
-    let started = fs::read_to_string(file(&dir, epic, n, "started"))
+    s.result = serde_json::from_str::<Value>(result.trim())
         .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok());
-    match started {
-        Some(t) if now_ms() - t < START_GRACE_MS => TurnState::Running,
-        Some(_) => TurnState::Lost("its process never started".into()),
-        None => TurnState::Lost("it was never launched".into()),
+        .filter(Value::is_object);
+    s.stderr = stderr.trim().to_string();
+    s
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= max {
+        return s;
+    }
+    let cut: String = s.chars().take(max).collect();
+    format!("{cut}…")
+}
+
+/// How a turn whose process exited with `code` went, from what it left.
+pub fn verdict(s: &Summary, code: i32) -> TurnState {
+    let Some(exit) = s.exit else {
+        return TurnState::Failed(format!(
+            "its process ended (exit code {code}) without saying how the turn went"
+        ));
+    };
+    let is_error = s
+        .result
+        .as_ref()
+        .and_then(|v| v.get("is_error"))
+        .and_then(Value::as_bool)
+        .or(s.flag);
+    if exit == 0 && is_error == Some(false) {
+        return TurnState::Ended;
+    }
+    let said = s
+        .result
+        .as_ref()
+        .filter(|_| is_error == Some(true))
+        .and_then(|v| v.get("result"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let why = match (said, is_error) {
+        (Some(r), _) if !r.trim().is_empty() => format!("Claude Code said: {}", one_line(&r, 300)),
+        _ if !s.stderr.is_empty() => one_line(&s.stderr, 300),
+        (_, None) if exit == 0 => "it left no result that could be read".into(),
+        _ => format!("claude exited with code {exit}"),
+    };
+    TurnState::Failed(redact(&why))
+}
+
+/// The one function that says how the run's current turn stands.
+pub fn state(prov: &dyn Provider, run: &Run) -> TurnState {
+    let Some(sandbox) = run.sandbox.as_deref() else {
+        return TurnState::Lost("the run has no sandbox".into());
+    };
+    let Some(pid) = run.turn_pid else {
+        return TurnState::Lost("its process id was never saved".into());
+    };
+    let code = match prov.process(sandbox, pid) {
+        Err(e) => return TurnState::NoAnswer(redact(&format!("{e:#}"))),
+        Ok(Process::Running) => return TurnState::Running,
+        Ok(Process::Unknown) => {
+            return TurnState::Lost(format!(
+                "{} does not know process {pid} in {sandbox}",
+                prov.service()
+            ));
+        }
+        Ok(Process::Exited(c)) => c,
+    };
+    match prov.exec(sandbox, &read_command(run.turns)) {
+        Err(e) => TurnState::NoAnswer(redact(&format!("could not read its result: {e:#}"))),
+        Ok(o) if o.code != 0 => TurnState::NoAnswer(redact(&format!(
+            "could not read its result (exit code {}): {}",
+            o.code,
+            one_line(&o.stderr, 200)
+        ))),
+        Ok(_) if code == ALREADY_STARTED => TurnState::Lost(format!(
+            "turn {} was started twice; process {pid} did not run it",
+            run.turns
+        )),
+        Ok(o) => verdict(&parse_summary(&o.stdout), code),
     }
 }
 
@@ -86,7 +201,7 @@ pub fn first_prompt(project: &str, run: &Run, s: &Settings) -> String {
          your own. Work in {repo}. Follow .claude/agents/kontext-coordinator.md: start with \
          `kontext --actor agent:epic:{name} --role coordinator brief {name}` and run the epic \
          until kontext has it closed. Deliver its work as one stack of pull requests (gh stack). \
-         Ask the pm, never the user: `kontext ask \"…\" --to pm`.",
+         Ask the pm, never the user: `kontext ask \"…\" --to pm`.\n",
         name = run.name
     )
 }
@@ -95,114 +210,67 @@ pub fn first_prompt(project: &str, run: &Run, s: &Settings) -> String {
 pub fn resume_prompt(run: &Run) -> String {
     format!(
         "Epic {name} is still open in kontext. Continue from `kontext --actor agent:epic:{name} \
-         --role coordinator brief {name}`.",
+         --role coordinator brief {name}`.\n",
         name = run.name
     )
 }
 
-/// Starts turn `n` of the run in its own detached process. The caller saved
-/// the run with `turns = n` first.
-pub fn launch(project: &str, epic: &str, n: u32) -> Result<Child> {
-    let dir = turns_dir(project)?;
-    fs::create_dir_all(&dir)?;
-    fs::write(file(&dir, epic, n, "started"), now_ms().to_string())?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file(&dir, epic, n, "log"))?;
-    let exe = std::env::current_exe().context("could not find this kontext binary")?;
-    let mut c = Command::new(exe);
-    c.args([
-        "--project",
-        project,
-        "dispatch",
-        "turn",
-        epic,
-        &n.to_string(),
-    ])
-    .stdin(Stdio::null())
-    .stdout(log.try_clone()?)
-    .stderr(log);
-    detach(&mut c);
-    c.spawn().context("could not start the turn's process")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Its own process group: a Ctrl-C in the terminal that started it does not
-/// reach it.
-pub(crate) fn detach(c: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    c.process_group(0);
-}
-
-/// `kontext dispatch turn <epic> <n>`: holds the turn open until it ends.
-pub fn hold(project: &str, epic: &str, n: u32) -> Result<()> {
-    let dir = turns_dir(project)?;
-    fs::create_dir_all(&dir)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(file(&dir, epic, n, "lock"))?;
-    if lock.try_lock().is_err() {
-        // Another process holds this turn.
-        return Ok(());
+    #[test]
+    fn sessions_are_uuids() {
+        let s = new_session().unwrap();
+        let parts: Vec<&str> = s.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('4'), "{s}");
+        assert!("89ab".contains(&parts[3][..1]), "{s}");
+        assert_ne!(s, new_session().unwrap());
     }
-    let exit = file(&dir, epic, n, "exit");
-    if exit.exists() {
-        return Ok(());
+
+    #[test]
+    fn verdicts() {
+        let ok = parse_summary(
+            "pid=7\nexit=0\nflag=\"is_error\":false\n--- result\n{\"is_error\":false,\"result\":\"done\"}\n--- stderr\n\n",
+        );
+        assert_eq!(ok.pid, Some(7));
+        assert_eq!(verdict(&ok, 0), TurnState::Ended);
+        // Too long to read whole: the flag decides.
+        let long = parse_summary(
+            "pid=7\nexit=0\nflag=\"is_error\":false\n--- result\n{\"is_error\":false,\"res\n--- stderr\n\n",
+        );
+        assert!(long.result.is_none());
+        assert_eq!(verdict(&long, 0), TurnState::Ended);
+        // Not logged in (the shape claude printed in the probe).
+        let out = parse_summary(
+            "pid=7\nexit=1\nflag=\"is_error\":true\n--- result\n{\"is_error\":true,\"result\":\"Not logged in · Please run /login\",\"api_error_status\":null}\n--- stderr\n\n",
+        );
+        assert_eq!(
+            verdict(&out, 1),
+            TurnState::Failed("Claude Code said: Not logged in · Please run /login".into())
+        );
+        // A runner failure, with its message.
+        let gone = parse_summary(
+            "pid=7\nexit=127\nflag=\n--- result\n\n--- stderr\nkontext-dispatch: claude is not on the PATH\n",
+        );
+        assert_eq!(
+            verdict(&gone, 127),
+            TurnState::Failed("kontext-dispatch: claude is not on the PATH".into())
+        );
+        // Killed: no exit code written.
+        let killed = parse_summary("pid=7\nexit=\nflag=\n--- result\n\n--- stderr\n\n");
+        assert!(matches!(verdict(&killed, 143), TurnState::Failed(w) if w.contains("143")));
+        // Exit 0 but nothing readable.
+        let empty = parse_summary("pid=7\nexit=0\nflag=\n--- result\n\n--- stderr\n\n");
+        assert!(matches!(verdict(&empty, 0), TurnState::Failed(w) if w.contains("no result")));
+        // A credential in the output never goes further.
+        let leak = parse_summary(
+            "pid=7\nexit=1\nflag=\n--- result\n\n--- stderr\nbad key sk-ant-oat01-secret\n",
+        );
+        assert!(matches!(verdict(&leak, 1), TurnState::Failed(w) if !w.contains("secret")));
     }
-    let outcome = run_turn(project, epic, n);
-    let line = match &outcome {
-        Ok(()) => "ended".to_string(),
-        Err(e) => format!("lost: {}", one_line(&format!("{e:#}"))),
-    };
-    config::write_atomic(&exit, format!("{line}\n").as_bytes())?;
-    eprintln!("turn {n} of {epic}: {line}");
-    drop(lock);
-    Ok(())
-}
-
-fn one_line(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn run_turn(project: &str, epic: &str, n: u32) -> Result<()> {
-    let run = state::read(project)?
-        .remove(epic)
-        .with_context(|| format!("no dispatch of {epic}"))?;
-    let sandbox = run.sandbox.clone().context("the run has no sandbox")?;
-    let (settings, _) = config_of(project)?;
-    let prov = provider::of(&run.service)?;
-    let text = if n <= 1 {
-        first_prompt(project, &run, &settings)
-    } else {
-        resume_prompt(&run)
-    };
-    let conversation = if n <= 1 {
-        None
-    } else {
-        Some(
-            run.conversation
-                .clone()
-                .context("no conversation id to resume (boat prompt never gave one)")?,
-        )
-    };
-    let turn = Turn {
-        sandbox: &sandbox,
-        conversation: conversation.as_deref(),
-        provider: &settings.provider,
-        model: &settings.model,
-        text: &text,
-    };
-    let mut save = |c: &str| {
-        let c = c.to_string();
-        if let Err(e) = state::update(project, epic, |r| {
-            if r.conversation.is_none() {
-                r.conversation = Some(c);
-            }
-        }) {
-            eprintln!("could not save the conversation id: {e:#}");
-        }
-    };
-    prov.prompt(&turn, &mut save)
 }
